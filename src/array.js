@@ -5,11 +5,7 @@ export function normalizeShape( shape ) {
 
 	const dims = Array.isArray( shape ) ? shape : [ shape ];
 
-	if ( dims.length === 0 ) {
-
-		throw new Error( 'tslify: array shape must have at least one dimension.' );
-
-	}
+	// dims.length === 0 is valid — a 0-D field (array0), matching Taichi's ti.field(dtype, shape=()).
 
 	for ( const dim of dims ) {
 
@@ -63,6 +59,14 @@ export function flattenIndex( strides, indices ) {
 
 }
 
+function toIndexNode( value ) {
+
+	// only promote plain JS numbers — an already-built node (e.g. a Loop() counter)
+	// must be used as-is, not re-wrapped via int() (see README's "已知边界" note).
+	return typeof value === 'number' ? int( value ) : value;
+
+}
+
 export function flattenNodeIndex( strides, indices ) {
 
 	if ( indices.length !== strides.length ) {
@@ -73,11 +77,13 @@ export function flattenNodeIndex( strides, indices ) {
 
 	}
 
-	let flat = int( indices[ 0 ] );
+	// start from a neutral node (not indices[0] directly) so a 0-D field — zero indices,
+	// zero strides — still returns a valid constant index instead of reading indices[0]==undefined.
+	let flat = int( 0 );
 
-	for ( let i = 1; i < indices.length; i ++ ) {
+	for ( let i = 0; i < indices.length; i ++ ) {
 
-		flat = flat.add( int( indices[ i ] ).mul( strides[ i ] ) );
+		flat = flat.add( toIndexNode( indices[ i ] ).mul( strides[ i ] ) );
 
 	}
 
@@ -123,6 +129,12 @@ export function arrayN( type, shape ) {
 	};
 
 	return field;
+
+}
+
+export function array0( type ) {
+
+	return arrayN( type, [] );
 
 }
 

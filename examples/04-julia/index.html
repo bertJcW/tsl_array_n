@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>tslify — Julia set</title>
+	<style>
+		body { margin: 0; min-height: 100vh; font-family: system-ui, sans-serif; background: #111; color: #eee; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1rem; padding: 2rem; box-sizing: border-box; }
+		canvas { image-rendering: pixelated; border: 1px solid #333; max-width: 90vw; height: auto; }
+		#status { font-size: 0.95rem; text-align: center; white-space: pre-wrap; }
+		.ok { color: #4ade80; }
+		.err { color: #f87171; }
+	</style>
+</head>
+<body>
+	<canvas id="out" width="512" height="512"></canvas>
+	<div id="status">initializing…</div>
+	<script type="module" src="./main.js"></script>
+</body>
+</html>
