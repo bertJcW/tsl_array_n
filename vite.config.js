@@ -4,7 +4,7 @@ import { fileURLToPath, URL } from 'node:url';
 export default defineConfig( {
 	resolve: {
 		alias: {
-			'tslify': fileURLToPath( new URL( './src/index.js', import.meta.url ) )
+			'tsl_array_n': fileURLToPath( new URL( './src/index.js', import.meta.url ) )
 		}
 	}
 } );

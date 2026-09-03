@@ -1,4 +1,4 @@
-import * as tslify from 'tslify';
+import * as tsl_array_n from 'tsl_array_n';
 import { float, vec3, positionLocal } from 'three/tsl';
 import {
 	Scene,
@@ -20,7 +20,7 @@ function status( text, ok ) {
 
 try {
 
-	const renderer = await tslify.init( { allowFallback: true } );
+	const renderer = await tsl_array_n.init( { allowFallback: true } );
 	status( `backend: ${ renderer.backend?.constructor?.name ?? 'unknown' } — setting up…` );
 
 	const N = 1024;
@@ -28,8 +28,8 @@ try {
 	const softening = 1.0;
 	const dt = 0.08;
 
-	const positions = tslify.arrayN( 'vec3', N );
-	const velocities = tslify.arrayN( 'vec3', N );
+	const positions = tsl_array_n.arrayN( 'vec3', N );
+	const velocities = tsl_array_n.arrayN( 'vec3', N );
 
 	// seed: random points in a sphere, at rest — mutual gravity does the rest.
 	const radius = 25;
@@ -56,16 +56,16 @@ try {
 	positions.fromArray( posSeed );
 	velocities.fromArray( new Float32Array( N * 3 ) ); // zero
 
-	const step = tslify.kernel( N, ( i ) => {
+	const step = tsl_array_n.kernel( N, ( i ) => {
 
 		const myPos = positions( i ).toConst();
 		const acc = vec3( 0, 0, 0 ).toVar();
 
-		tslify.Loop( N, ( { i: j } ) => {
+		tsl_array_n.Loop( N, ( { i: j } ) => {
 
-			tslify.If( j.equal( i ), () => {
+			tsl_array_n.If( j.equal( i ), () => {
 
-				tslify.Continue();
+				tsl_array_n.Continue();
 
 			} );
 
@@ -126,7 +126,7 @@ try {
 
 	status( `backend: ${ renderer.backend?.constructor?.name ?? 'unknown' } — running, N=${ N }`, true );
 
-	window.__tslifyNBodyDebug = { positions, frameCount: () => frame };
+	window.__tsl_array_nNBodyDebug = { positions, frameCount: () => frame };
 
 } catch ( error ) {
 

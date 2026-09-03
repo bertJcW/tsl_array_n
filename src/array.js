@@ -11,7 +11,7 @@ export function normalizeShape( shape ) {
 
 		if ( ! Number.isInteger( dim ) || dim <= 0 ) {
 
-			throw new Error( `tslify: array shape dimensions must be positive integers, got ${ dim }.` );
+			throw new Error( `tsl_array_n: array shape dimensions must be positive integers, got ${ dim }.` );
 
 		}
 
@@ -42,7 +42,7 @@ export function flattenIndex( strides, indices ) {
 	if ( indices.length !== strides.length ) {
 
 		throw new Error(
-			`tslify: expected ${ strides.length } index(es), got ${ indices.length }.`
+			`tsl_array_n: expected ${ strides.length } index(es), got ${ indices.length }.`
 		);
 
 	}
@@ -72,7 +72,7 @@ export function flattenNodeIndex( strides, indices ) {
 	if ( indices.length !== strides.length ) {
 
 		throw new Error(
-			`tslify: expected ${ strides.length } index(es), got ${ indices.length }.`
+			`tsl_array_n: expected ${ strides.length } index(es), got ${ indices.length }.`
 		);
 
 	}

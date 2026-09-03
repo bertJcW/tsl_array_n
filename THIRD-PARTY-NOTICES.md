@@ -1,15 +1,15 @@
 # Third-Party Notices
 
-tslify does not vendor or bundle any third-party source code — the published
+tsl_array_n does not vendor or bundle any third-party source code — the published
 package ships only the files under `src/`. This notice lists the third-party
-packages tslify requires or uses during development, for transparency.
+packages tsl_array_n requires or uses during development, for transparency.
 
 ## Runtime dependency
 
 ### three.js
 
 - **Relationship:** required peer dependency (`three >= 0.180.0`). Not bundled —
-  consumers install their own copy. tslify's `init()` imports `WebGPURenderer`
+  consumers install their own copy. tsl_array_n's `init()` imports `WebGPURenderer`
   from `three/webgpu` at runtime.
 - **License:** MIT
 - **Homepage:** https://threejs.org/
@@ -19,7 +19,7 @@ packages tslify requires or uses during development, for transparency.
 ## Development-only dependency
 
 Used to develop and preview this repository's examples; never published or
-distributed as part of the `tslify` package.
+distributed as part of the `tsl_array_n` package.
 
 ### Vite
 
@@ -32,7 +32,7 @@ distributed as part of the `tslify` package.
 
 ### Taichi Lang
 
-tslify's API (`init`/`field`/`kernel`/`func`) is deliberately modeled after
+tsl_array_n's API (`init`/`field`/`kernel`/`func`) is deliberately modeled after
 [Taichi Lang](https://github.com/taichi-dev/taichi)'s programming model
 (`ti.init`/`ti.field`/`@ti.kernel`/`@ti.func`). No Taichi source code is used —
 this is a credit for the design, not a licensing dependency. Taichi itself is

@@ -1,4 +1,4 @@
-import * as tslify from 'tslify';
+import * as tsl_array_n from 'tsl_array_n';
 
 const pre = document.querySelector( '#status pre' );
 const lines = [];
@@ -14,10 +14,10 @@ function log( label, ok, detail ) {
 
 try {
 
-	const renderer = await tslify.init( { allowFallback: true } );
+	const renderer = await tsl_array_n.init( { allowFallback: true } );
 	log( 'init()', true, `backend: ${ renderer.backend?.constructor?.name ?? 'unknown' }` );
 
-	const field = tslify.array2( 'float', 4, 4 );
+	const field = tsl_array_n.array2( 'float', 4, 4 );
 	log(
 		'array2("float", 4, 4)',
 		field.shape.length === 2 && field.shape[ 0 ] === 4 && field.shape[ 1 ] === 4 && field.count === 16,
@@ -65,7 +65,7 @@ try {
 
 	}
 
-	const nd = tslify.arrayN( 'vec3', [ 2, 3, 4 ] );
+	const nd = tsl_array_n.arrayN( 'vec3', [ 2, 3, 4 ] );
 	log( 'arrayN("vec3", [2,3,4])', nd.count === 24, `shape=[${ nd.shape }] count=${ nd.count }` );
 
 } catch ( error ) {

@@ -1,4 +1,4 @@
-import * as tslify from 'tslify';
+import * as tsl_array_n from 'tsl_array_n';
 import { float } from 'three/tsl';
 
 const pre = document.querySelector( '#status pre' );
@@ -15,7 +15,7 @@ function log( label, ok, detail ) {
 
 try {
 
-	const renderer = await tslify.init( { allowFallback: true } );
+	const renderer = await tsl_array_n.init( { allowFallback: true } );
 	log( 'init()', true, `backend: ${ renderer.backend?.constructor?.name ?? 'unknown' }` );
 
 	// Loop(): a real per-thread, variable-length inner loop — a prefix sum.
@@ -25,16 +25,16 @@ try {
 	// a genuine GPU-side Loop().
 	try {
 
-		const values = tslify.arrayN( 'float', 5 );
+		const values = tsl_array_n.arrayN( 'float', 5 );
 		values.fromArray( [ 1, 2, 3, 4, 5 ] );
 
-		const sums = tslify.arrayN( 'float', 5 );
+		const sums = tsl_array_n.arrayN( 'float', 5 );
 
-		const prefixSum = tslify.kernel( 5, ( idx ) => {
+		const prefixSum = tsl_array_n.kernel( 5, ( idx ) => {
 
 			const sum = float( 0 ).toVar();
 
-			tslify.Loop( idx.add( 1 ), ( { i } ) => {
+			tsl_array_n.Loop( idx.add( 1 ), ( { i } ) => {
 
 				sum.addAssign( values( i ) );
 
@@ -66,21 +66,21 @@ try {
 	// break/continue on iteration 0 would be a degenerate test).
 	try {
 
-		const values = tslify.arrayN( 'float', 5 );
+		const values = tsl_array_n.arrayN( 'float', 5 );
 		values.fromArray( [ 1, 2, 3, 4, 5 ] );
 
-		const oddSum = tslify.arrayN( 'float', 1 );      // sum of odd-index elements only (Continue)
-		const earlyStop = tslify.arrayN( 'float', 1 );   // running sum, stops once it reaches 6 (Break)
+		const oddSum = tsl_array_n.arrayN( 'float', 1 );      // sum of odd-index elements only (Continue)
+		const earlyStop = tsl_array_n.arrayN( 'float', 1 );   // running sum, stops once it reaches 6 (Break)
 
-		const scan = tslify.kernel( 1, ( _unused ) => {
+		const scan = tsl_array_n.kernel( 1, ( _unused ) => {
 
 			const a = float( 0 ).toVar();
 
-			tslify.Loop( 5, ( { i } ) => {
+			tsl_array_n.Loop( 5, ( { i } ) => {
 
-				tslify.If( i.mod( 2 ).equal( 0 ), () => {
+				tsl_array_n.If( i.mod( 2 ).equal( 0 ), () => {
 
-					tslify.Continue();
+					tsl_array_n.Continue();
 
 				} );
 
@@ -92,11 +92,11 @@ try {
 
 			const b = float( 0 ).toVar();
 
-			tslify.Loop( 5, ( { i } ) => {
+			tsl_array_n.Loop( 5, ( { i } ) => {
 
-				tslify.If( b.greaterThanEqual( 6 ), () => {
+				tsl_array_n.If( b.greaterThanEqual( 6 ), () => {
 
-					tslify.Break();
+					tsl_array_n.Break();
 
 				} );
 

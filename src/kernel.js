@@ -34,7 +34,7 @@ export function kernel( shape, fn ) {
 	if ( fn.length !== dims.length ) {
 
 		throw new Error(
-			`tslify: kernel() callback expected ${ dims.length } index parameter(s) for shape [${ dims.join( ', ' ) }], got ${ fn.length }.`
+			`tsl_array_n: kernel() callback expected ${ dims.length } index parameter(s) for shape [${ dims.join( ', ' ) }], got ${ fn.length }.`
 		);
 
 	}

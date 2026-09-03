@@ -1,4 +1,4 @@
-import * as tslify from 'tslify';
+import * as tsl_array_n from 'tsl_array_n';
 import { float } from 'three/tsl';
 
 const statusEl = document.querySelector( '#status' );
@@ -15,15 +15,15 @@ try {
 
 	// offscreen canvas for the renderer — this demo draws its own output via 2D canvas,
 	// it doesn't need the WebGPU canvas visible.
-	const renderer = await tslify.init( { canvas: document.createElement( 'canvas' ), allowFallback: true } );
+	const renderer = await tsl_array_n.init( { canvas: document.createElement( 'canvas' ), allowFallback: true } );
 
 	const width = canvas.width;
 	const height = canvas.height;
 	const maxIter = 100;
 
-	const iterCounts = tslify.array2( 'float', width, height );
+	const iterCounts = tsl_array_n.array2( 'float', width, height );
 
-	// c: the Julia constant, animated each frame — a 0-D field (array0), tslify's
+	// c: the Julia constant, animated each frame — a 0-D field (array0), tsl_array_n's
 	// equivalent of ti.field(dtype, shape=()) / a "uniform" for this purpose.
 	//
 	// KNOWN SANDBOX-ONLY ISSUE: on this dev sandbox's WebGL2-fallback backend, many
@@ -33,9 +33,9 @@ try {
 	// array0 — a single-thread read of the same array0 is fine on its own). Same category
 	// as the earlier Loop()-on-fallback finding that turned out not to reproduce on real
 	// WebGPU — needs the same real-hardware check before trusting this animation.
-	const c = tslify.array0( 'vec2' );
+	const c = tsl_array_n.array0( 'vec2' );
 
-	const juliaKernel = tslify.kernel( iterCounts.shape, ( x, y ) => {
+	const juliaKernel = tsl_array_n.kernel( iterCounts.shape, ( x, y ) => {
 
 		// map pixel -> complex plane [-1.5, 1.5]
 		const zx = x.toFloat().div( width ).mul( 3 ).sub( 1.5 ).toVar();
@@ -43,11 +43,11 @@ try {
 		const count = float( 0 ).toVar();
 		const cVal = c(); // read once per invocation — re-read fresh on every dispatch of this compiled kernel
 
-		tslify.Loop( maxIter, () => {
+		tsl_array_n.Loop( maxIter, () => {
 
-			tslify.If( zx.mul( zx ).add( zy.mul( zy ) ).greaterThan( 4 ), () => {
+			tsl_array_n.If( zx.mul( zx ).add( zy.mul( zy ) ).greaterThan( 4 ), () => {
 
-				tslify.Break();
+				tsl_array_n.Break();
 
 			} );
 

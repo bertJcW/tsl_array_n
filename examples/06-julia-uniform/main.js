@@ -1,4 +1,4 @@
-import * as tslify from 'tslify';
+import * as tsl_array_n from 'tsl_array_n';
 import { float } from 'three/tsl';
 
 const statusEl = document.querySelector( '#status' );
@@ -14,33 +14,33 @@ function status( text, ok ) {
 try {
 
 	// offscreen canvas for the renderer — this demo draws its own output via 2D canvas.
-	const renderer = await tslify.init( { canvas: document.createElement( 'canvas' ), allowFallback: true } );
+	const renderer = await tsl_array_n.init( { canvas: document.createElement( 'canvas' ), allowFallback: true } );
 
 	const width = canvas.width;
 	const height = canvas.height;
 	const maxIter = 120;
 
-	const iterCounts = tslify.array2( 'float', width, height );
+	const iterCounts = tsl_array_n.array2( 'float', width, height );
 
 	// Same idea as examples/04-julia (an animated Julia constant), but this time via
-	// tslify.uniform() instead of array0() — two real WebGPU uniforms, GLSL-style. No
+	// tsl_array_n.uniform() instead of array0() — two real WebGPU uniforms, GLSL-style. No
 	// callable-element step needed: cReal/cImag ARE the node, used directly in expressions.
 	// Updated via .value = x (not .fromArray()).
-	const cReal = tslify.uniform( -0.4 );
-	const cImag = tslify.uniform( 0.6 );
+	const cReal = tsl_array_n.uniform( -0.4 );
+	const cImag = tsl_array_n.uniform( 0.6 );
 
-	const juliaKernel = tslify.kernel( iterCounts.shape, ( x, y ) => {
+	const juliaKernel = tsl_array_n.kernel( iterCounts.shape, ( x, y ) => {
 
 		// map pixel -> complex plane [-1.5, 1.5]
 		const zx = x.toFloat().div( width ).mul( 3 ).sub( 1.5 ).toVar();
 		const zy = y.toFloat().div( height ).mul( 3 ).sub( 1.5 ).toVar();
 		const count = float( 0 ).toVar();
 
-		tslify.Loop( maxIter, () => {
+		tsl_array_n.Loop( maxIter, () => {
 
-			tslify.If( zx.mul( zx ).add( zy.mul( zy ) ).greaterThan( 4 ), () => {
+			tsl_array_n.If( zx.mul( zx ).add( zy.mul( zy ) ).greaterThan( 4 ), () => {
 
-				tslify.Break();
+				tsl_array_n.Break();
 
 			} );
 

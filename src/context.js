@@ -13,7 +13,7 @@ export async function init( options = {} ) {
 	if ( ! isSupported() ) {
 
 		throw new Error(
-			'tslify requires WebGPU, but navigator.gpu is not available in this browser. ' +
+			'tsl_array_n requires WebGPU, but navigator.gpu is not available in this browser. ' +
 			'Use a recent Chrome or Edge over https:// or http://localhost.'
 		);
 
@@ -50,7 +50,7 @@ export async function init( options = {} ) {
 	if ( ! allowFallback && target.backend?.isWebGPUBackend !== true ) {
 
 		throw new Error(
-			'tslify: this browser reports navigator.gpu, but the WebGPU adapter request failed and three.js ' +
+			'tsl_array_n: this browser reports navigator.gpu, but the WebGPU adapter request failed and three.js ' +
 			`fell back to "${ target.backend?.constructor?.name ?? 'unknown backend' }". GPU compute needs a real ` +
 			'WebGPU backend. Pass { allowFallback: true } to init() to use this renderer anyway (compute will not work).'
 		);
@@ -67,7 +67,7 @@ export function getRenderer() {
 
 	if ( ! currentRenderer ) {
 
-		throw new Error( 'tslify: call init() before using field() / kernel().' );
+		throw new Error( 'tsl_array_n: call init() before using field() / kernel().' );
 
 	}
 

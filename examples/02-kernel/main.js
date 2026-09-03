@@ -1,4 +1,4 @@
-import * as tslify from 'tslify';
+import * as tsl_array_n from 'tsl_array_n';
 
 const pre = document.querySelector( '#status pre' );
 const lines = [];
@@ -14,19 +14,19 @@ function log( label, ok, detail ) {
 
 try {
 
-	const renderer = await tslify.init( { allowFallback: true } );
+	const renderer = await tsl_array_n.init( { allowFallback: true } );
 	log( 'init()', true, `backend: ${ renderer.backend?.constructor?.name ?? 'unknown' }` );
 
-	const grid = tslify.array2( 'float', 4, 4 );
+	const grid = tsl_array_n.array2( 'float', 4, 4 );
 	const width = grid.shape[ 0 ];
 
 	// func(): small device-side helper, forwarded to Fn() — usable from inside a kernel.
 	// NOTE: Fn()-wrapped functions always receive a single destructured array param,
 	// not separate positional params — see README's "已知边界" note on func().
-	const flatten = tslify.func( ( [ x, y ] ) => x.add( y.mul( width ) ) );
+	const flatten = tsl_array_n.func( ( [ x, y ] ) => x.add( y.mul( width ) ) );
 
 	// kernel(): auto-parallel over the field's full 2D shape, i/j come back already unflattened
-	const fill = tslify.kernel( grid.shape, ( x, y ) => {
+	const fill = tsl_array_n.kernel( grid.shape, ( x, y ) => {
 
 		grid( x, y ).assign( flatten( x, y ).toFloat() );
 
@@ -59,11 +59,11 @@ try {
 	}
 
 	// "case A" from the design discussion: dispatch over just one axis of a 2D field
-	const row = tslify.array2( 'float', 4, 4 );
+	const row = tsl_array_n.array2( 'float', 4, 4 );
 
 	try {
 
-		const fillFirstRow = tslify.kernel( row.shape[ 0 ], ( x ) => {
+		const fillFirstRow = tsl_array_n.kernel( row.shape[ 0 ], ( x ) => {
 
 			row( x, 0 ).assign( x.toFloat() );
 
@@ -88,7 +88,7 @@ try {
 
 	try {
 
-		tslify.kernel( grid.shape, ( onlyOneParam ) => {} ); // eslint-disable-line no-unused-vars
+		tsl_array_n.kernel( grid.shape, ( onlyOneParam ) => {} ); // eslint-disable-line no-unused-vars
 		log( 'kernel() rejects fn arity mismatch', false, 'expected a throw' );
 
 	} catch {
