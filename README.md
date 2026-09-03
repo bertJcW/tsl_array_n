@@ -60,3 +60,9 @@ npm run dev
 ## 关于 fluxflow
 
 这个库只负责把 TSL 的并行计算能力封装得像 Taichi 一样好用，不绑定任何应用领域。基于它做流体解算的库会单独立项，叫 **fluxflow**。
+
+## License
+
+[MIT](LICENSE) © 2026 bert wang
+
+第三方依赖的许可证信息见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
