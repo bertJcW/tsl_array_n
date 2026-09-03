@@ -1,0 +1,34 @@
+{
+  "name": "tslify",
+  "version": "0.0.1",
+  "description": "Taichi-inspired ergonomic wrapper over three.js TSL for GPU parallel compute in the browser.",
+  "type": "module",
+  "main": "src/index.js",
+  "module": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "dev": "vite"
+  },
+  "keywords": [
+    "three.js",
+    "tsl",
+    "webgpu",
+    "gpgpu",
+    "compute",
+    "taichi",
+    "parallel"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "three": ">=0.180.0"
+  },
+  "devDependencies": {
+    "three": "^0.185.1",
+    "vite": "^8.2.2"
+  }
+}
