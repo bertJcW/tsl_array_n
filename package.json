@@ -12,7 +12,8 @@
     "src"
   ],
   "scripts": {
-    "dev": "vite"
+    "dev": "vite",
+    "test": "vitest run"
   },
   "keywords": [
     "three.js",
@@ -29,6 +30,7 @@
   },
   "devDependencies": {
     "three": "^0.185.1",
-    "vite": "^8.2.2"
+    "vite": "^8.2.2",
+    "vitest": "^5.0.0"
   }
 }
