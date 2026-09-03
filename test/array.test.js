@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeShape, computeStrides, flattenIndex, arrayN, array2 } from '../src/array.js';
+import { normalizeShape, computeStrides, flattenIndex, arrayN, array0, array2 } from '../src/array.js';
 
 describe( 'normalizeShape', () => {
 
@@ -28,9 +28,9 @@ describe( 'normalizeShape', () => {
 
 	} );
 
-	it( 'rejects an empty shape', () => {
+	it( 'accepts an empty shape as 0-D (array0)', () => {
 
-		expect( () => normalizeShape( [] ) ).toThrow();
+		expect( normalizeShape( [] ) ).toEqual( [] );
 
 	} );
 
@@ -167,6 +167,50 @@ describe( 'arrayN / array2 — callable field', () => {
 		const field = array2( 'float', 4, 8 );
 		expect( () => field( 1 ) ).toThrow();
 		expect( () => field( 1, 2, 3 ) ).toThrow();
+
+	} );
+
+} );
+
+describe( 'array0 — 0-D field (ti.field(dtype, shape=()) equivalent)', () => {
+
+	it( 'has an empty shape and a count of 1', () => {
+
+		const scalar = array0( 'float' );
+		expect( scalar.shape ).toEqual( [] );
+		expect( scalar.count ).toBe( 1 );
+
+	} );
+
+	it( '.at() takes zero indices and returns 0', () => {
+
+		const scalar = array0( 'float' );
+		expect( scalar.at() ).toBe( 0 );
+
+	} );
+
+	it( 'is callable with zero arguments and builds a GPU element node', () => {
+
+		const scalar = array0( 'vec2' );
+		const element = scalar();
+		expect( element ).toBeDefined();
+		expect( element.isNode ).toBe( true );
+
+	} );
+
+	it( 'rejects being called with any index', () => {
+
+		const scalar = array0( 'float' );
+		expect( () => scalar( 0 ) ).toThrow();
+		expect( () => scalar.at( 0 ) ).toThrow();
+
+	} );
+
+	it( 'fromArray()/toArray() still work on a single element', () => {
+
+		const scalar = array0( 'float' );
+		expect( typeof scalar.fromArray ).toBe( 'function' );
+		expect( typeof scalar.toArray ).toBe( 'function' );
 
 	} );
 
