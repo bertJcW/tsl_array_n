@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeShape, computeStrides, flattenIndex } from '../src/array.js';
+import { normalizeShape, computeStrides, flattenIndex, arrayN, array2 } from '../src/array.js';
 
 describe( 'normalizeShape', () => {
 
@@ -124,6 +124,49 @@ describe( 'flattenIndex', () => {
 		const strides = computeStrides( [ 4, 8 ] );
 		expect( () => flattenIndex( strides, [ 1 ] ) ).toThrow();
 		expect( () => flattenIndex( strides, [ 1, 2, 3 ] ) ).toThrow();
+
+	} );
+
+} );
+
+describe( 'arrayN / array2 — callable field', () => {
+
+	it( 'returns a callable function, not a plain object', () => {
+
+		const field = arrayN( 'float', 4 );
+		expect( typeof field ).toBe( 'function' );
+
+	} );
+
+	it( 'still exposes shape/count/type/node/at/toArray/fromArray', () => {
+
+		const field = array2( 'float', 4, 8 );
+
+		expect( field.shape ).toEqual( [ 4, 8 ] );
+		expect( field.count ).toBe( 32 );
+		expect( field.type ).toBe( 'float' );
+		expect( field.node ).toBeDefined();
+		expect( field.at( 3, 7 ) ).toBe( 3 + 7 * 4 );
+		expect( typeof field.toArray ).toBe( 'function' );
+		expect( typeof field.fromArray ).toBe( 'function' );
+
+	} );
+
+	it( 'calling the field itself builds a GPU element node (no renderer needed to construct)', () => {
+
+		const field = array2( 'float', 4, 8 );
+		const element = field( 1, 2 );
+
+		expect( element ).toBeDefined();
+		expect( element.isNode ).toBe( true );
+
+	} );
+
+	it( 'rejects calling the field with the wrong number of indices', () => {
+
+		const field = array2( 'float', 4, 8 );
+		expect( () => field( 1 ) ).toThrow();
+		expect( () => field( 1, 2, 3 ) ).toThrow();
 
 	} );
 

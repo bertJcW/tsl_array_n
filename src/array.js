@@ -1,4 +1,4 @@
-import { instancedArray } from 'three/tsl';
+import { instancedArray, int } from 'three/tsl';
 import { getRenderer } from './context.js';
 
 export function normalizeShape( shape ) {
@@ -63,6 +63,28 @@ export function flattenIndex( strides, indices ) {
 
 }
 
+export function flattenNodeIndex( strides, indices ) {
+
+	if ( indices.length !== strides.length ) {
+
+		throw new Error(
+			`tslify: expected ${ strides.length } index(es), got ${ indices.length }.`
+		);
+
+	}
+
+	let flat = int( indices[ 0 ] );
+
+	for ( let i = 1; i < indices.length; i ++ ) {
+
+		flat = flat.add( int( indices[ i ] ).mul( strides[ i ] ) );
+
+	}
+
+	return flat;
+
+}
+
 export function arrayN( type, shape ) {
 
 	const dims = normalizeShape( shape );
@@ -71,37 +93,36 @@ export function arrayN( type, shape ) {
 
 	const node = instancedArray( count, type );
 
-	return {
+	// callable: field( i, j, ... ) -> the GPU element at that (node-valued) index,
+	// for use inside kernel()/func() bodies.
+	const field = ( ...indices ) => node.element( flattenNodeIndex( strides, indices ) );
 
-		shape: dims,
-		count,
-		type,
-		node,
+	field.shape = dims;
+	field.count = count;
+	field.type = type;
+	field.node = node;
 
-		at( ...indices ) {
+	// CPU-side flat index math (plain numbers) — distinct from calling field(...) itself.
+	field.at = ( ...indices ) => flattenIndex( strides, indices );
 
-			return flattenIndex( strides, indices );
+	field.toArray = () => {
 
-		},
+		return getRenderer().getArrayBufferAsync( node.value ).then( ( arrayBuffer ) => {
 
-		toArray() {
+			return new node.value.array.constructor( arrayBuffer );
 
-			return getRenderer().getArrayBufferAsync( node.value ).then( ( arrayBuffer ) => {
-
-				return new node.value.array.constructor( arrayBuffer );
-
-			} );
-
-		},
-
-		fromArray( data ) {
-
-			node.value.array.set( data );
-			node.value.needsUpdate = true;
-
-		}
+		} );
 
 	};
+
+	field.fromArray = ( data ) => {
+
+		node.value.array.set( data );
+		node.value.needsUpdate = true;
+
+	};
+
+	return field;
 
 }
 
