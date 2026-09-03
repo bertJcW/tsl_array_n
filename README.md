@@ -20,18 +20,27 @@ TSL 已经能写 GPU 计算（`Fn` + `.compute()` + `instancedArray`），但原
 
 ## 现状：`init()`
 
-```js
-import { init } from 'tslify';
+推荐用 `import * as tslify` 这种命名空间写法调用（跟 `import * as THREE from 'three'` 一致），避免和其它包的同名导出（`init`、`field` 之类很通用的名字）冲突：
 
-const renderer = await init(); // 检测 navigator.gpu、创建 WebGPURenderer、挂到 document.body
+```js
+import * as tslify from 'tslify';
+
+const renderer = await tslify.init(); // 检测 navigator.gpu、创建 WebGPURenderer、挂到 document.body
+```
+
+也支持 default import 和具名 import：
+
+```js
+import tslify from 'tslify';           // tslify.init()
+import { init } from 'tslify';         // init()（更容易和别的包撞名，不太推荐）
 ```
 
 也可以传入已有的 canvas / 容器 / renderer：
 
 ```js
-await init( { container: document.querySelector( '#app' ) } );
-await init( { canvas: myCanvas } );
-await init( { renderer: myExistingWebGPURenderer } );
+await tslify.init( { container: document.querySelector( '#app' ) } );
+await tslify.init( { canvas: myCanvas } );
+await tslify.init( { renderer: myExistingWebGPURenderer } );
 ```
 
 ## 开发
