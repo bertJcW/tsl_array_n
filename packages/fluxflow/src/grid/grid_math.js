@@ -116,15 +116,19 @@ export function vectorGradient2( data, gridSpacing, i, j, shape ) {
 	const gradX = vec2( right.x.sub( left.x ), up.x.sub( down.x ) ).mul( 0.5 ).div( gridSpacing );
 	const gradY = vec2( right.y.sub( left.y ), up.y.sub( down.y ) ).mul( 0.5 ).div( gridSpacing );
 
-	// NOTE: whether mat2(a,b,c,d)'s element fill order (row-major vs
-	// column-major) matches between Taichi's tm.mat2 and TSL's mat2 hasn't
-	// been numerically verified -- this is a direct translation of the
-	// source's argument order. Before relying on this, run it live on an
-	// asymmetric vector field (e.g. (2x+5y, 0) -- a symmetric field can't
-	// reveal a transpose) and check whether the Jacobian comes out transposed.
+	// CONFIRMED on real WebGPU (examples/00-grid-math/, asymmetric test field
+	// (2x+5y, 0)): TSL's mat2(a,b,c,d) fills column-major (column0=(a,b),
+	// column1=(c,d)), unlike Taichi's tm.mat2(a,b,c,d), which is row-major
+	// (row0=(a,b), row1=(c,d)) -- a direct argument-order translation of the
+	// source therefore produced a transposed Jacobian (verified: got
+	// J.(1,0)=(2,5) and J.(0,1)=(0,0) instead of the correct (2,0) and
+	// (5,0)). Fixed by swapping the middle two arguments, so each *column*
+	// of the constructed mat2 holds one direction's partial derivatives of
+	// both components -- column0 = (dfx/dx, dfy/dx), column1 = (dfx/dy, dfy/dy) --
+	// which is what makes J.direction produce the correct directional derivative.
 	return mat2(
-		gradX.x, gradX.y,
-		gradY.x, gradY.y
+		gradX.x, gradY.x,
+		gradX.y, gradY.y
 	);
 
 }

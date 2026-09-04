@@ -163,30 +163,31 @@ try {
 	}
 
 	// ------------------------------------------------------------
-	// SDF heatmap: warm color inside, fading to cool color outside based on
-	// distance, with a bright highlighted contour near the boundary (d~=0)
+	// SDF heatmap, grayscale: black deep inside the shape, fading through
+	// gray to white far outside, with a bright white contour right at the
+	// boundary (d~=0)
 
 	const HEATMAP_CELLS = 80;
 	const cellSize = canvas.width / HEATMAP_CELLS;
 
 	function sdfColor( d ) {
 
-		if ( Math.abs( d ) < 0.06 ) return '#fef08a'; // boundary contour line
+		if ( Math.abs( d ) < 0.06 ) return '#ffffff'; // boundary contour line
 
 		if ( d < 0 ) {
 
 			const t = Math.min( 1, - d / 1.5 );
-			const r = Math.round( 120 + 100 * t );
-			const g = Math.round( 40 + 20 * t );
-			return `rgb(${ r},${ g },40)`;
+			const v = Math.round( 90 * ( 1 - t ) );
+			return `rgb(${ v },${ v },${ v })`;
 
 		}
 
+		// capped below pure white (unlike the inside branch, which does go to
+		// true black) so the white particle trails flying through this region
+		// stay visible against it
 		const t = Math.min( 1, d / 4 );
-		const r = Math.round( 10 + 10 * t );
-		const g = Math.round( 20 + 60 * ( 1 - t ) );
-		const b = Math.round( 40 + 150 * ( 1 - t ) );
-		return `rgb(${ r },${ g },${ b })`;
+		const v = Math.round( 90 + 100 * t );
+		return `rgb(${ v },${ v },${ v })`;
 
 	}
 
@@ -270,7 +271,7 @@ try {
 				const [ x1, y1 ] = worldToCanvas( ...p.trail[ i ] );
 				const alpha = ( i / p.trail.length ) * 0.6;
 
-				ctx.strokeStyle = `rgba(210,235,255,${ alpha })`;
+				ctx.strokeStyle = `rgba(255,255,255,${ alpha })`;
 				ctx.beginPath();
 				ctx.moveTo( x0, y0 );
 				ctx.lineTo( x1, y1 );

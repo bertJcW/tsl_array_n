@@ -1,20 +1,22 @@
-// Known limitation (unrelated to this port's own code): running in this
-// sandbox environment (no real WebGPU adapter, init() falls back to
-// WebGLBackend), the three tests below currently all read back 0 -- already
-// isolated via a few minimal-reproduction variants: assigning a constant in
-// a single-thread kernel writes back correctly (ruling out "shape=1 kernels
-// just don't work at all"); the problem is specifically that "reading a
-// different field that already has data, from inside a kernel" doesn't
-// read back the right value on this fallback backend at all -- regardless
-// of whether that other field's data was written via fromArray() or by
-// another kernel, both read back as 0/empty the same way. This is the same
-// class of environment limitation as two fallback-only issues tsl_array_n
-// has already hit historically (the Loop() counter one, and the array0
-// multi-thread shared-read one), just with a narrower, more basic trigger
-// condition -- a third instance found during this port. As with the
-// previous two, this hasn't been confirmed on real WebGPU hardware yet --
-// whether the actual numbers are right needs a run on a real WebGPU
-// environment to confirm.
+// CONFIRMED on real WebGPU: all three tests below run correctly on a real
+// WebGPUBackend (init() reports "backend: WebGPUBackend"). In the dev
+// sandbox (no real WebGPU adapter, init() falls back to WebGLBackend), the
+// first two tests read back correct values but the third used to read back
+// zeros -- isolated at the time to "reading a different field that already
+// has data, from inside a kernel" not working on that fallback backend
+// (regardless of whether the other field's data came from fromArray() or
+// another kernel). Real hardware confirms this was indeed the fourth
+// instance of a fallback-only limitation tsl_array_n has hit (after the
+// Loop() counter, array0 multi-thread shared-read, and this port's own
+// GPU-round-trip self-touch case in examples/02-flow-around-shape/), not a
+// bug in this port's code.
+//
+// The mat2 ordering question this third test was actually designed to
+// answer turned out to be a real bug, not a fallback artifact: it read back
+// J.(1,0)=(2,5), J.(0,1)=(0,0) instead of the expected (2,0) and (5,0) --
+// confirming TSL's mat2() fills column-major where the direct translation
+// of Taichi's source assumed row-major. Fixed in grid_math.js's
+// vectorGradient2 (see the comment there); this test is now green.
 import * as tsl_array_n from 'tsl_array_n';
 import { grid } from 'fluxflow';
 import { vec2, int } from 'three/tsl';
