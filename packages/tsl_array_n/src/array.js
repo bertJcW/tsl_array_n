@@ -62,7 +62,7 @@ export function flattenIndex( strides, indices ) {
 function toIndexNode( value ) {
 
 	// only promote plain JS numbers — an already-built node (e.g. a Loop() counter)
-	// must be used as-is, not re-wrapped via int() (see README's "已知边界" note).
+	// must be used as-is, not re-wrapped via int() (see README's "Known limitations" note).
 	return typeof value === 'number' ? int( value ) : value;
 
 }
