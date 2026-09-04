@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>fluxflow — noise</title>
+	<style>
+		body { margin: 0; font-family: system-ui, sans-serif; background: #0a0a0f; color: #eee; display: flex; flex-direction: column; align-items: center; gap: 1rem; padding: 1.5rem; box-sizing: border-box; }
+		h1 { font-size: 1rem; font-weight: 600; margin: 0; color: #9ca3af; }
+		.row { display: flex; gap: 1.5rem; flex-wrap: wrap; justify-content: center; }
+		figure { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 0.4rem; }
+		canvas { border-radius: 6px; image-rendering: pixelated; }
+		figcaption { font-size: 0.8rem; color: #9ca3af; }
+		#status { font-size: 0.8rem; color: #6b7280; white-space: pre-wrap; text-align: center; max-width: 640px; line-height: 1.5; }
+		#status .ok { color: #4ade80; }
+		#status .err { color: #f87171; }
+	</style>
+</head>
+<body>
+	<h1>fluxflow — noise/noise.js (ported from WebGL-Noise)</h1>
+	<div class="row">
+		<figure>
+			<canvas id="perlin" width="160" height="160"></canvas>
+			<figcaption>perlinNoise3d</figcaption>
+		</figure>
+		<figure>
+			<canvas id="simplex" width="160" height="160"></canvas>
+			<figcaption>simplexNoise3d</figcaption>
+		</figure>
+		<figure>
+			<canvas id="cellular" width="160" height="160"></canvas>
+			<figcaption>cellular3d (F1)</figcaption>
+		</figure>
+	</div>
+	<div id="status">initializing…</div>
+	<script type="module" src="./main.js"></script>
+</body>
+</html>

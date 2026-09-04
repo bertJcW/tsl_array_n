@@ -3,8 +3,9 @@
 fluxflow does not vendor or bundle any third-party source code as a runtime
 dependency — the published package would ship only the files under `src/`.
 This notice covers two things: (1) third-party packages fluxflow requires or
-uses during development, and (2) the provenance of `src/grid/`, which is a
-port of code from another project, not written from scratch.
+uses during development, and (2) the provenance of `src/grid/` and
+`src/noise/`, both of which are ports of code from other projects, not
+written from scratch.
 
 ## Runtime dependency
 
@@ -91,11 +92,13 @@ own `THIRD-PARTY-NOTICES.txt` lists under this same upstream):
 - **Source:** `D:\OneDrive\04_lib_fluxflow` (private, same author, separate repository)
 - **License:** Apache License 2.0
 
-All of `src/grid/` is ported from that project's `grid/` folder (the five
-files above, plus `array_utils.py`, `level_set_utils.py`, and
-`grid_blocked_boundary_condition_solver2.py`, which are not separately
-attributed to `fluid-engine-dev` in that project's own notices and are treated
-here as that project's own original work). `src/grid/polygon_sdf.js` and
+All of `src/grid/` and `src/noise/` is ported from that project (the five
+`grid/` files above, plus `array_utils.py`, `level_set_utils.py`,
+`grid_blocked_boundary_condition_solver2.py`, and `noise/noise.py` — the
+first three of those are not separately attributed to `fluid-engine-dev` in
+that project's own notices and are treated here as that project's own
+original work; `noise/noise.py` has its own separate upstream, WebGL-Noise,
+covered in its own section below). `src/grid/polygon_sdf.js` and
 `src/grid/svg_utils.js` have no Python counterpart — they're new code written
 for this port to replace two Python-only dependencies (`shapely`, `svg.path`)
 that have no browser equivalent; see `sdf_collider2.js`'s header comment for
@@ -277,6 +280,57 @@ the approach.
 >       of your accepting any such warranty or additional liability.
 >
 >    END OF TERMS AND CONDITIONS
+
+## Provenance of `src/noise/`
+
+`src/noise/noise.js` is a JavaScript/TSL port of `noise/noise.py` from the
+same Python `fluxflow` project referenced above (Apache License 2.0). That
+file's own header comment records that it is itself ported from
+**WebGL-Noise**, under the **MIT License**:
+
+```
+WebGL-Noise (C++/GLSL, MIT, Ashima Arts & Stefan Gustavson)
+  -> fluxflow (Python/Taichi, Apache-2.0, bert wang)
+    -> fluxflow (this package, JS/TSL, Apache-2.0, bert wang)
+```
+
+### WebGL-Noise (MIT) — via fluxflow (Python)
+
+- **Source:** https://github.com/ashima/webgl-noise
+- **License:** MIT
+
+Files in this package derived from WebGL-Noise (through the Python
+`fluxflow` project's `noise/noise.py`):
+
+- `src/noise/noise.js`
+
+> Copyright (C) 2011 by Ashima Arts (Simplex noise)
+>
+> Copyright (C) 2011-2016 by Stefan Gustavson (Classic noise and others)
+>
+> Permission is hereby granted, free of charge, to any person obtaining a copy
+> of this software and associated documentation files (the "Software"), to deal
+> in the Software without restriction, including without limitation the rights
+> to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+> copies of the Software, and to permit persons to whom the Software is
+> furnished to do so, subject to the following conditions:
+>
+> The above copyright notice and this permission notice shall be included in
+> all copies or substantial portions of the Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+> FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+> AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+> LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+> OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+> THE SOFTWARE.
+
+This file is also, like everything under `src/grid/`, a derivative work of
+the Python `fluxflow` project itself (Apache License 2.0) — see that
+project's own license text already reproduced above, under "fluxflow
+(Python) (Apache License 2.0)"; that section's terms apply here too, this
+isn't repeated a second time.
 
 ## Design inspiration (not a code dependency)
 
