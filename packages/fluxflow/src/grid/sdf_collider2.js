@@ -1,11 +1,14 @@
-// 移植自 sdf_collider2.py。工厂函数风格，跟这次移植的其它模块一致。
+// Ported from sdf_collider2.py. Factory-function style, consistent with the
+// rest of this port.
 //
-// addShapelyGeometry/addSvg 的替代实现（不用 shapely/svg.path，零新依赖）见文件头部
-// polygon_sdf.js / svg_utils.js 的注释——多边形几何用手写的 point-in-polygon +
-// 点到边界距离，多个形状合并用 SDF pointwise min，SVG 解析用浏览器原生
-// SVGPathElement API。这里 addPolygon()/addPolygons()/addSvg() 是新起的名字
-// （不叫 addShapelyGeometry，因为压根不涉及 shapely 或任何"geometry 对象"，
-// 就是普通的顶点数组）。
+// The replacement for addShapelyGeometry/addSvg (no shapely/svg.path, zero
+// new dependencies) is described in polygon_sdf.js's / svg_utils.js's header
+// comments -- polygon geometry uses hand-rolled point-in-polygon + distance
+// to boundary, multiple shapes are combined via SDF pointwise min, and SVG
+// parsing uses the browser's native SVGPathElement API. addPolygon()/
+// addPolygons()/addSvg() are new names here (not addShapelyGeometry, since
+// there's no shapely or any "geometry object" involved at all -- just plain
+// vertex arrays).
 
 import { vec2 } from 'three/tsl';
 import { createCellCenteredScalarGrid2 } from './grid_data2.js';
@@ -19,43 +22,51 @@ export function createSDFStaticCollider2( resolutionX, resolutionY, gridSpacingX
 
 	const grid = createCellCenteredScalarGrid2( resolutionX, resolutionY, gridSpacingX, gridSpacingY, originX, originY );
 
-	// cell-centered 网格的 CPU 侧原点——跟 grid.dataOrigin（TSL 节点）数值上必须一致，
-	// 但纯 JS 场景（addPolygons 的逐格 CPU 循环）不方便读节点的值，独立算一份
+	// CPU-side origin of the cell-centered grid -- must numerically match
+	// grid.dataOrigin (a TSL node), but a plain-JS context (addPolygons'
+	// per-cell CPU loop) can't conveniently read a node's value, so it's
+	// computed independently here
 	const originXCpu = originX + 0.5 * gridSpacingX;
 	const originYCpu = originY + 0.5 * gridSpacingY;
 
-	// 在 kernel 里用 grid_math 的通用双线性采样，直接复用，不重复写插值逻辑
+	// Reuses grid_math's general bilinear sampling directly inside kernels,
+	// instead of duplicating the interpolation logic
 	function sample( pos ) {
 
 		return collocatedValueAtPosition2( grid.data, grid.gridSpacing, grid.dataOrigin, pos, grid.resolution );
 
 	}
 
-	// SDF 在任意连续位置的梯度，给 no-flux 投影求法向量用；用 bilinearGradientAtPosition2
-	// （对双线性插值公式解析求导，精确对应 sample() 的返回值），不是会额外做一次跨格
-	// 混合的 scalarGradientAtPosition2
+	// Gradient of the SDF at an arbitrary continuous position, used to get a
+	// normal vector for no-flux projection; uses bilinearGradientAtPosition2
+	// (an analytic derivative of the bilinear interpolation formula, exactly
+	// matching sample()'s return value), not scalarGradientAtPosition2,
+	// which additionally blends across neighboring cells
 	function gradient( pos ) {
 
 		return bilinearGradientAtPosition2( grid.data, grid.gridSpacing, grid.dataOrigin, pos, grid.resolution );
 
 	}
 
-	// 格子索引版本的 inside 判断，给 marker 用（sdf<0 视为在 collider 内部）
+	// Grid-index version of the inside check, used for markers (sdf<0 counts
+	// as inside the collider)
 	function isInside( i, j ) {
 
 		return grid.data( i, j ).lessThan( 0 );
 
 	}
 
-	// static collider 速度恒为 0
+	// A static collider's velocity is always zero
 	function velocityAt( /* point */ ) {
 
 		return vec2( 0 );
 
 	}
 
-	// 把若干多边形（[[x,y],...] 顶点数组）栅格化成 SDF、写进 grid.data——对应源码
-	// addShapelyGeometry 里 CPU 端逐格算距离、算完整批一次性 from_numpy 上传的做法
+	// Rasterizes a set of polygons ([[x,y],...] vertex arrays) into an SDF
+	// and writes it into grid.data -- corresponds to the source's
+	// addShapelyGeometry computing the distance per-cell on the CPU side and
+	// uploading it in one batch via from_numpy
 	function addPolygons( polygons ) {
 
 		const [ nx, ny ] = grid.resolution;
@@ -92,7 +103,7 @@ export function createSDFStaticCollider2( resolutionX, resolutionY, gridSpacingX
 
 	return {
 		grid,
-		frictionCoefficient: DEFAULT_FRICTION, // 普通可变属性，collider.frictionCoefficient = x 直接改
+		frictionCoefficient: DEFAULT_FRICTION, // plain mutable property, just do collider.frictionCoefficient = x
 		clear: grid.clear,
 		sample, gradient, isInside, velocityAt,
 		addPolygon, addPolygons, addSvg
@@ -100,24 +111,34 @@ export function createSDFStaticCollider2( resolutionX, resolutionY, gridSpacingX
 
 }
 
-// 运动的刚体 collider：跟 SDFStaticCollider2 共用网格/sample/gradient/isInside，
-// 只是 velocityAt 按刚体运动学算，并提供 update(dt)——只有真的在动（线速度或角速度
-// 不为 0）才重新摆放几何、重新栅格化 SDF。
+// A moving rigid-body collider: shares the grid/sample/gradient/isInside
+// from SDFStaticCollider2, but computes velocityAt from rigid-body
+// kinematics and provides update(dt) -- geometry only gets re-posed and the
+// SDF only gets re-rasterized when it's actually moving (nonzero linear or
+// angular velocity).
 //
-// geometryPolygon：初始几何形状，[[x,y],...] 顶点数组（对应源码的 shapely geometry
-// 参数）。linearVelocityXY：[vx,vy] 普通数组，不是 TSL 节点——运动学积分
-// （currentPosition/currentAngle 的更新）是纯 CPU 侧逐帧累加，用节点没有意义。
+// geometryPolygon: the initial shape, a [[x,y],...] vertex array
+// (corresponds to the source's shapely geometry argument). linearVelocityXY:
+// a plain [vx,vy] array, not a TSL node -- the kinematic integration
+// (updating currentPosition/currentAngle) is a plain per-frame CPU
+// accumulation, where a node would serve no purpose.
 //
-// 已知的架构性限制（不是这次移植引入的新问题，是 Taichi/TSL 两边"图构建一次、
-// 之后重复 dispatch"这个执行模型共有的边界）：如果未来某个 kernel 在构建时
-// （比如 grid_blocked_boundary_condition_solver2.js 的 _markAndProjectU 之类）
-// 调用了这里的 velocityAt(point)，构建出来的 TSL 节点图会把当时 currentPosition/
-// currentAngle/linearVelocity 的值烤成图里的常量——之后 update(dt) 改了这些值，
-// 已经构建好的 kernel 不会自动感知到。如果确实需要"每帧真正变化、又不想重新构建
-// kernel"的碰撞体运动，应该把 position/velocity 换成 tsl_array_n 的 array0/uniform
-// （用 .fromArray()/.value= 更新），而不是像现在这样直接捕获 JS 闭包变量——现在
-// 这个实现是对源码 Python/Taichi 两边同样存在的这个限制的忠实移植，不是新增的缺陷，
-// 但如果后面要做真正逐帧移动的 collider，这是需要重新设计的点。
+// A known architectural limitation (not a new problem introduced by this
+// port -- a boundary shared by both Taichi's and TSL's "build the graph
+// once, dispatch repeatedly" execution model): if some future kernel (e.g.
+// grid_blocked_boundary_condition_solver2.js's _markAndProjectU or similar)
+// calls this velocityAt(point) while it's being built, the resulting TSL
+// node graph bakes in whatever currentPosition/currentAngle/linearVelocity
+// were at that moment as constants -- a later update(dt) that changes those
+// values will not be picked up by a kernel that's already been built. If
+// collider motion that genuinely changes every frame (without rebuilding
+// the kernel) is ever actually needed, position/velocity should become a
+// tsl_array_n array0/uniform (updated via .fromArray()/.value=) instead of
+// being captured as a plain JS closure variable the way it is now -- the
+// current implementation is a faithful port of this same limitation that
+// exists on both the Python/Taichi side of the source, not a new defect,
+// but it's the piece that would need redesigning if a genuinely
+// frame-by-frame moving collider is built on top of this later.
 export function createSDFRigidBodyCollider2(
 	geometryPolygon,
 	resolutionX, resolutionY, gridSpacingX, gridSpacingY, originX, originY,
@@ -136,9 +157,12 @@ export function createSDFRigidBodyCollider2(
 
 	function update( dt ) {
 
-		// tm.vec2 的 == 是逐分量比较，这一点 Taichi 里恒为 true 没法直接当整体
-		// 相等判断——这里就是普通 JS 数字比较，没有这个坑，但保留同样的"静止就跳过"
-		// 优化，避免每帧重新栅格化一个没有移动的碰撞体
+		// tm.vec2's == is a component-wise comparison, which in Taichi is
+		// always truthy as a whole and can't be used directly as an overall
+		// equality check -- here it's just plain JS number comparison, so
+		// that particular pitfall doesn't apply, but the same
+		// "skip when stationary" optimization is kept, to avoid
+		// re-rasterizing a collider that hasn't moved every frame
 		const isStationary = linearVelocityXY[ 0 ] === 0 && linearVelocityXY[ 1 ] === 0 && angularVelocity === 0;
 		if ( isStationary ) return;
 
@@ -156,8 +180,8 @@ export function createSDFRigidBodyCollider2(
 
 	}
 
-	// 刚体运动学：v(point) = linearVelocity + angularVelocity x (point - currentPosition)
-	// 2D 里叉乘 angularVelocity x r 就是 angularVelocity * (-r.y, r.x)
+	// Rigid-body kinematics: v(point) = linearVelocity + angularVelocity x (point - currentPosition)
+	// In 2D, the cross product angularVelocity x r is just angularVelocity * (-r.y, r.x)
 	function velocityAt( point ) {
 
 		const r = point.sub( vec2( currentPosition[ 0 ], currentPosition[ 1 ] ) );

@@ -1,7 +1,9 @@
-// 只测"构建"（构造函数、setCollider(null,...)）不测"派发"（constrainVelocity()、
-// setCollider(真实collider,...) 都会触发真正的 kernel 调用，需要 tsl_array_n.init()
-// 建好的真实 renderer，vitest/Node 环境没有）——跟这次移植其它所有测试文件的
-// 一致原则：图构建不需要 GPU，dispatch 需要。
+// Only tests "building" (the constructor, setCollider(null,...)), not
+// "dispatching" (constrainVelocity() and setCollider(a real collider,...)
+// both trigger real kernel calls, which need a real renderer set up by
+// tsl_array_n.init() that the vitest/Node environment doesn't have) -- the
+// same principle as every other test file in this port: building a graph
+// doesn't need a GPU, dispatching does.
 
 import { describe, it, expect } from 'vitest';
 import { createFaceCenteredGrid2 } from '../src/grid/grid_data2.js';

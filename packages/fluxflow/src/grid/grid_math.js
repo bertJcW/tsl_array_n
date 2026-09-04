@@ -1,13 +1,19 @@
-// 移植自 grid_math.py。这里全部是普通 JS 函数（构建/组合 TSL 节点图），不用
-// tsl_array_n.func() ——这些函数经常要返回好几个值（比如 bilinearCoordsAndWeights2
-// 要返回 8 个量）、参数也都是具名的，而 func()（裸 Fn 重导出）的调用约定是"单个
-// 数组解构参数"，硬套上去既别扭又容易踩坑（见 tsl_array_n README 的已知边界）。
-// 这些函数只在 JS 图构建阶段被别的函数/kernel 调用，不需要是"设备侧可调用子程序"，
-// 普通 JS 函数直接返回/组合节点就够用。
+// Ported from grid_math.py. These are all plain JS functions (building/
+// composing TSL node graphs), not tsl_array_n.func() -- these functions
+// often need to return several values (e.g. bilinearCoordsAndWeights2
+// returns 8), and the parameters are all named, while func()'s (the bare Fn
+// re-export) calling convention is a "single destructured array parameter" --
+// forcing that here would be awkward and easy to get wrong (see tsl_array_n
+// README's known-limitations note). These functions are only ever called by
+// other functions/kernels during JS graph construction, so they don't need
+// to be "device-side callable subroutines" -- plain JS functions that
+// directly return/compose nodes are enough.
 //
-// 命名上把源码 snake_case+camelCase 混用统一成纯 camelCase（比如
-// collocated_valueAtPosition2 -> collocatedValueAtPosition2），并顺手把源码里
-// "colloacted"的拼写错误改成"collocated"——纯命名调整，数值逻辑逐行对应源码。
+// Naming-wise, the source's mixed snake_case+camelCase has been unified into
+// plain camelCase (e.g. collocated_valueAtPosition2 -> collocatedValueAtPosition2),
+// and the source's "colloacted" typo has been fixed to "collocated" along the
+// way -- pure naming cleanup, the numeric logic corresponds line-for-line to
+// the source.
 
 import { int, float, vec2, mat2, min, max, floor } from 'three/tsl';
 
@@ -23,8 +29,9 @@ export function faceCenteredValueAtCellCenter2( dataU, dataV, i, j ) {
 
 }
 
-// 给定连续位置，找到周围 4 个格点下标（clamp 到边界内，落在网格外的位置也能采样到
-// 边界值）和它们的双线性权重，顺序 (i0,j0) (i1,j0) (i0,j1) (i1,j1)
+// Given a continuous position, finds the 4 surrounding grid indices (clamped
+// to the bounds, so positions outside the grid still sample the boundary
+// value) and their bilinear weights, in the order (i0,j0) (i1,j0) (i0,j1) (i1,j1)
 export function bilinearCoordsAndWeights2( pos, dataOrigin, gridSpacing, shape ) {
 
 	const [ nx, ny ] = shape;
@@ -52,7 +59,8 @@ export function bilinearCoordsAndWeights2( pos, dataOrigin, gridSpacing, shape )
 
 }
 
-// collocated（标量或向量都行）field 在连续位置的双线性采样
+// Bilinear sample of a collocated field (scalar or vector, either works) at
+// a continuous position
 export function collocatedValueAtPosition2( data, gridSpacing, dataOrigin, pos, shape ) {
 
 	const { i0c, j0c, i1c, j1c, w00, w10, w01, w11 } = bilinearCoordsAndWeights2( pos, dataOrigin, gridSpacing, shape );
@@ -64,8 +72,9 @@ export function collocatedValueAtPosition2( data, gridSpacing, dataOrigin, pos, 
 
 }
 
-// face-centered (MAC) 速度场在连续位置的双线性采样
-// dataOriginU/dataOriginV 是 u-face/v-face 各自的交错原点
+// Bilinear sample of a face-centered (MAC) velocity field at a continuous
+// position. dataOriginU/dataOriginV are the staggered origins of the u-face
+// and v-face respectively
 export function faceCenteredValueAtPosition2( dataU, dataV, gridSpacing, dataOriginU, dataOriginV, pos, shapeU, shapeV ) {
 
 	const u = collocatedValueAtPosition2( dataU, gridSpacing, dataOriginU, pos, shapeU );
@@ -78,7 +87,7 @@ export function faceCenteredValueAtPosition2( dataU, dataV, gridSpacing, dataOri
 // ------------------------------------------------------------
 // gradient
 
-// shape 是 field 的形状；在格点上求梯度
+// shape is the field's shape; gradient at a grid point
 export function scalarGradient2( data, gridSpacing, i, j, shape ) {
 
 	const [ nx, ny ] = shape;
@@ -93,7 +102,7 @@ export function scalarGradient2( data, gridSpacing, i, j, shape ) {
 
 }
 
-// shape 是 field 的形状；在格点上求梯度（Jacobian）
+// shape is the field's shape; gradient (Jacobian) at a grid point
 export function vectorGradient2( data, gridSpacing, i, j, shape ) {
 
 	const [ nx, ny ] = shape;
@@ -107,10 +116,12 @@ export function vectorGradient2( data, gridSpacing, i, j, shape ) {
 	const gradX = vec2( right.x.sub( left.x ), up.x.sub( down.x ) ).mul( 0.5 ).div( gridSpacing );
 	const gradY = vec2( right.y.sub( left.y ), up.y.sub( down.y ) ).mul( 0.5 ).div( gridSpacing );
 
-	// 注意：mat2(a,b,c,d) 的元素填充顺序（row-major/column-major）在 Taichi
-	// 的 tm.mat2 和 TSL 的 mat2 之间还没做过数值验证是否一致——这里按源码参数顺序
-	// 直译。用之前先拿一个非对称的向量场（比如 (2x+5y, 0)，对称场看不出转置）实跑
-	// 验证一下 Jacobian 有没有被转置，不要直接信任这个函数。
+	// NOTE: whether mat2(a,b,c,d)'s element fill order (row-major vs
+	// column-major) matches between Taichi's tm.mat2 and TSL's mat2 hasn't
+	// been numerically verified -- this is a direct translation of the
+	// source's argument order. Before relying on this, run it live on an
+	// asymmetric vector field (e.g. (2x+5y, 0) -- a symmetric field can't
+	// reveal a transpose) and check whether the Jacobian comes out transposed.
 	return mat2(
 		gradX.x, gradX.y,
 		gradY.x, gradY.y
@@ -118,7 +129,8 @@ export function vectorGradient2( data, gridSpacing, i, j, shape ) {
 
 }
 
-// 标量场在连续位置的梯度：双线性混合 4 个周围格点各自的离散梯度
+// Gradient of a scalar field at a continuous position: bilinearly blends the
+// discrete gradients at the 4 surrounding grid points
 export function scalarGradientAtPosition2( data, gridSpacing, dataOrigin, pos, shape ) {
 
 	const { i0c, j0c, i1c, j1c, w00, w10, w01, w11 } = bilinearCoordsAndWeights2( pos, dataOrigin, gridSpacing, shape );
@@ -130,11 +142,14 @@ export function scalarGradientAtPosition2( data, gridSpacing, dataOrigin, pos, s
 
 }
 
-// 标量场在连续位置的梯度：对 collocatedValueAtPosition2 采样用的同一个双线性曲面
-// 解析求导（不是像 scalarGradientAtPosition2 那样混合 4 个角点各自的离散梯度）——
-// 更便宜（只读 4 个角点值一次），且跟 collocatedValueAtPosition2 在该点返回的值
-// 精确对应。需要梯度跟采样值精确匹配时用这个（比如 SDF 的法向量）；想要在相邻格子间
-// 多一点平滑时用 scalarGradientAtPosition2。
+// Gradient of a scalar field at a continuous position: an analytic
+// derivative of the same bilinear surface that collocatedValueAtPosition2
+// samples (not a blend of the 4 corners' own discrete gradients like
+// scalarGradientAtPosition2) -- cheaper (reads the 4 corner values only
+// once) and matches exactly what collocatedValueAtPosition2 returns at that
+// point. Use this when the gradient needs to match the sampled value
+// precisely (e.g. an SDF's surface normal); use scalarGradientAtPosition2
+// when a bit more smoothing across neighboring cells is desired.
 export function bilinearGradientAtPosition2( data, gridSpacing, dataOrigin, pos, shape ) {
 
 	const { i0c, j0c, i1c, j1c, w10, w01, w11 } = bilinearCoordsAndWeights2( pos, dataOrigin, gridSpacing, shape );
@@ -154,7 +169,7 @@ export function bilinearGradientAtPosition2( data, gridSpacing, dataOrigin, pos,
 
 }
 
-// 向量场在连续位置的梯度（Jacobian）
+// Gradient (Jacobian) of a vector field at a continuous position
 export function vectorGradientAtPosition2( data, gridSpacing, dataOrigin, pos, shape ) {
 
 	const { i0c, j0c, i1c, j1c, w00, w10, w01, w11 } = bilinearCoordsAndWeights2( pos, dataOrigin, gridSpacing, shape );
@@ -169,7 +184,7 @@ export function vectorGradientAtPosition2( data, gridSpacing, dataOrigin, pos, s
 // ------------------------------------------------------------
 // divergence
 
-// data 是 2D 向量场，gridSpacing 是向量；在格点上求散度
+// data is a 2D vector field, gridSpacing is a vector; divergence at a grid point
 export function collocatedDivergence2( data, gridSpacing, i, j, shape ) {
 
 	const [ nx, ny ] = shape;
@@ -185,7 +200,7 @@ export function collocatedDivergence2( data, gridSpacing, i, j, shape ) {
 
 }
 
-// dataU/dataV 是两个标量场；在每个 cell center 求散度
+// dataU/dataV are two scalar fields; divergence at each cell center
 export function faceCenteredDivergenceAtCenter2( dataU, dataV, gridSpacing, i, j ) {
 
 	const leftU   = dataU( i, j );
@@ -198,7 +213,7 @@ export function faceCenteredDivergenceAtCenter2( dataU, dataV, gridSpacing, i, j
 
 }
 
-// collocated 向量场在连续位置的散度
+// Divergence of a collocated vector field at a continuous position
 export function collocatedDivergenceAtPosition2( data, gridSpacing, dataOrigin, pos, shape ) {
 
 	const { i0c, j0c, i1c, j1c, w00, w10, w01, w11 } = bilinearCoordsAndWeights2( pos, dataOrigin, gridSpacing, shape );
@@ -210,9 +225,9 @@ export function collocatedDivergenceAtPosition2( data, gridSpacing, dataOrigin, 
 
 }
 
-// face-centered (MAC) 向量场在连续位置的散度
-// cellCenterOrigin 是 cell-center 布局的原点（dataOrigin + 0.5*gridSpacing），
-// shape 是 cell-center 分辨率 (nx, ny)
+// Divergence of a face-centered (MAC) vector field at a continuous position.
+// cellCenterOrigin is the origin of the cell-center layout
+// (dataOrigin + 0.5*gridSpacing), shape is the cell-center resolution (nx, ny)
 export function faceCenteredDivergenceAtPosition2( dataU, dataV, gridSpacing, cellCenterOrigin, pos, shape ) {
 
 	const { i0c, j0c, i1c, j1c, w00, w10, w01, w11 } = bilinearCoordsAndWeights2( pos, cellCenterOrigin, gridSpacing, shape );
@@ -227,7 +242,7 @@ export function faceCenteredDivergenceAtPosition2( dataU, dataV, gridSpacing, ce
 // ------------------------------------------------------------
 // curl
 
-// data 是 2D 向量场，gridSpacing 是向量；在格点上求旋度
+// data is a 2D vector field, gridSpacing is a vector; curl at a grid point
 export function collocatedCurl2( data, gridSpacing, i, j, shape ) {
 
 	const [ nx, ny ] = shape;
@@ -249,7 +264,7 @@ export function collocatedCurl2( data, gridSpacing, i, j, shape ) {
 
 }
 
-// dataU/dataV 是两个标量场；在每个 cell center 求旋度
+// dataU/dataV are two scalar fields; curl at each cell center
 export function faceCenteredCurlAtCenter2( dataU, dataV, gridSpacing, i, j, shape ) {
 
 	const [ nx, ny ] = shape;
@@ -270,7 +285,7 @@ export function faceCenteredCurlAtCenter2( dataU, dataV, gridSpacing, i, j, shap
 
 }
 
-// collocated 向量场在连续位置的旋度
+// Curl of a collocated vector field at a continuous position
 export function collocatedCurlAtPosition2( data, gridSpacing, dataOrigin, pos, shape ) {
 
 	const { i0c, j0c, i1c, j1c, w00, w10, w01, w11 } = bilinearCoordsAndWeights2( pos, dataOrigin, gridSpacing, shape );
@@ -282,8 +297,8 @@ export function collocatedCurlAtPosition2( data, gridSpacing, dataOrigin, pos, s
 
 }
 
-// face-centered (MAC) 向量场在连续位置的旋度
-// cellCenterOrigin/shape：见 faceCenteredDivergenceAtPosition2
+// Curl of a face-centered (MAC) vector field at a continuous position.
+// cellCenterOrigin/shape: see faceCenteredDivergenceAtPosition2
 export function faceCenteredCurlAtPosition2( dataU, dataV, gridSpacing, cellCenterOrigin, pos, shape ) {
 
 	const { i0c, j0c, i1c, j1c, w00, w10, w01, w11 } = bilinearCoordsAndWeights2( pos, cellCenterOrigin, gridSpacing, shape );
@@ -298,7 +313,7 @@ export function faceCenteredCurlAtPosition2( dataU, dataV, gridSpacing, cellCent
 // ------------------------------------------------------------
 // laplacian
 
-// shape 是 field 的形状；在格点上求拉普拉斯
+// shape is the field's shape; laplacian at a grid point
 export function scalarLaplacian2( data, gridSpacing, i, j, shape ) {
 
 	const [ nx, ny ] = shape;
@@ -315,7 +330,7 @@ export function scalarLaplacian2( data, gridSpacing, i, j, shape ) {
 
 }
 
-// 标量场在连续位置的拉普拉斯
+// Laplacian of a scalar field at a continuous position
 export function scalarLaplacianAtPosition2( data, gridSpacing, dataOrigin, pos, shape ) {
 
 	const { i0c, j0c, i1c, j1c, w00, w10, w01, w11 } = bilinearCoordsAndWeights2( pos, dataOrigin, gridSpacing, shape );
@@ -327,7 +342,7 @@ export function scalarLaplacianAtPosition2( data, gridSpacing, dataOrigin, pos, 
 
 }
 
-// shape 是 field 的形状；在格点上求拉普拉斯
+// shape is the field's shape; laplacian at a grid point
 export function vectorLaplacian2( data, gridSpacing, i, j, shape ) {
 
 	const [ nx, ny ] = shape;
@@ -344,7 +359,7 @@ export function vectorLaplacian2( data, gridSpacing, i, j, shape ) {
 
 }
 
-// 向量场在连续位置的拉普拉斯
+// Laplacian of a vector field at a continuous position
 export function vectorLaplacianAtPosition2( data, gridSpacing, dataOrigin, pos, shape ) {
 
 	const { i0c, j0c, i1c, j1c, w00, w10, w01, w11 } = bilinearCoordsAndWeights2( pos, dataOrigin, gridSpacing, shape );

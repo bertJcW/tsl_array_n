@@ -35,7 +35,7 @@ describe( 'gravity', () => {
 
 		const gravity = createGravity();
 
-		expect( typeof gravity ).toBe( 'function' ); // 可调用 field，tsl_array_n 的既有约定
+		expect( typeof gravity ).toBe( 'function' ); // callable field, tsl_array_n's existing convention
 		expect( gravity.shape ).toEqual( [] );
 		expect( gravity.count ).toBe( 1 );
 
@@ -44,7 +44,7 @@ describe( 'gravity', () => {
 	it( 'createGravity defaults to DEFAULT_GRAVITY, accepts a custom value', () => {
 
 		expect( () => createGravity() ).not.toThrow();
-		expect( () => createGravity( -1.62 ) ).not.toThrow(); // 比如月球重力
+		expect( () => createGravity( -1.62 ) ).not.toThrow(); // e.g. lunar gravity
 		expect( DEFAULT_GRAVITY ).toBe( -9.81 );
 
 	} );
@@ -53,7 +53,7 @@ describe( 'gravity', () => {
 
 		const gravity = createGravity();
 
-		expect( () => setGravity( gravity, -3.7 ) ).not.toThrow(); // 比如火星重力
+		expect( () => setGravity( gravity, -3.7 ) ).not.toThrow(); // e.g. Martian gravity
 
 	} );
 

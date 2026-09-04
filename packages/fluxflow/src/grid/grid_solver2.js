@@ -1,10 +1,16 @@
-// 移植自 grid_solver2.py。源码是个纯抽象基类（全是 pass 方法体），设计给具体求解器
-// 继承、重写各个 compute* 方法。JS 这边没有类继承的传统（这次移植全程用工厂函数），
-// 对应的写法是"依赖注入"：把各个阶段当 hooks 参数传进来，不传的阶段默认空操作——
-// 效果和"子类只重写用得到的方法、其它保持 pass"完全一样。
+// Ported from grid_solver2.py. The source is a pure abstract base class (all
+// method bodies are pass), designed for concrete solvers to subclass and
+// override each compute* method. There's no class-inheritance tradition on
+// the JS side (this whole port uses factory functions throughout), so the
+// equivalent here is "dependency injection": each stage is passed in as a
+// hook parameter, defaulting to a no-op when omitted -- exactly the same
+// effect as "a subclass only overrides the methods it needs, the rest stay
+// pass".
 //
-// 具体求解器（真正的压力投影/对流/粘性实现）不在这次移植范围内（这次只做 grid/
-// 这一层的地基），这个文件本身价值有限，纯粹是为了把 grid/ 文件夹搬完整。
+// A concrete solver (the actual pressure-projection/advection/viscosity
+// implementation) is out of scope for this port (this pass only covers the
+// grid/ foundation layer), so this file has limited value on its own --
+// it's here purely to keep the grid/ folder's port complete.
 
 const NOOP = () => {};
 

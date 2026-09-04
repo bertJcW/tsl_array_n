@@ -7,14 +7,14 @@ describe( 'polygonSignedDistance', () => {
 
 	it( 'is negative inside, magnitude = distance to nearest edge', () => {
 
-		expect( polygonSignedDistance( 2, 2, square ) ).toBeCloseTo( -2, 6 ); // 中心，到每条边都是2
+		expect( polygonSignedDistance( 2, 2, square ) ).toBeCloseTo( -2, 6 ); // center, 2 away from every edge
 
 	} );
 
 	it( 'is positive outside, magnitude = distance to nearest edge', () => {
 
-		expect( polygonSignedDistance( 2, -1, square ) ).toBeCloseTo( 1, 6 ); // 底边下方1
-		expect( polygonSignedDistance( 5, 2, square ) ).toBeCloseTo( 1, 6 ); // 右边外侧1
+		expect( polygonSignedDistance( 2, -1, square ) ).toBeCloseTo( 1, 6 ); // 1 below the bottom edge
+		expect( polygonSignedDistance( 5, 2, square ) ).toBeCloseTo( 1, 6 ); // 1 outside the right edge
 
 	} );
 
@@ -24,14 +24,14 @@ describe( 'polygonsSignedDistance', () => {
 
 	it( 'unions multiple polygons via pointwise min', () => {
 
-		const squareB = [ [ 10, 0 ], [ 14, 0 ], [ 14, 4 ], [ 10, 4 ] ]; // 跟 square 不重叠的第二个方块
+		const squareB = [ [ 10, 0 ], [ 14, 0 ], [ 14, 4 ], [ 10, 4 ] ]; // a second square, not overlapping square
 
-		// 离 square 中心近，离 squareB 远 —— union SDF 应该取 square 那个（更小的距离）
+		// close to square's center, far from squareB -- the union SDF should pick square's (smaller distance)
 		expect( polygonsSignedDistance( 2, 2, [ square, squareB ] ) ).toBeCloseTo( -2, 6 );
 
-		// 在两个方块之间、离两边都不算远：应该取两者中更近的那个（squareB 左边界更近）
+		// between the two squares, not particularly close to either: should pick whichever is nearer (squareB's left edge is closer)
 		const midway = polygonsSignedDistance( 7, 2, [ square, squareB ] );
-		expect( midway ).toBeCloseTo( 3, 6 ); // min(距 square 右边=3, 距 squareB 左边=3) —— 两者相等时也该是3
+		expect( midway ).toBeCloseTo( 3, 6 ); // min(distance to square's right edge = 3, distance to squareB's left edge = 3) -- should still be 3 when the two are equal
 
 	} );
 

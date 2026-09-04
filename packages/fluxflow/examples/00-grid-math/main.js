@@ -1,13 +1,20 @@
-// 已知边界（跟这次移植本身无关）：在这个 sandbox 环境（没有真实 WebGPU 适配器，
-// init() 会 fallback 到 WebGLBackend）里跑，下面三个测试目前全部读回 0——已经
-// 用几个变体的最小复现排查过：单线程 kernel 里 assign 一个常量能正确写回
-// （排除了"shape=1 kernel 本身不工作"）；问题specifically是"在一个 kernel 里读取
-// 另一个之前已经有数据的 field"这个操作本身在这个 fallback 后端上读不到正确值——
-// 不管那个 field 的数据是 fromArray() 写的还是另一个 kernel 写的，都一样读到 0/空。
-// 这跟 tsl_array_n 自己历史上遇到的两次 fallback-only 问题（Loop() 计数器、array0
-// 多线程共读）是同一类环境限制，但触发条件更窄更基础，是这次移植过程中新发现的
-// 第三个实例。跟之前两次一样，还没有实机 WebGPU 复核——数值到底对不对，等有真实
-// WebGPU 的环境跑一遍这个页面确认。
+// Known limitation (unrelated to this port's own code): running in this
+// sandbox environment (no real WebGPU adapter, init() falls back to
+// WebGLBackend), the three tests below currently all read back 0 -- already
+// isolated via a few minimal-reproduction variants: assigning a constant in
+// a single-thread kernel writes back correctly (ruling out "shape=1 kernels
+// just don't work at all"); the problem is specifically that "reading a
+// different field that already has data, from inside a kernel" doesn't
+// read back the right value on this fallback backend at all -- regardless
+// of whether that other field's data was written via fromArray() or by
+// another kernel, both read back as 0/empty the same way. This is the same
+// class of environment limitation as two fallback-only issues tsl_array_n
+// has already hit historically (the Loop() counter one, and the array0
+// multi-thread shared-read one), just with a narrower, more basic trigger
+// condition -- a third instance found during this port. As with the
+// previous two, this hasn't been confirmed on real WebGPU hardware yet --
+// whether the actual numbers are right needs a run on a real WebGPU
+// environment to confirm.
 import * as tsl_array_n from 'tsl_array_n';
 import { grid } from 'fluxflow';
 import { vec2, int } from 'three/tsl';
@@ -59,21 +66,22 @@ try {
 	log( 'init()', true, `backend: ${ renderer.backend?.constructor?.name ?? 'unknown' }` );
 
 	// ------------------------------------------------------------
-	// 1. collocatedValueAtPosition2：双线性插值——网格点上应该精确等于该点数据，
-	// 半格中点应该等于周围4个角点的平均值
+	// 1. collocatedValueAtPosition2: bilinear interpolation -- at a grid
+	// point it should exactly equal that point's data; at a half-cell
+	// midpoint it should equal the average of the 4 surrounding corners
 	{
 
 		const scalarGrid = grid.createScalarGrid2( 4, 4, 1, 1, 0, 0 );
-		fillScalar4x4( scalarGrid.data, ( i, j ) => i + j * 4 ); // data[i,j] = i + 4j，跟 tsl_array_n 自己 .at() 的下标约定一致
+		fillScalar4x4( scalarGrid.data, ( i, j ) => i + j * 4 ); // data[i,j] = i + 4j, matches tsl_array_n's own .at() indexing convention
 
 		const out = tsl_array_n.arrayN( 'float', 2 );
 
 		const run = tsl_array_n.kernel( 1, ( _idx ) => {
 
-			// 网格点 (1,2) 上采样：应该精确等于 data[1,2] = 1 + 2*4 = 9
+			// sampled at grid point (1,2): should exactly equal data[1,2] = 1 + 2*4 = 9
 			out( 0 ).assign( grid.collocatedValueAtPosition2( scalarGrid.data, scalarGrid.gridSpacing, scalarGrid.dataOrigin, vec2( 1, 2 ), scalarGrid.dataSize ) );
 
-			// (0.5, 0.5) 半格中点：应该等于 data[0,0],data[1,0],data[0,1],data[1,1] 的平均 = (0+1+4+5)/4 = 2.5
+			// (0.5, 0.5) half-cell midpoint: should equal the average of data[0,0],data[1,0],data[0,1],data[1,1] = (0+1+4+5)/4 = 2.5
 			out( 1 ).assign( grid.collocatedValueAtPosition2( scalarGrid.data, scalarGrid.gridSpacing, scalarGrid.dataOrigin, vec2( 0.5, 0.5 ), scalarGrid.dataSize ) );
 
 		} );
@@ -92,8 +100,10 @@ try {
 	}
 
 	// ------------------------------------------------------------
-	// 2. scalarGradient2：在线性场 f(i,j) = 2i + 3j 的内部格点上，中心差分应该
-	// 精确给出解析梯度 (2, 3)（线性函数的中心差分没有截断误差）
+	// 2. scalarGradient2: at an interior grid point of the linear field
+	// f(i,j) = 2i + 3j, a central difference should give the exact analytic
+	// gradient (2, 3) (a linear function's central difference has no
+	// truncation error)
 	{
 
 		const linearGrid = grid.createScalarGrid2( 4, 4, 1, 1, 0, 0 );
@@ -121,11 +131,13 @@ try {
 	}
 
 	// ------------------------------------------------------------
-	// 3. vectorGradient2 / mat2 元素顺序——grid_math.js 文件头注释标注过这个未验证的点：
-	// 向量场 f(i,j) = (2i + 5j, 0)，解析 Jacobian J = [[2,5],[0,0]]（行：∂fx/∂x,∂fx/∂y；
-	// ∂fy/∂x,∂fy/∂y）。J·(1,0) 应该等于 x 方向偏导 = (∂fx/∂x, ∂fy/∂x) = (2,0)；
-	// J·(0,1) 应该等于 y 方向偏导 = (∂fx/∂y, ∂fy/∂y) = (5,0)。用非对称场是关键——
-	// 对称场看不出转置。
+	// 3. vectorGradient2 / mat2 element order -- this is the unverified
+	// point flagged in grid_math.js's header comment: vector field
+	// f(i,j) = (2i + 5j, 0), analytic Jacobian J = [[2,5],[0,0]] (rows:
+	// dfx/dx,dfx/dy; dfy/dx,dfy/dy). J.(1,0) should equal the x-direction
+	// partials = (dfx/dx, dfy/dx) = (2,0); J.(0,1) should equal the
+	// y-direction partials = (dfx/dy, dfy/dy) = (5,0). Using an asymmetric
+	// field is the key part -- a symmetric field can't reveal a transpose.
 	{
 
 		const vectorGrid = grid.createCollocatedVectorGrid2( 4, 4, 1, 1, 0, 0 );

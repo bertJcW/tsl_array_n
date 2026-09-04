@@ -1,16 +1,24 @@
-// 移植自 grid_blocked_boundary_condition_solver2.py。
+// Ported from grid_blocked_boundary_condition_solver2.py.
 //
-// 跟源码最大的结构差异：源码构造函数不吃 velocity（velocity 是 constrainVelocity(velocity,...)
-// 每次调用时传入的 ti.template() 参数），这里改成构造时就传入固定的 velocity
-// （FaceCenteredGrid2）——tsl_array_n 的 kernel(shape,fn) 在构建时就要闭包绑定
-// 具体 field，没有"每次调用换绑参数"的能力（移植计划决策4，不是这次引入的新限制）。
-// 所以这里的 constrainVelocity() 不再吃 velocity 参数，永远操作构造时绑定的那一个。
+// The biggest structural difference from the source: the source's
+// constructor doesn't take velocity (velocity is a ti.template() argument
+// passed fresh on every constrainVelocity(velocity,...) call) -- here it's
+// passed once, fixed, at construction time instead (a FaceCenteredGrid2) --
+// tsl_array_n's kernel(shape,fn) has to closure-bind a concrete field at
+// build time, with no ability to "rebind arguments on every call" (port
+// plan decision 4, not a new limitation introduced here). So
+// constrainVelocity() here no longer takes a velocity argument, and always
+// operates on the one bound at construction.
 //
-// collider 则不同——源码本身就支持 setCollider() 中途换 collider（包括从 None 换成
-// 有、或者换成另一个），所以所有读 collider 的 kernel 不能在构造时一次性建好，
-// 要放进 rebuildColliderKernels()，每次 setCollider() 都重新构建一遍（构建 kernel
-// 图本身不需要 GPU/renderer，便宜，重新构建没问题）。不依赖 collider、只依赖
-// velocity 的 kernel（四个 _zero* 系列）在构造时建一次就够。
+// collider is different -- the source itself supports swapping the collider
+// mid-lifetime via setCollider() (including going from None to a real one,
+// or from one collider to another), so every kernel that reads collider
+// can't be built once and for all at construction time; they go into
+// rebuildColliderKernels() instead, which reruns on every setCollider() call
+// (building a kernel graph doesn't itself need a GPU/renderer, so it's cheap
+// and rebuilding is fine). The kernels that only depend on velocity, not
+// collider (the four _zero* ones) only need to be built once, at
+// construction time.
 
 import { vec2, float } from 'three/tsl';
 import * as tsl_array_n from 'tsl_array_n';
@@ -18,13 +26,15 @@ import * as ls from './level_set_utils.js';
 import { createCopyKernel2, createExtrapolateToRegion2 } from './array_utils.js';
 import { DIRECTION_LEFT, DIRECTION_RIGHT, DIRECTION_DOWN, DIRECTION_UP, DIRECTION_ALL } from './constant.js';
 
-// uMarker/vMarker 含义一样(1=fluid, 0=collider)，跟源码一样只在这个文件内部用，
-// 不放进 constant.js
+// Same meaning as uMarker/vMarker (1=fluid, 0=collider); kept file-local
+// just like in the source, not moved into constant.js
 const K_FLUID = 1;
 const K_COLLIDER = 0;
 
-// velt = vel - normal * dot(vel,normal)；如果 velt 长度 > 0，按摩擦系数衰减切向分量。
-// 这是"可能原地修改"的模式（不是纯值选择），用 .toVar() + If()，不是 select()。
+// velt = vel - normal * dot(vel,normal); if velt's length > 0, decay the
+// tangential component by the friction coefficient. This is a "may modify
+// in place" pattern (not a pure value selection), so it uses
+// .toVar() + If(), not select().
 function projectAndApplyFriction( vel, normal, frictionCoefficient ) {
 
 	const velt = vel.sub( normal.mul( vel.dot( normal ) ) ).toVar();
@@ -42,9 +52,10 @@ function projectAndApplyFriction( vel, normal, frictionCoefficient ) {
 
 }
 
-// velocity: 构造时绑定的 FaceCenteredGrid2（见文件头注释）。
-// colliderSDF: 可选，SDFStaticCollider2/SDFRigidBodyCollider2，None 时 constrainVelocity
-// 只做 domain boundary 那一段。
+// velocity: the FaceCenteredGrid2 bound at construction time (see the file
+// header comment).
+// colliderSDF: optional, an SDFStaticCollider2/SDFRigidBodyCollider2; when
+// null, constrainVelocity only does the domain-boundary part.
 export function createGridBlockedBoundaryConditionSolver2(
 	velocity,
 	resolutionX, resolutionY, gridSpacingX, gridSpacingY, originX, originY,
@@ -64,11 +75,11 @@ export function createGridBlockedBoundaryConditionSolver2(
 
 	const solver = {
 		uMarker, vMarker, uTemp, vTemp, blockMarker,
-		closedDomainBoundaryFlag: DIRECTION_ALL, // 普通可变属性，跟源码 setClosedDomainBoundaryFlag 效果一样
+		closedDomainBoundaryFlag: DIRECTION_ALL, // plain mutable property, same effect as the source's setClosedDomainBoundaryFlag
 		collider: null
 	};
 
-	// ---- 只依赖 velocity 的 kernel：跟 collider 无关，构造时建一次 ----
+	// ---- kernels that only depend on velocity: independent of collider, built once at construction ----
 
 	const copyUTempToVelocity = createCopyKernel2( uTemp, velocity.dataU, uSize );
 	const copyVTempToVelocity = createCopyKernel2( vTemp, velocity.dataV, vSize );
@@ -89,7 +100,7 @@ export function createGridBlockedBoundaryConditionSolver2(
 
 	}
 
-	// ---- 依赖 collider 的 kernel：collider 换了要重新建（见文件头注释）----
+	// ---- kernels that depend on collider: need rebuilding when it changes (see file header comment) ----
 
 	let fillUMarker = null, fillVMarker = null;
 	let buildBlockMarker = null;
@@ -274,10 +285,12 @@ export function createGridBlockedBoundaryConditionSolver2(
 
 	}
 
-	// 换一个 collider（包括从 null 换成有、或从有换成 null）都走这里，会重新构建
-	// 所有依赖 collider 的 kernel，以及 blockMarker。gridSize/gridSpacing/gridOrigin
-	// 只是存下来跟源码保持一致——检查过这个文件内部实际没有用到它们（可能是给 grid/
-	// 之外的代码用的占位），这里不是漏搬逻辑。
+	// Swapping the collider (whether from null to a real one, or from one
+	// real one to null) always goes through here, and rebuilds every
+	// collider-dependent kernel plus blockMarker. gridSize/gridSpacing/
+	// gridOrigin are stored purely to match the source -- checked that
+	// nothing in this file actually reads them (possibly a placeholder for
+	// code outside grid/), this isn't a missed piece of logic.
 	function setCollider( newCollider, gridSize, gridSpacingXY, gridOrigin ) {
 
 		solver.collider = newCollider;
@@ -299,7 +312,8 @@ export function createGridBlockedBoundaryConditionSolver2(
 
 	}
 
-	// velocity 是构造时绑定的那一个（见文件头注释），不再是参数
+	// velocity is the one bound at construction time (see the file header
+	// comment), no longer a parameter here
 	function constrainVelocity( extrapolationDepth = 5 ) {
 
 		if ( solver.collider ) {
@@ -326,7 +340,7 @@ export function createGridBlockedBoundaryConditionSolver2(
 
 		}
 
-		// no flux (domain boundary, if closed) - 跟 collider 无关，没有 collider 时也要做
+		// no flux (domain boundary, if closed) - independent of collider, still needed even without one
 		projectClosedDomainBoundary();
 
 	}

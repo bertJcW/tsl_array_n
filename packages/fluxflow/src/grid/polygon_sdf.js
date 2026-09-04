@@ -1,18 +1,25 @@
-// 纯 CPU 侧几何计算，不碰任何 TSL 节点——给 sdf_collider2.js 的 addPolygon()/addSvg()
-// 用，把多边形顶点数组栅格化成 SDF 网格数据。
+// Pure CPU-side geometry, doesn't touch any TSL node -- used by
+// sdf_collider2.js's addPolygon()/addSvg() to rasterize polygon vertex
+// arrays into SDF grid data.
 //
-// 对应源码 sdf_collider2.py 里对 shapely 的用法（boundary.distance + contains/touches
-// 判内外、unary_union 合并多个形状），但不依赖 shapely 或任何 JS 几何库——都是很成熟
-// 的小算法，手写更省事：
-//   - 点在多边形内：标准射线法（point-in-polygon by ray casting）
-//   - 点到多边形边界的最短距离：逐条边求点到线段距离，取最小值——直接对应
-//     shapely 的 boundary.distance()（是到边界折线的距离，不是到"面"的距离，
-//     这也是为什么 shapely 版本要用 boundary.distance 而不是 geom.distance）
-//   - 多个多边形的"并集"SDF：逐点取 min，不需要真正的多边形布尔运算——SDF 并集
-//     在数学上就是 pointwise min，图形学标准做法，比手写多边形布尔运算简单可靠
+// Corresponds to sdf_collider2.py's use of shapely (boundary.distance +
+// contains/touches for inside/outside, unary_union to merge multiple
+// shapes), but without depending on shapely or any JS geometry library --
+// these are well-established small algorithms, cheaper to hand-write:
+//   - point inside a polygon: the standard ray-casting point-in-polygon test
+//   - shortest distance from a point to a polygon's boundary: distance to
+//     each edge segment, take the minimum -- this corresponds directly to
+//     shapely's boundary.distance() (distance to the boundary polyline, not
+//     to the "filled" area, which is also why the shapely version has to use
+//     boundary.distance rather than geom.distance)
+//   - "union" SDF of multiple polygons: pointwise min -- doesn't need a real
+//     polygon boolean operation at all; an SDF union is mathematically just
+//     a pointwise min, the standard graphics technique, and much simpler and
+//     more robust than hand-rolling polygon boolean ops
 //
-// 多边形用普通顶点数组表示：[[x0,y0],[x1,y1],...]（隐式闭合，最后一个点和第一个点
-// 之间自动算一条边，不需要重复给一次首点）。
+// Polygons are plain vertex arrays: [[x0,y0],[x1,y1],...] (implicitly
+// closed -- an edge is automatically formed between the last point and the
+// first, no need to repeat the first point).
 
 function pointInPolygon( x, y, ring ) {
 
@@ -65,7 +72,8 @@ function pointToRingBoundaryDistance( x, y, ring ) {
 
 }
 
-// 单个多边形在 (x,y) 处的有符号距离：内部为负，外部为正（跟源码 host_sdf 的符号约定一致）
+// Signed distance of a single polygon at (x,y): negative inside, positive
+// outside (matches the source's host_sdf sign convention)
 export function polygonSignedDistance( x, y, ring ) {
 
 	const dist = pointToRingBoundaryDistance( x, y, ring );
@@ -73,7 +81,7 @@ export function polygonSignedDistance( x, y, ring ) {
 
 }
 
-// 多个多边形的并集 SDF：逐点取 min
+// Union SDF of multiple polygons: pointwise min
 export function polygonsSignedDistance( x, y, rings ) {
 
 	let minDist = Infinity;
@@ -89,8 +97,9 @@ export function polygonsSignedDistance( x, y, rings ) {
 
 }
 
-// 多边形的面积加权质心（标准公式，不是顶点坐标平均——跟 shapely .centroid 的定义
-// 一致，SDFRigidBodyCollider2 用它当旋转轴心）
+// Area-weighted centroid of a polygon (the standard formula, not a plain
+// average of vertex coordinates -- matches shapely's .centroid definition;
+// SDFRigidBodyCollider2 uses this as its rotation pivot)
 export function polygonCentroid( ring ) {
 
 	let area = 0, cx = 0, cy = 0;

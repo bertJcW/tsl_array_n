@@ -22,7 +22,7 @@ try {
 
 	// func(): small device-side helper, forwarded to Fn() — usable from inside a kernel.
 	// NOTE: Fn()-wrapped functions always receive a single destructured array param,
-	// not separate positional params — see README's "已知边界" note on func().
+	// not separate positional params — see README's "Known limitations" note on func().
 	const flatten = tsl_array_n.func( ( [ x, y ] ) => x.add( y.mul( width ) ) );
 
 	// kernel(): auto-parallel over the field's full 2D shape, i/j come back already unflattened

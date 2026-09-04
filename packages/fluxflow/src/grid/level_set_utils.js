@@ -1,4 +1,4 @@
-// 移植自 level_set_utils.py。
+// Ported from level_set_utils.py.
 
 import { float } from 'three/tsl';
 
@@ -8,14 +8,19 @@ export function isInsideSdf( phi ) {
 
 }
 
-// 对应源码的 if/elif/elif 链——三个分支互斥、都只是纯值选择（没有副作用/提前
-// 退出），直译成嵌套 select() 而不是 If()（源码注释也提到 Taichi 的 @ti.func
-// 不支持运行时分支里提前 return，只能末尾 return 一次——TSL 这里更彻底，select()
-// 干脆没有语句概念，只有表达式）。
-// 第二层只查 inside0 就够（不用再 and not inside1）：能走到这层说明第一个分支
-// (inside0 and inside1) 已经为 false，这时 inside0 为真就意味着 inside1 必然
-// 为假；第三层同理，能走到这层说明前两层都不成立，此时 inside1 为真就意味着
-// inside0 必然为假。
+// Corresponds to the source's if/elif/elif chain -- the three branches are
+// mutually exclusive and each is a pure value selection (no side effects or
+// early exit), so this translates directly to nested select() rather than
+// If() (the source's own comment notes that Taichi's @ti.func doesn't
+// support an early return inside a runtime branch, only a single return at
+// the end -- TSL is even more restrictive here: select() has no statement
+// form at all, only an expression).
+// The second level only needs to check inside0 (no need for "and not
+// inside1"): reaching this level means the first branch (inside0 and
+// inside1) already evaluated false, and inside0 being true at that point
+// implies inside1 must be false; the third level follows the same logic --
+// reaching it means neither of the first two held, so inside1 being true
+// there implies inside0 must be false.
 export function fractionInsideSdf( phi0, phi1 ) {
 
 	const inside0 = isInsideSdf( phi0 );

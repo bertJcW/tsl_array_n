@@ -1,24 +1,34 @@
-// "现有 grid 能做什么视觉效果" 的一个测试，不是一个正式 example/教程。
+// A test of "what can the existing grid code do visually", not a proper
+// example/tutorial.
 //
-// 这不是真正的流体解算（没有压力投影/对流求解器，grid_solver2.js 只是个空壳）——
-// 这里做的是两件更小的事，都是 grid/ 现有模块真能做到的：
-//   1. 用 createSDFRigidBodyCollider2（真实的 fluxflow collider 对象）驱动一个
-//      旋转的星形碰撞体，SDF 渲染成热力图——直接体现 polygon_sdf.js 的多边形
-//      SDF 光栅化能力。
-//   2. 一个轻量的、纯 CPU 的绕流粒子效果：用 polygon_sdf.js 导出的
-//      polygonSignedDistance 数值估计梯度方向，让粒子靠近形状时被推开——
-//      经典的"势流"风格视觉技巧，不是真正解 Navier-Stokes，但看起来像流体绕过
-//      障碍物。故意选纯 CPU：几百个粒子这个规模用不上 GPU 并行，硬套 kernel
-//      反而复杂化。
+// This is not a real fluid solve (no pressure-projection/advection solver --
+// grid_solver2.js is just an empty shell) -- what's happening here is two
+// smaller things, both of which the existing grid/ modules can genuinely do:
+//   1. Uses createSDFRigidBodyCollider2 (a real fluxflow collider object) to
+//      drive a rotating star-shaped collider, with its SDF rendered as a
+//      heatmap -- a direct showcase of polygon_sdf.js's polygon SDF
+//      rasterization.
+//   2. A lightweight, pure-CPU flow-around-obstacle particle effect: uses
+//      polygon_sdf.js's exported polygonSignedDistance to numerically
+//      estimate a gradient direction, pushing particles away as they get
+//      close to the shape -- a classic "potential flow" style visual trick,
+//      not an actual Navier-Stokes solve, but it reads as fluid flowing
+//      around an obstacle. Deliberately pure CPU: a few hundred particles is
+//      too small a scale to benefit from GPU parallelism, and forcing it
+//      through a kernel would just add complexity.
 //
-// 形状的旋转姿态在这里单独算了一份（调用跟 collider 内部一样的 rotatePolygon/
-// translatePolygon/polygonCentroid，来自 polygon_sdf.js），没有直接读 collider
-// 内部状态——sdf_collider2.js 没有把摆好姿态的多边形单独暴露出来，为了画布渲染
-// 用的是每像素/每格子的 CPU 数值，不需要也不适合走"读 GPU field 再 toArray()"
-// 这条路（分辨率对不上，而且见下面的 GPU 往返检查，这条路在当前 sandbox 环境
-// 本来就不可靠）。同时也真的调用 collider.update(dt)，证明这个真实对象的旋转
-// 运动学本身能跑（跟 sdf_collider2.test.js 里的结构性测试不同，这里是活的、
-// 连续多帧调用）。
+// The shape's rotated pose is computed independently here (calling the same
+// rotatePolygon/translatePolygon/polygonCentroid from polygon_sdf.js that
+// the collider uses internally), rather than reading the collider's
+// internal state directly -- sdf_collider2.js doesn't expose the posed
+// polygon on its own, and canvas rendering here uses per-pixel/per-cell CPU
+// values, which don't need (and wouldn't be a good fit for) the "read the
+// GPU field back via toArray()" path anyway (the resolutions don't match,
+// and per the GPU round-trip check below, that path isn't reliable in this
+// sandbox environment to begin with). collider.update(dt) is also genuinely
+// called, proving that the real object's own rotational kinematics actually
+// run (unlike the structural tests in sdf_collider2.test.js, this is live,
+// called continuously across many frames).
 
 import * as tsl_array_n from 'tsl_array_n';
 import { grid } from 'fluxflow';
@@ -34,8 +44,9 @@ function setStatus( html ) {
 }
 
 // ------------------------------------------------------------
-// 世界坐标 <-> 画布像素坐标：世界是 [-5,5]x[-5,5]，画布 480x480，y 轴翻转
-// （世界 y 朝上，画布 y 朝下）
+// world coordinates <-> canvas pixel coordinates: the world is
+// [-5,5]x[-5,5], the canvas is 480x480, y axis flipped (world y points up,
+// canvas y points down)
 
 const WORLD_HALF = 5;
 const SCALE = canvas.width / ( WORLD_HALF * 2 );
@@ -47,7 +58,7 @@ function worldToCanvas( x, y ) {
 }
 
 // ------------------------------------------------------------
-// 五角星多边形（局部坐标，中心在原点）
+// five-pointed star polygon (local coordinates, centered at the origin)
 
 function makeStarPolygon( outerRadius, innerRadius, points ) {
 
@@ -73,8 +84,9 @@ try {
 
 	const renderer = await tsl_array_n.init( { allowFallback: true, canvas: document.createElement( 'canvas' ) } );
 
-	// 真实的 fluxflow collider——8x8 只是给这个 GPU 侧 field 一个形状，这个 demo
-	// 里视觉渲染不读它（见文件头注释），但下面会用它做一次真实的 GPU 往返检查
+	// A real fluxflow collider -- 8x8 is just a shape for this GPU-side
+	// field, this demo's visual rendering doesn't read it (see the file
+	// header comment), but it's used below for a real GPU round-trip check
 	const collider = grid.createSDFRigidBodyCollider2(
 		starLocal.map( ( [ x, y ] ) => [ x + shapeCenter[ 0 ], y + shapeCenter[ 1 ] ] ),
 		8, 8, 1.25, 1.25, -5, -5,
@@ -85,9 +97,10 @@ try {
 
 	try {
 
-		// 摸一下这个 field：先用一个 kernel 把它自己拷贝到自己（确保 GPU 侧 buffer
-		// 真的被一次 compute pass 用过——storage buffer 是惰性创建的，见
-		// tsl_array_n 的已知边界），再 toArray() 读回来看看
+		// Touch this field: first use a kernel that copies it to itself
+		// (making sure the GPU-side buffer has genuinely been used by a
+		// compute pass -- storage buffers are lazily created, see
+		// tsl_array_n's known-limitations note), then toArray() to read it back
 		const touch = tsl_array_n.kernel( collider.grid.dataSize, ( i, j ) => {
 
 			collider.grid.data( i, j ).assign( collider.grid.data( i, j ) );
@@ -99,26 +112,28 @@ try {
 		const looksReal = readback.some( ( v ) => v !== 0 );
 
 		gpuStatusHtml = looksReal
-			? `<span class="ok">✓ GPU SDF field 往返读回了非零值（backend: ${ renderer.backend?.constructor?.name }）</span>`
-			: `<span class="err">✗ GPU SDF field 往返读回全 0 —— 这个 sandbox 环境已知的 fallback 限制（见 README），下面的可视化不依赖这个结果，用的是 CPU 直接算</span>`;
+			? `<span class="ok">✓ GPU SDF field round-trip read back nonzero values (backend: ${ renderer.backend?.constructor?.name })</span>`
+			: `<span class="err">✗ GPU SDF field round-trip read back all zeros -- a known fallback limitation of this sandbox environment (see the README); the visualization below doesn't depend on this result, it computes directly on the CPU</span>`;
 
 	} catch ( error ) {
 
-		gpuStatusHtml = `<span class="err">✗ GPU 往返检查抛错：${ error.message }</span>`;
+		gpuStatusHtml = `<span class="err">✗ GPU round-trip check threw: ${ error.message }</span>`;
 
 	}
 
-	setStatus( `<span class="ok">✓ init() + createSDFRigidBodyCollider2() 构造成功</span>\n${ gpuStatusHtml }\n运行中…` );
+	setStatus( `<span class="ok">✓ init() + createSDFRigidBodyCollider2() constructed successfully</span>\n${ gpuStatusHtml }\nrunning…` );
 
 	// ------------------------------------------------------------
-	// 粒子系统：纯 CPU，用 polygon_sdf.js 的 polygonSignedDistance 数值估计梯度，
-	// 靠近形状时把粒子推离——不是真正解流体方程，是经典的"势流"风格视觉近似
+	// particle system: pure CPU, uses polygon_sdf.js's polygonSignedDistance
+	// to numerically estimate a gradient, pushing particles away as they
+	// approach the shape -- not an actual fluid-equation solve, a classic
+	// "potential flow" style visual approximation
 
 	const PARTICLE_COUNT = 400;
 	const FLOW_SPEED = 2.2;
 	const INFLUENCE_RADIUS = 1.6;
 
-const TRAIL_LENGTH = 10;
+	const TRAIL_LENGTH = 10;
 
 	function spawnParticle() {
 
@@ -132,7 +147,7 @@ const TRAIL_LENGTH = 10;
 	const particles = Array.from( { length: PARTICLE_COUNT }, () => {
 
 		const p = spawnParticle();
-		p.x = - WORLD_HALF + Math.random() * WORLD_HALF * 2; // 第一帧就撒满整个画面，不用等粒子从左边流进来
+		p.x = - WORLD_HALF + Math.random() * WORLD_HALF * 2; // fill the whole frame on the very first frame, instead of waiting for particles to stream in from the left
 		p.trail = Array.from( { length: TRAIL_LENGTH }, () => [ p.x, p.y ] );
 		return p;
 
@@ -148,14 +163,15 @@ const TRAIL_LENGTH = 10;
 	}
 
 	// ------------------------------------------------------------
-	// SDF 热力图：内部暖色、外部按距离渐变到冷色，边界(d≈0)附近亮线高亮
+	// SDF heatmap: warm color inside, fading to cool color outside based on
+	// distance, with a bright highlighted contour near the boundary (d~=0)
 
 	const HEATMAP_CELLS = 80;
 	const cellSize = canvas.width / HEATMAP_CELLS;
 
 	function sdfColor( d ) {
 
-		if ( Math.abs( d ) < 0.06 ) return '#fef08a'; // 边界轮廓线
+		if ( Math.abs( d ) < 0.06 ) return '#fef08a'; // boundary contour line
 
 		if ( d < 0 ) {
 
@@ -184,15 +200,17 @@ const TRAIL_LENGTH = 10;
 
 		currentAngle += angularVelocity * dt;
 
-		// 跟 collider 内部同一套数学（polygon_sdf.js 导出的 rotatePolygon/
-		// translatePolygon），单独算一份用于逐像素渲染
+		// The same math the collider uses internally (rotatePolygon/
+		// translatePolygon exported from polygon_sdf.js), computed
+		// independently here for per-pixel rendering
 		const posedStar = grid.rotatePolygon( starLocal, currentAngle, [ 0, 0 ] )
 			.map( ( [ x, y ] ) => [ x + shapeCenter[ 0 ], y + shapeCenter[ 1 ] ] );
 
-		// 也真的驱动一下真实 collider 对象，证明它自己的运动学在跑（不用于渲染）
+		// Also genuinely drives the real collider object, proving its own
+		// kinematics actually run (not used for rendering)
 		collider.update( dt );
 
-		// ---- 画热力图 ----
+		// ---- draw the heatmap ----
 		for ( let cy = 0; cy < HEATMAP_CELLS; cy ++ ) {
 
 			const wy = WORLD_HALF - ( cy + 0.5 ) * ( WORLD_HALF * 2 / HEATMAP_CELLS );
@@ -209,8 +227,10 @@ const TRAIL_LENGTH = 10;
 
 		}
 
-		// ---- 画绕流粒子：每个粒子拖一条渐隐的短尾迹（TRAIL_LENGTH 个历史位置），
-		// 比单帧一小段线段更能在静止截图里也看出"在流动" ----
+		// ---- draw the flow-around particles: each particle trails a short
+		// fading trail (TRAIL_LENGTH historical positions), which reads as
+		// "flowing" even in a still screenshot better than a single frame's
+		// tiny line segment would ----
 		ctx.lineWidth = 1.5;
 
 		for ( const p of particles ) {

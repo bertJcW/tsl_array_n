@@ -1,6 +1,8 @@
-// 只验证 kernel 图能不能构建成功、返回的是可调用的 dispatcher——不实际调用
-// dispatcher（那需要 tsl_array_n.init() 建立的真实 renderer，vitest/Node 环境
-// 没有），真正的扩散/拷贝数值行为要等 live 示例里用 toArray() 验证。
+// Only verifies that the kernel graph builds successfully and that a
+// callable dispatcher is returned -- doesn't actually call the dispatcher
+// (that needs a real renderer set up by tsl_array_n.init(), which the
+// vitest/Node environment doesn't have); the actual diffusion/copy numeric
+// behavior has to be verified with toArray() in a live example.
 
 import { describe, it, expect } from 'vitest';
 import * as tsl_array_n from 'tsl_array_n';

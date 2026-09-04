@@ -1,9 +1,14 @@
-// 冒烟测试，不是数值正确性验证：这个 sandbox 环境（见 00-grid-math/main.js 头部
-// 注释）目前连"kernel 里读另一个 field"这种基础操作都读不到正确值，所以就算这里
-// constrainVelocity() 跑完之后读出来的数字看起来"合理"也不能真的当数值验证——
-// 这里只确认整条链路（collider 栅格化 → 边界求解器构造 → constrainVelocity 真实
-// 派发一整套 kernel）能不能跑通、不抛错，这本身就有价值（能抓到 API 用错、参数
-// 个数不对、方法名拼错这类问题）。真正的数值正确性要等真实 WebGPU 环境。
+// A smoke test, not a numeric-correctness check: this sandbox environment
+// (see 00-grid-math/main.js's header comment) currently can't even read
+// back the right value for a basic "read a different field inside a kernel"
+// operation, so even if the numbers read back after constrainVelocity()
+// runs here "look reasonable", that still isn't real numeric verification --
+// this only confirms that the full pipeline (collider rasterization ->
+// boundary-condition-solver construction -> constrainVelocity() actually
+// dispatching a whole set of kernels) runs end to end without throwing,
+// which has value on its own (it catches API misuse, wrong argument counts,
+// misspelled method names). Real numeric correctness has to wait for a real
+// WebGPU environment.
 
 import * as tsl_array_n from 'tsl_array_n';
 import { grid } from 'fluxflow';
@@ -28,7 +33,7 @@ try {
 	const nx = 8, ny = 8;
 	const velocity = grid.createFaceCenteredGrid2( nx, ny, 1, 1, -4, -4 );
 
-	// 一个小方块 collider，摆在 domain 中间偏左，边长2
+	// a small square collider, placed left-of-center in the domain, side length 2
 	const colliderSquare = [ [ -3, -1 ], [ -1, -1 ], [ -1, 1 ], [ -3, 1 ] ];
 	const collider = grid.createSDFStaticCollider2( nx, ny, 1, 1, -4, -4 );
 
@@ -48,8 +53,9 @@ try {
 
 	try {
 
-		// 构造函数内部会立刻 dispatch buildBlockMarker()（因为传了真实 collider）——
-		// 这是 vitest 测不到的部分，真正的 live 验证从这里开始
+		// The constructor immediately dispatches buildBlockMarker() internally
+		// (because a real collider was passed in) -- this is the part vitest
+		// can't test; real live verification starts here
 		solver = grid.createGridBlockedBoundaryConditionSolver2( velocity, nx, ny, 1, 1, -4, -4, collider );
 		log( 'createGridBlockedBoundaryConditionSolver2() with a real collider', true, 'buildBlockMarker() dispatched during construction without throwing' );
 
@@ -60,8 +66,9 @@ try {
 
 	}
 
-	// 给 velocity 场塞一点初始值（向右的均匀流），让 constrainVelocity() 的
-	// no-flux/blocked-boundary 分支真的有非零输入可处理，不是全零场景
+	// Seed the velocity field with some initial values (a uniform rightward
+	// flow), so constrainVelocity()'s no-flux/blocked-boundary branches
+	// actually have nonzero input to process instead of an all-zero scenario
 	velocity.dataU.fromArray( new Float32Array( velocity.dataSizeU[ 0 ] * velocity.dataSizeU[ 1 ] ).fill( 1 ) );
 	velocity.dataV.fromArray( new Float32Array( velocity.dataSizeV[ 0 ] * velocity.dataSizeV[ 1 ] ).fill( 0 ) );
 
@@ -93,8 +100,8 @@ try {
 
 	}
 
-	// 顺带验证一下 setCollider(null, ...) 能不能把 collider 摘掉、退回"只做 domain
-	// boundary"的路径，不抛错
+	// While at it, also verify that setCollider(null, ...) can remove the
+	// collider and fall back to the "domain-boundary-only" path without throwing
 	try {
 
 		solver.setCollider( null, [ nx, ny ], [ 1, 1 ], [ -4, -4 ] );

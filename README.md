@@ -1,24 +1,24 @@
 # tsl-kernel monorepo
 
-这个仓库是一个 npm workspaces monorepo，每个子目录是一个独立的包，**各自license 不同，仓库整体没有统一的 license**（见根目录 [LICENSE](LICENSE)）：
+This repository is an npm workspaces monorepo, where each subdirectory is an independent package -- **each with its own license; there is no single license covering the repo as a whole** (see the root [LICENSE](LICENSE)):
 
-| 包 | 说明 | License | 状态 |
+| Package | Description | License | Status |
 |---|---|---|---|
-| [`packages/tsl_array_n`](packages/tsl_array_n) | 用 Taichi Lang 的心智模型封装 three.js TSL 计算能力的通用 GPU 并行计算库 | MIT | 已发布 [npm](https://www.npmjs.com/package/tsl_array_n) |
-| [`packages/fluxflow`](packages/fluxflow) | 基于 `tsl_array_n` 的浏览器端 GPU 流体解算库，从一个 Taichi Lang 写的流体库移植而来 | Apache-2.0 | 早期阶段——`grid/`（网格数据结构+边界条件求解器）已移植，压力投影/对流/粘性等完整求解器还没做，`private: true` 未发布 |
+| [`packages/tsl_array_n`](packages/tsl_array_n) | A general-purpose GPU parallel-compute library wrapping three.js TSL's compute capabilities with Taichi Lang's mental model | MIT | Published on [npm](https://www.npmjs.com/package/tsl_array_n) |
+| [`packages/fluxflow`](packages/fluxflow) | A browser-side GPU fluid-simulation library built on `tsl_array_n`, ported from a Taichi Lang fluid library | Apache-2.0 | Early stage -- `grid/` (grid data structures + boundary-condition solver) has been ported; a complete solver (pressure projection/advection/viscosity) hasn't been built yet; `private: true`, unpublished |
 
-各包的详细说明、以及各自的第三方依赖归属，见各自目录下的 README / LICENSE / THIRD-PARTY-NOTICES.md。
+See each package's own README / LICENSE / THIRD-PARTY-NOTICES.md for details and third-party attributions.
 
-## 开发
+## Development
 
 ```bash
-npm install              # 安装全部子包依赖，自动软链 workspace 内部依赖
-npm run dev               # 启动 tsl_array_n 的 vite dev server（等价于 npm run dev -w tsl_array_n）
-npm test                  # 跑所有子包的测试
+npm install               # installs all sub-package dependencies, auto-symlinks intra-workspace deps
+npm run dev                # starts tsl_array_n's vite dev server (equivalent to npm run dev -w tsl_array_n)
+npm test                   # runs every sub-package's tests
 ```
 
-单独对某个子包操作，用 `-w <包名>`，例如 `npm test -w tsl_array_n`。
+To act on a single sub-package, use `-w <package name>`, e.g. `npm test -w tsl_array_n`.
 
-## 为什么是 monorepo
+## Why a monorepo
 
-`fluxflow` 开发阶段需要频繁联调 `tsl_array_n`（改完源码立刻能在 fluxflow 里测，不用先发布）。子包之间只通过包名互相 import（`import * as tsl_array_n from 'tsl_array_n'`），不用跨包相对路径引用彼此的 `src/`——这样等某个子包成熟后，可以直接把它的目录拆成独立仓库，代码不需要改动。
+`fluxflow` needs to iterate against `tsl_array_n` frequently during development (test against source changes immediately, without publishing first). Sub-packages only import each other by package name (`import * as tsl_array_n from 'tsl_array_n'`), never via cross-package relative paths into each other's `src/` -- so once a sub-package matures, its directory can be split into its own repository directly, with no code changes needed.

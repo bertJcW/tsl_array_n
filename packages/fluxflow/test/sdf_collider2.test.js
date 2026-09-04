@@ -1,7 +1,9 @@
-// 结构性测试（跟 grid_math.test.js 一样的原因：TSL 节点图构建不需要 GPU，但读出
-// 真实数值要实跑 kernel）。addPolygon() 本身写进的 SDF 数值正确性由
-// polygon_sdf.test.js 直接覆盖（polygonsSignedDistance 是纯数字函数，这里只是
-// 调用它再 fromArray，不重复验证一遍数值）。
+// Structural tests (same reason as grid_math.test.js: building a TSL node
+// graph doesn't need a GPU, but reading real numeric values back requires
+// actually running a kernel). The numeric correctness of the SDF that
+// addPolygon() itself writes is directly covered by polygon_sdf.test.js
+// (polygonsSignedDistance is a pure numeric function; this file just calls
+// it and then fromArray, without re-verifying the numbers).
 
 import { describe, it, expect } from 'vitest';
 import { vec2 } from 'three/tsl';

@@ -1,16 +1,21 @@
-// 移植自 constant.py。
+// Ported from constant.py.
 //
-// DTYPE 的可切换精度（setPrecision(use_double)）在 WGSL/WebGPU compute 里没有
-// 对应物（没有原生 f64），不搬——固定只支持 float(f32)。
+// DTYPE's switchable precision (setPrecision(use_double)) has no equivalent
+// in WGSL/WebGPU compute (no native f64) -- not ported, fixed to float(f32)
+// only.
 //
-// initConstant() 在源码里存在，是因为 GRAVITY 要等 setPrecision 定好 DTYPE 之后
-// 才能以正确的精度分配 field，所以需要一个"先调用 initConstant 再用 GRAVITY"的
-// 编排步骤。JS 这边没有精度切换，不需要等待任何东西，GRAVITY 什么时候要用什么时候
-// 建就行，initConstant 这层编排本身就不需要了——不是漏搬，是它存在的前提没了。
+// initConstant() exists in the source because GRAVITY needs setPrecision to
+// have already fixed DTYPE before it can allocate a field at the right
+// precision, so a "call initConstant before using GRAVITY" orchestration
+// step is needed. There's no precision switch on the JS side, so there's
+// nothing to wait for -- GRAVITY can be created whenever it's needed, and
+// the initConstant orchestration layer itself just isn't needed -- not a
+// missed port, the reason it existed is gone.
 //
-// GRAVITY 本身也不做成模块级单例（源码里 GRAVITY 是整个 constant.py 模块共享的
-// 全局 field）：JS 这边每个 solver/模拟各自建一个，避免一个页面上同时跑多个模拟时
-// 共享一份可变全局状态。
+// GRAVITY itself also isn't a module-level singleton (in the source, GRAVITY
+// is a global field shared by the whole constant.py module): on the JS side
+// each solver/simulation creates its own, avoiding shared mutable global
+// state if a page ever runs multiple simulations at once.
 
 import * as tsl_array_n from 'tsl_array_n';
 
@@ -25,7 +30,8 @@ export const DIRECTION_ALL   = DIRECTION_LEFT | DIRECTION_RIGHT | DIRECTION_DOWN
 
 export const DEFAULT_GRAVITY = -9.81;
 
-// 对应源码 initConstant() 里 GRAVITY = ti.field(...); GRAVITY[None] = -9.81 这两行。
+// Corresponds to the two lines in the source's initConstant():
+// GRAVITY = ti.field(...); GRAVITY[None] = -9.81.
 export function createGravity( value = DEFAULT_GRAVITY ) {
 
 	const gravity = tsl_array_n.array0( 'float' );
@@ -34,8 +40,9 @@ export function createGravity( value = DEFAULT_GRAVITY ) {
 
 }
 
-// 对应源码 setGravity(newGravity)——源码改的是隐式的模块级 GRAVITY，这里要传入
-// 具体是哪个 gravity（因为不再是单例）。
+// Corresponds to the source's setGravity(newGravity) -- the source mutates
+// an implicit module-level GRAVITY; here the caller must pass which gravity
+// to update (since it's no longer a singleton).
 export function setGravity( gravity, newValue ) {
 
 	gravity.fromArray( new Float32Array( [ newValue ] ) );

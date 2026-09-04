@@ -1,13 +1,18 @@
-// 浏览器专用（需要 document/DOM），不能在 vitest/Node 环境跑，只能靠 live 示例验证。
+// Browser-only (needs document/DOM), can't run in vitest/Node -- only
+// verifiable via a live example.
 //
-// 源码 addSvg() 用 Python 专用的 svg.path 库解析 <path> 的 d 属性、沿路径采样出
-// 顶点。这里改用浏览器原生的 SVGPathElement.getTotalLength()/getPointAtLength()——
-// 效果一样（沿弧长等距采样 N 个点），零依赖。
+// The source's addSvg() uses the Python-only svg.path library to parse a
+// <path>'s d attribute and sample vertices along it. This uses the browser's
+// native SVGPathElement.getTotalLength()/getPointAtLength() instead -- same
+// effect (N points sampled at even arc-length intervals), zero dependencies.
 //
-// 一个已知细节：getPointAtLength() 需要 <path> 元素处于一个真正跑过布局的 document
-// 里才可靠——用 DOMParser().parseFromString() 单独解析出来的游离 document 不一定
-// 触发布局（不同浏览器实现不一定一致）。所以这里把解析出来的 SVG 临时挂到当前页面
-// 的 DOM 上（视觉上隐藏），读完几何信息立刻摘掉，不会造成可见的副作用或内存泄漏。
+// One known detail: getPointAtLength() is only reliable when the <path>
+// element belongs to a document that has actually gone through layout --
+// a detached document parsed on its own via DOMParser().parseFromString()
+// doesn't necessarily trigger layout (browser implementations aren't
+// consistent about this). So the parsed SVG is temporarily attached to the
+// current page's DOM here (visually hidden), and removed again as soon as
+// its geometry has been read -- no visible side effect or memory leak.
 
 export function parseSvgToPolygons( svgString, { samples = 100, scale = 1, offsetX = 0, offsetY = 0 } = {} ) {
 

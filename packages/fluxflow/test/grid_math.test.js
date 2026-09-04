@@ -1,7 +1,11 @@
-// 结构性测试：只验证节点图能不能构建成功（不抛错）、返回值形状/字段是否正确——
-// 双线性插值/梯度/散度/旋度/拉普拉斯算出来的数对不对，vitest 验证不了（不需要
-// 真 GPU 就能构建节点图，但要读出真实数值必须实跑 kernel），要等 Step B 有真实
-// field 可用后补一个 live 示例，读回 toArray() 跟手算的期望值比对。
+// Structural tests: only verify that the node graph builds successfully
+// (doesn't throw) and that the return value's shape/fields are correct --
+// vitest can't verify whether the numbers coming out of the bilinear
+// interpolation/gradient/divergence/curl/laplacian are actually right
+// (building a node graph doesn't need a real GPU, but reading real numeric
+// values back requires actually running a kernel); that needs a live
+// example once real fields are available, reading back via toArray() and
+// comparing against hand-computed expected values.
 
 import { describe, it, expect } from 'vitest';
 import { int, vec2 } from 'three/tsl';
