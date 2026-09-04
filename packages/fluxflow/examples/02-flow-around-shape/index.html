@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>fluxflow — flow around shape</title>
+	<style>
+		body { margin: 0; font-family: system-ui, sans-serif; background: #0a0a0f; color: #eee; display: flex; flex-direction: column; align-items: center; gap: 0.75rem; padding: 1.5rem; box-sizing: border-box; }
+		h1 { font-size: 1rem; font-weight: 600; margin: 0; color: #9ca3af; }
+		canvas { border-radius: 8px; box-shadow: 0 0 40px rgba(80,140,255,0.15); }
+		#status { font-size: 0.8rem; color: #6b7280; white-space: pre-wrap; text-align: center; max-width: 480px; line-height: 1.5; }
+		#status .ok { color: #4ade80; }
+		#status .err { color: #f87171; }
+	</style>
+</head>
+<body>
+	<h1>fluxflow — 旋转 SDF 碰撞体 + 绕流粒子（现有 grid 模块能做的视觉效果）</h1>
+	<canvas id="canvas" width="480" height="480"></canvas>
+	<div id="status">initializing…</div>
+	<script type="module" src="./main.js"></script>
+</body>
+</html>

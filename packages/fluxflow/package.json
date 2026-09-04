@@ -1,0 +1,44 @@
+{
+  "name": "fluxflow",
+  "version": "0.0.1",
+  "private": true,
+  "description": "GPU fluid simulation for the browser, built on tsl_array_n — ported from a Taichi Lang fluid solver.",
+  "type": "module",
+  "main": "src/index.js",
+  "module": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "dev": "vite"
+  },
+  "keywords": [
+    "three.js",
+    "tsl",
+    "webgpu",
+    "fluid-simulation",
+    "taichi",
+    "gpgpu"
+  ],
+  "author": "bert wang",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bertJcW/tsl_array_n.git",
+    "directory": "packages/fluxflow"
+  },
+  "peerDependencies": {
+    "three": ">=0.180.0",
+    "tsl_array_n": "^0.1.0"
+  },
+  "devDependencies": {
+    "three": "^0.185.1",
+    "tsl_array_n": "^0.1.0",
+    "vite": "^8.2.2",
+    "vitest": "^5.0.0"
+  }
+}

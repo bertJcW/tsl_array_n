@@ -1,13 +1,12 @@
 {
   "name": "tsl-array-n-monorepo",
   "private": true,
-  "description": "Monorepo root — see packages/tsl_array_n (published) and, later, packages/fluxflow.",
+  "description": "Monorepo root — see packages/tsl_array_n (MIT, published) and packages/fluxflow (Apache-2.0). No single license applies to the repo as a whole; see each package's own LICENSE.",
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
     "dev": "npm run dev -w tsl_array_n",
     "test": "npm run test --workspaces --if-present"
-  },
-  "license": "MIT"
+  }
 }

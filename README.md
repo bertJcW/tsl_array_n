@@ -1,13 +1,13 @@
 # tsl-kernel monorepo
 
-这个仓库是一个 npm workspaces monorepo，每个子目录是一个独立发布的 npm 包：
+这个仓库是一个 npm workspaces monorepo，每个子目录是一个独立的包，**各自license 不同，仓库整体没有统一的 license**（见根目录 [LICENSE](LICENSE)）：
 
-| 包 | 说明 | 状态 |
-|---|---|---|
-| [`packages/tsl_array_n`](packages/tsl_array_n) | 用 Taichi Lang 的心智模型封装 three.js TSL 计算能力的通用 GPU 并行计算库 | 已发布 [npm](https://www.npmjs.com/package/tsl_array_n) |
-| `packages/fluxflow` | 基于 `tsl_array_n` 的流体解算库（规划中，尚未创建） | 未开始 |
+| 包 | 说明 | License | 状态 |
+|---|---|---|---|
+| [`packages/tsl_array_n`](packages/tsl_array_n) | 用 Taichi Lang 的心智模型封装 three.js TSL 计算能力的通用 GPU 并行计算库 | MIT | 已发布 [npm](https://www.npmjs.com/package/tsl_array_n) |
+| [`packages/fluxflow`](packages/fluxflow) | 基于 `tsl_array_n` 的浏览器端 GPU 流体解算库，从一个 Taichi Lang 写的流体库移植而来 | Apache-2.0 | 早期阶段——`grid/`（网格数据结构+边界条件求解器）已移植，压力投影/对流/粘性等完整求解器还没做，`private: true` 未发布 |
 
-各包的详细说明见各自目录下的 README。
+各包的详细说明、以及各自的第三方依赖归属，见各自目录下的 README / LICENSE / THIRD-PARTY-NOTICES.md。
 
 ## 开发
 
