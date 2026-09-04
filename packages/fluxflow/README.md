@@ -2,7 +2,7 @@
 
 Browser-side GPU fluid simulation, built on [tsl_array_n](../tsl_array_n), ported from a [Taichi Lang](https://www.taichi-lang.org/) fluid-simulation library (`D:\OneDrive\04_lib_fluxflow`). The end goal is real-time browser fluid visualization and interaction paired with three.js.
 
-> **Status**: the Python source's `grid/` folder (MAC-grid data structures + numeric helpers + SDF colliders + boundary-condition solver) has been fully ported. There's no pressure-projection/advection/viscosity solver itself yet (`grid_solver2.js` is just an empty, hook-pluggable skeleton), so this can't run a complete fluid simulation yet -- this port's goal is the "foundation layer", not an end-to-end solver.
+> **Status**: the Python source's `grid/` folder (MAC-grid data structures + numeric helpers + SDF colliders + boundary-condition solver) and `noise/` folder (Perlin/Simplex/cellular noise) have both been fully ported. There's no pressure-projection/advection/viscosity solver itself yet (`grid_solver2.js` is just an empty, hook-pluggable skeleton), so this can't run a complete fluid simulation yet -- this port's goal is the "foundation layer", not an end-to-end solver.
 
 ## Current state: `grid`
 
@@ -22,6 +22,20 @@ import { grid } from 'fluxflow';
 | `sdf_collider2.js` | `sdf_collider2.py` | `createSDFStaticCollider2`/`createSDFRigidBodyCollider2`; `addPolygon`/`addSvg` replace the source's `addShapelyGeometry`/`addSvg` (zero new dependencies, see below) |
 | `grid_blocked_boundary_condition_solver2.js` | `grid_blocked_boundary_condition_solver2.py` | `createGridBlockedBoundaryConditionSolver2` -- velocity-field constraints from colliders + closed domain boundaries, the largest single file in this port |
 | `grid_solver2.js` | `grid_solver2.py` | `createGridSolver2`, a pure hooks skeleton; a concrete solver is out of scope for this pass |
+
+## Current state: `noise`
+
+```js
+import { noise } from 'fluxflow';
+```
+
+| File | Corresponding Python source | Contents |
+|---|---|---|
+| `noise.js` | `noise.py` | `perlinNoise3d(P)`, `simplexNoise3d(v)`, `cellular3d(P)` -- ported from [WebGL-Noise](https://github.com/ashima/webgl-noise) (MIT), via the Python `fluxflow` project; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) |
+
+Meant for use inside a `kernel()`/`func()` body, or composed into `grid_math.js`-style helpers -- e.g. as a forcing/initial-condition field for a future solver, or just as a general parallel-compute building block. The source's `ENABLE_COMPLEX_VERSION` branch in `cellular3d` (a hardcoded-`False`, never-toggled flag) was dropped as dead code -- only the real F1+F2 branch is ported; see the comment in `noise.js`. `permute`/`taylorInvSqrt` are also exported (small building blocks, in case a future 4th noise variant wants them); `mod289`/`mod7`/`fade` stay internal-only, alongside the four trivial one-line Taichi wrappers (`floor`/`fract`/`abs`/`dot`) which weren't ported at all -- TSL's own equivalents are used directly at each call site instead.
+
+Verified by `examples/03-noise/`: renders all three as a 2D grayscale slice. Unlike `grid_math.js`'s functions, these don't read any other already-populated field (each thread only computes from its own position), so — unlike `examples/00-grid-math/` — this one is expected to (and does) render correctly even on this dev sandbox's WebGL2 fallback, not just on real WebGPU.
 
 ## Key tradeoffs made during this port
 
@@ -58,4 +72,4 @@ npm run dev -w fluxflow      # vite dev server, runs examples/
 
 [Apache License 2.0](LICENSE) © 2026 bert wang -- matches the license of the Python `fluxflow` project this was ported from.
 
-`src/grid/` is ported from a separate project (`D:\OneDrive\04_lib_fluxflow`, also Apache License 2.0), part of which traces further back to [fluid-engine-dev](https://github.com/doyubkim/fluid-engine-dev) (MIT) -- see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for the full provenance chain and per-file mapping.
+`src/grid/` and `src/noise/` are ported from a separate project (`D:\OneDrive\04_lib_fluxflow`, also Apache License 2.0), parts of which trace further back to [fluid-engine-dev](https://github.com/doyubkim/fluid-engine-dev) (MIT) and [WebGL-Noise](https://github.com/ashima/webgl-noise) (MIT) respectively -- see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for the full provenance chain and per-file mapping.
