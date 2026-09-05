@@ -332,14 +332,111 @@ project's own license text already reproduced above, under "fluxflow
 (Python) (Apache License 2.0)"; that section's terms apply here too, this
 isn't repeated a second time.
 
+## Provenance of `src/linalg/`
+
+`src/linalg/linalg.js`'s `createConjugateGradientSolver` function is a
+JavaScript/TSL port of `linalg/linalg.py`'s `mfcg` function, from the same
+Python `fluxflow` project (Apache License 2.0). That file's own header
+comment says it is "almost identical to the original Taichi source code",
+ported directly from **Taichi Lang** itself
+(`python/taichi/linalg/matrixfree_cg.py`), also under the **Apache License
+2.0** — so, unlike `fluid-engine-dev` and `WebGL-Noise` above, this is a
+same-license derivation (Taichi's own Apache-2.0 code, via a project that is
+itself Apache-2.0), not a second license to reproduce:
+
+```
+Taichi Lang (Python, Apache-2.0, the Taichi team)
+  -> fluxflow (Python/Taichi, Apache-2.0, bert wang)
+    -> fluxflow (this package, JS/TSL, Apache-2.0, bert wang)
+```
+
+- **Source:** https://github.com/taichi-dev/taichi/blob/master/python/taichi/linalg/matrixfree_cg.py
+- **License:** Apache License 2.0 — full text already reproduced above, under "fluxflow (Python) (Apache License 2.0)"; not repeated a second time.
+
+Functions in this package derived from Taichi Lang (through the Python
+`fluxflow` project's `linalg/linalg.py`):
+
+- `src/linalg/linalg.js`'s `createConjugateGradientSolver`
+
+The same file's `createPreconditionedConjugateGradientSolver` is **not**
+part of this derivation — checked directly, neither the Python `fluxflow`
+project (whose own header comment flags preconditioning as future work)
+nor Taichi Lang's actual upstream `matrixfree_cg.py` (which has only plain
+CG and an unrelated BiCGSTAB solver) have a preconditioned CG to derive
+from. It's an original implementation of the standard, textbook
+preconditioned CG algorithm, built on the same GPU-atomic-reduction
+infrastructure as the function above; see that function's own header
+comment in `linalg.js` for the detailed reasoning.
+
+### jet/fluid-engine-dev (MIT) — direct, no Python intermediary
+
+Both `solve()` functions' periodic true-residual recomputation (see
+`RESIDUAL_RECOMPUTE_INTERVAL`'s own comment in `linalg.js`) is ported
+directly from **jet/fluid-engine-dev**'s own `pcg()`
+(`include/jet/detail/cg-inl.h`) — a local copy at
+`D:\OneDrive\02_library\cpp\jet\fluid-engine-dev` was read directly for
+this. Unlike the `grid/` files above (which derive from fluid-engine-dev
+*through* the Python `fluxflow` project, which had already ported them),
+this one skips the Python intermediary entirely, the same way the Taichi
+Lang derivation above does:
+
+```
+fluid-engine-dev (C++, MIT, Doyub Kim)
+  -> fluxflow (this package, JS/TSL, Apache-2.0, bert wang)
+```
+
+- **Source:** https://github.com/doyubkim/fluid-engine-dev/blob/master/include/jet/detail/cg-inl.h
+- **License:** MIT — full text already reproduced above, under "fluid-engine-dev (MIT) — via fluxflow (Python)"; not repeated a second time.
+
+Only this one technique is derived from jet here — the surrounding
+solve() functions (variable naming, factory shape, GPU-atomic reduction,
+etc.) are this port's own, as described above.
+
+### jet/fluid-engine-dev (MIT) — `src/linalg/multigrid.js`
+
+`src/linalg/multigrid.js`'s geometric multigrid V-cycle preconditioner is
+also read directly from jet/fluid-engine-dev (the same local copy as
+above) — `include/jet/mg.h`, `detail/mg-inl.h`, `fdm_mg_solver2.cpp`,
+`fdm_mg_linear_system2.cpp`, and `fdm_gauss_seidel_solver2.cpp`. Same
+direct chain as immediately above (no Python intermediary):
+
+```
+fluid-engine-dev (C++, MIT, Doyub Kim)
+  -> fluxflow (this package, JS/TSL, Apache-2.0, bert wang)
+```
+
+- **Source:** https://github.com/doyubkim/fluid-engine-dev/blob/master/include/jet/mg.h (V-cycle), .../fdm_mg_linear_system2.cpp (restriction/correction formulas), .../fdm_gauss_seidel_solver2.cpp (red-black relax formula)
+- **License:** MIT — full text already reproduced above, under "fluid-engine-dev (MIT) — via fluxflow (Python)"; not repeated a second time.
+
+What's ported directly, and what's this port's own generalization (both
+described in full in `multigrid.js`'s own header comment):
+
+- The V-cycle structure (relax / restrict / recurse / correct / relax
+  again) and the red-black relax formula carry over essentially unchanged.
+- The restriction (separable 1/8-3/8-3/8-1/8 full-weighting) and
+  correction (bilinear 1/4-3/4) transfer formulas are jet's own, but
+  **generalized** from jet's 2D-only formulas (an explicit x/y outer
+  product) to the outer product of the same per-axis 1D filter across
+  however many axes `shape.length` has (matching jet exactly in the 2D
+  case, extending the same idea to 1D and 3D) -- a generalization, not a
+  literal port, since jet itself has no dimension-generic version of
+  these to derive from directly.
+- Unlike jet's own MGPCG (variable-coefficient, collider-aware, backed by
+  an explicit per-cell matrix), this file targets the standard
+  constant-coefficient Poisson/Laplacian on a plain rectangular domain
+  with a fixed zero-flux boundary treatment -- a deliberate scope cut, not
+  an oversight; see `multigrid.js`'s own header comment for the reasoning.
+
 ## Design inspiration (not a code dependency)
 
 ### Taichi Lang
 
 The Python `fluxflow` project (and therefore this port's algorithms) is
 written against [Taichi Lang](https://github.com/taichi-dev/taichi)'s
-programming model. No Taichi source code itself is used or copied here — this
-is a credit for the language/tool, not a licensing dependency for Taichi
-itself (the actual ported algorithms are attributed above, to fluid-engine-dev
-and to the Python `fluxflow` project). Taichi is distributed under the Apache
-License 2.0 (https://github.com/taichi-dev/taichi/blob/master/LICENSE).
+programming model. Beyond the direct `linalg/linalg.js` derivation above, no
+further Taichi source code itself is used or copied here — this is a credit
+for the language/tool, not a licensing dependency for Taichi itself (the
+actual ported algorithms are attributed above, to fluid-engine-dev, to
+WebGL-Noise, and to the Python `fluxflow` project). Taichi is distributed
+under the Apache License 2.0
+(https://github.com/taichi-dev/taichi/blob/master/LICENSE).
