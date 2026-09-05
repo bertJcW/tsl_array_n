@@ -15,7 +15,7 @@
 // way -- pure naming cleanup, the numeric logic corresponds line-for-line to
 // the source.
 
-import { int, float, vec2, mat2, min, max, floor } from 'three/tsl';
+import { int, float, vec2, mat2, min, max, floor, abs, or } from 'three/tsl';
 
 // ------------------------------------------------------------
 // interpolation
@@ -79,6 +79,97 @@ export function faceCenteredValueAtPosition2( dataU, dataV, gridSpacing, dataOri
 
 	const u = collocatedValueAtPosition2( dataU, gridSpacing, dataOriginU, pos, shapeU );
 	const v = collocatedValueAtPosition2( dataV, gridSpacing, dataOriginV, pos, shapeV );
+
+	return vec2( u, v );
+
+}
+
+// Monotonic cubic Hermite interpolation between f1 (at f=0) and f2 (at
+// f=1), using f0/f3 as the outer neighbors for tangent estimation --
+// Fedkiw, Stam & Jensen's clamped-Catmull-Rom scheme ("Visual Simulation
+// of Smoke", SIGGRAPH 2001, section on higher-order advection). The raw
+// Catmull-Rom tangent at each of the two inner points (f1, f2) is zeroed
+// whenever it disagrees in sign with the actual secant slope between them
+// (or whenever that secant is itself ~0) -- this is what prevents the
+// cubic from overshooting past f1/f2 the way a raw, unclamped
+// Catmull-Rom spline can, at the cost of degrading to a flatter
+// (sometimes locally linear-ish) interpolant right where the data isn't
+// monotonic. Ported from jet/fluid-engine-dev's `monotonicCatmullRom`
+// (math_utils.h) -- see ../../THIRD-PARTY-NOTICES.md. Verified against a
+// plain-JS reference before porting: reconstructs linear data exactly,
+// stays within [min,max] of the interpolated interval on a step function
+// (no overshoot), and doesn't overshoot past a local extremum either.
+export function monotonicCubic1d( f0, f1, f2, f3, f ) {
+
+	const D1 = f2.sub( f1 );
+	const rawD1 = f2.sub( f0 ).mul( 0.5 );
+	const rawD2 = f3.sub( f1 ).mul( 0.5 );
+
+	const isFlat = abs( D1 ).lessThan( 1e-12 );
+	const d1 = or( isFlat, rawD1.mul( D1 ).lessThan( 0 ) ).select( float( 0 ), rawD1 );
+	const d2 = or( isFlat, rawD2.mul( D1 ).lessThan( 0 ) ).select( float( 0 ), rawD2 );
+
+	const a3 = d1.add( d2 ).sub( D1.mul( 2 ) );
+	const a2 = D1.mul( 3 ).sub( d1.mul( 2 ) ).sub( d2 );
+	const a1 = d1;
+	const a0 = f1;
+
+	return a3.mul( f ).mul( f ).mul( f )
+		.add( a2.mul( f ).mul( f ) )
+		.add( a1.mul( f ) )
+		.add( a0 );
+
+}
+
+// The 4 clamped indices (im1, i0, i1, i2) and fractional part along one
+// axis for a bicubic sample -- both-ends-clamped exactly like jet's
+// CubicArraySampler2 (`max(i-1,0)`, `i`, `min(i+1,n-1)`, `min(i+2,n-1)`),
+// so positions outside the grid still sample the boundary value, same
+// spirit as bilinearCoordsAndWeights2 above.
+function cubicIndices1d( coord, n ) {
+
+	const i0 = int( floor( coord ) );
+	const f = coord.sub( i0.toFloat() );
+
+	const im1 = max( 0, min( i0.sub( 1 ), n - 1 ) );
+	const i0c = max( 0, min( i0, n - 1 ) );
+	const i1c = max( 0, min( i0.add( 1 ), n - 1 ) );
+	const i2c = max( 0, min( i0.add( 2 ), n - 1 ) );
+
+	return { im1, i0c, i1c, i2c, f };
+
+}
+
+// Monotonic bicubic sample of a collocated field at a continuous position
+// -- the 2D tensor-product structure jet's CubicArraySampler2 uses (X
+// across each of 4 rows, then Y on those 4 results), built from
+// monotonicCubic1d/cubicIndices1d above. Unlike bilinearCoordsAndWeights2,
+// the monotonicity clamp depends on the actual field values (not just
+// position), so there's no reusable position-only "weights" struct here --
+// this takes the field and position together and returns the value
+// directly, same shape as collocatedValueAtPosition2 itself.
+export function collocatedCubicValueAtPosition2( data, gridSpacing, dataOrigin, pos, shape ) {
+
+	const [ nx, ny ] = shape;
+	const gridPos = pos.sub( dataOrigin ).div( gridSpacing );
+
+	const xi = cubicIndices1d( gridPos.x, nx );
+	const yi = cubicIndices1d( gridPos.y, ny );
+
+	const rowValues = [ yi.im1, yi.i0c, yi.i1c, yi.i2c ].map( ( j ) => monotonicCubic1d(
+		data( xi.im1, j ), data( xi.i0c, j ), data( xi.i1c, j ), data( xi.i2c, j ), xi.f
+	) );
+
+	return monotonicCubic1d( rowValues[ 0 ], rowValues[ 1 ], rowValues[ 2 ], rowValues[ 3 ], yi.f );
+
+}
+
+// Monotonic bicubic sample of a face-centered (MAC) velocity field at a
+// continuous position -- cubic counterpart of faceCenteredValueAtPosition2.
+export function faceCenteredCubicValueAtPosition2( dataU, dataV, gridSpacing, dataOriginU, dataOriginV, pos, shapeU, shapeV ) {
+
+	const u = collocatedCubicValueAtPosition2( dataU, gridSpacing, dataOriginU, pos, shapeU );
+	const v = collocatedCubicValueAtPosition2( dataV, gridSpacing, dataOriginV, pos, shapeV );
 
 	return vec2( u, v );
 

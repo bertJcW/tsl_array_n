@@ -281,6 +281,40 @@ the approach.
 >
 >    END OF TERMS AND CONDITIONS
 
+### jet/fluid-engine-dev (MIT) — `src/grid/advection_solver2.js`, direct, no Python intermediary
+
+`src/grid/advection_solver2.js` (semi-Lagrangian advection with monotonic
+cubic interpolation) has no Python source to port from at all -- the
+Python `fluxflow` project's own `grid_solver2.py` never got past an
+abstract `computeAdvection` hook (see `grid_solver2.js`'s own header
+comment). This is instead read directly from **jet/fluid-engine-dev** (the
+same local copy already used for the `linalg/` derivations) --
+`semi_lagrangian2.h`/`.cpp` (the back-trace algorithm, including its
+boundary handling), `math_utils.h`'s `monotonicCatmullRom` (Fedkiw, Stam &
+Jensen's clamped-Catmull-Rom scheme, "Visual Simulation of Smoke",
+SIGGRAPH 2001), and `array_samplers2-inl.h`'s `CubicArraySampler2` (the 2D
+tensor-product structure built on top of the 1D formula). Same direct
+chain as the `linalg/` entries above (no Python intermediary):
+
+```
+fluid-engine-dev (C++, MIT, Doyub Kim)
+  -> fluxflow (this package, JS/TSL, Apache-2.0, bert wang)
+```
+
+- **Source:** https://github.com/doyubkim/fluid-engine-dev/blob/master/include/jet/semi_lagrangian2.h (back-trace + boundary handling), .../math_utils.h (monotonicCatmullRom), .../detail/array_samplers2-inl.h (CubicArraySampler2)
+- **License:** MIT — full text already reproduced above, under "fluid-engine-dev (MIT) — via fluxflow (Python)"; not repeated a second time.
+
+What carries over essentially unchanged: the back-trace algorithm
+(adaptive-substep RK2 midpoint integration, with the boundary-crossing
+clamp built directly into it) and the `monotonicCatmullRom` formula
+itself, including its exact monotonicity clamp. What's new here (this
+project's own code, not jet's): the `Loop()`/`Break()`-based
+bounded-iteration translation of jet's dynamic-count `while` loop
+(tsl_array_n has no native while-loop), and folding jet's
+base-class/override-class split (`SemiLagrangian2` vs.
+`CubicSemiLagrangian2`) into a single factory function, matching this
+whole port's factory-over-inheritance convention.
+
 ## Provenance of `src/noise/`
 
 `src/noise/noise.js` is a JavaScript/TSL port of `noise/noise.py` from the

@@ -7,4 +7,5 @@ export * from './polygon_sdf.js';
 export * from './svg_utils.js';
 export * from './sdf_collider2.js';
 export * from './grid_blocked_boundary_condition_solver2.js';
+export * from './advection_solver2.js';
 export * from './grid_solver2.js';
