@@ -67,6 +67,11 @@
 // 5. Generic over 1D/2D/3D shapes, matching the source's own
 //    ti.i/ti.ij/ti.ijk branching -- capped at 3D for the same reason
 //    array2/array3 are: a WebGPU compute dispatch is inherently <=3D.
+// 6. Periodic true-residual recomputation, absent from both the Python
+//    source and Taichi's own upstream -- ported directly from
+//    jet/fluid-engine-dev's own `pcg()` as a numerical-robustness
+//    improvement. See RESIDUAL_RECOMPUTE_INTERVAL's own comment below and
+//    ../../THIRD-PARTY-NOTICES.md for the attribution.
 
 import * as tsl_array_n from 'tsl_array_n';
 import { atomicAdd, round } from 'three/tsl';
@@ -80,6 +85,40 @@ import { atomicAdd, round } from 'three/tsl';
 // value range.
 const DEFAULT_ATOMIC_DOT_SCALE = 65536;
 
+// jet/fluid-engine-dev's own `pcg()` (include/jet/detail/cg-inl.h, MIT
+// license, Doyub Kim -- see ../../THIRD-PARTY-NOTICES.md) recomputes the
+// true residual `r = b - Ax` from scratch every 50 iterations, instead of
+// always using the cheaper incremental `r -= alpha*Ap`: repeatedly
+// applying the incremental update accumulates floating-point drift over
+// many iterations, and periodically recomputing from scratch corrects it.
+// jet also forces an extra recompute whenever the tracked residual grows
+// between iterations (a sign the incremental value has already drifted).
+// Neither the Python `linalg.py` source nor Taichi's own upstream
+// `matrixfree_cg.py` do this -- ported here directly from jet's C++
+// source as a genuine robustness improvement, used by both solve()
+// functions below. jet also guards its final `sqrt(sigmaNew)` with
+// `fabs()` ("workaround for negative zero"); both solve() functions below
+// apply the same guard at every sqrt() call site, not just the final one,
+// since (unlike jet's own while-loop, which only takes a sqrt once at the
+// very end for reporting) this port's for-loop-with-early-break shape
+// uses sqrt(...) < tol directly as its own per-iteration break condition,
+// where a NaN from a tiny negative residual (plausible here given the
+// atomic dot product's own fixed-point quantization noise, on top of the
+// float drift jet's own comment already worries about) would silently
+// stop the loop from ever detecting convergence.
+//
+// Added after both examples/04-conjugate-gradient/ and
+// examples/05-preconditioned-conjugate-gradient/ were already confirmed
+// correct on real WebGPU hardware -- neither example actually exercises
+// this addition (both converge in well under 50 iterations, and
+// monotonically, so neither the periodic-interval branch nor the
+// residual-grew trigger ever fires for N=8), so that earlier confirmation
+// still covers every code path those examples actually reach, but this
+// specific addition remains structurally untested until either example
+// is grown large/ill-conditioned enough to actually take more than 50
+// iterations, or the residual genuinely increases at some point.
+const RESIDUAL_RECOMPUTE_INTERVAL = 50;
+
 function shapesEqual( a, b ) {
 
 	return a.length === b.length && a.every( ( v, i ) => v === b[ i ] );
@@ -92,8 +131,10 @@ function shapesEqual( a, b ) {
 // regardless of dimensionality. (Needed because tsl_array_n's kernel()
 // validates the callback's own declared arity against shape's
 // dimensionality, so a single rest-param callback -- whose .length is
-// always 0 -- can't be used directly here.)
-function buildElementwiseKernel( shape, indexedFn ) {
+// always 0 -- can't be used directly here.) Exported for reuse by
+// multigrid.js, which needs the exact same dimension-generic kernel
+// construction for its own 1D/2D/3D-generic stencil operators.
+export function buildElementwiseKernel( shape, indexedFn ) {
 
 	if ( shape.length === 1 ) return tsl_array_n.kernel( shape, ( i ) => indexedFn( [ i ] ) );
 	if ( shape.length === 2 ) return tsl_array_n.kernel( shape, ( i, j ) => indexedFn( [ i, j ] ) );
@@ -193,6 +234,16 @@ export function createConjugateGradientSolver( applyOperator, b, x, options = {}
 
 	} );
 
+	// r = b - Ax, the *true* residual -- unlike init() above, does not
+	// touch p/Ap, so it's safe to call mid-loop for the periodic drift
+	// correction (see RESIDUAL_RECOMPUTE_INTERVAL's comment). Callers must
+	// call applyToX() first to refresh Ax from the current x.
+	const recomputeR = buildElementwiseKernel( shape, ( I ) => {
+
+		r( ...I ).assign( b( ...I ).sub( Ax( ...I ) ) );
+
+	} );
+
 	const updateX = buildElementwiseKernel( shape, ( I ) => {
 
 		x( ...I ).addAssign( p( ...I ).mul( alpha() ) );
@@ -228,7 +279,9 @@ export function createConjugateGradientSolver( applyOperator, b, x, options = {}
 
 		updateP(); // p0 = r0 = b - A@x0
 
-		if ( Math.sqrt( initRTr ) >= tol ) {
+		let forceResidualRecompute = false;
+
+		if ( Math.sqrt( Math.abs( initRTr ) ) >= tol ) {
 
 			for ( let iter = 0; iter < maxiter; iter ++ ) {
 
@@ -237,11 +290,28 @@ export function createConjugateGradientSolver( applyOperator, b, x, options = {}
 
 				setScalar( alpha, oldRTr / pAp ); // alpha = rTr / pTAp
 				updateX();
-				updateR();
+
+				if ( forceResidualRecompute || ( iter % RESIDUAL_RECOMPUTE_INTERVAL === 0 && iter > 0 ) ) {
+
+					applyToX(); // Ax = A @ x (refresh -- x just changed)
+					recomputeR(); // r = b - Ax, correcting any drift from past incremental updates
+					forceResidualRecompute = false;
+
+				} else {
+
+					updateR(); // r -= alpha * Ap (cheap incremental update)
+
+				}
 
 				newRTr = await readAtomicDot( dotAccum, atomicScale, dispatchDotRR );
 
-				if ( Math.sqrt( newRTr ) < tol ) break;
+				if ( Math.sqrt( Math.abs( newRTr ) ) < tol ) break;
+
+				// Residual grew since last iteration -- shouldn't happen in
+				// exact arithmetic; a sign the incremental r has drifted,
+				// so force a true recompute next iteration (see
+				// RESIDUAL_RECOMPUTE_INTERVAL's comment).
+				if ( newRTr > oldRTr ) forceResidualRecompute = true;
 
 				setScalar( beta, newRTr / oldRTr ); // beta = rTr_i+1 / rTr_i
 				updateP();
@@ -259,11 +329,223 @@ export function createConjugateGradientSolver( applyOperator, b, x, options = {}
 		// the loop's own break condition) already implies newRTr < tol
 		// whenever tol < 1, so the two checks agree in the normal operating
 		// range. Preserved as-is rather than "fixed", since this is meant
-		// to be a faithful port.
+		// to be a faithful port. (No fabs() needed here -- this is a raw
+		// number-vs-number comparison, not a sqrt() call, so there's no
+		// NaN-from-negative risk to guard against.)
 		return newRTr < tol;
 
 	}
 
 	return { solve, p, r, Ap, Ax };
+
+}
+
+// createPreconditionedConjugateGradientSolver: the same matrix-free CG
+// above, extended to accept a preconditioner M (an approximate inverse of
+// A) via an `applyPreconditioner(input, output) => dispatcher` factory --
+// same idiom as `applyOperator`, called by this module exactly once
+// (bound to `(r, z)`, since the preconditioned residual is always
+// recomputed fresh from the current r; there's no separate "p-side"
+// application the way `applyOperator` needs one for both `x` and `p`).
+//
+// This is NOT a port of anything -- there's nothing to port from. This
+// project's own Python `linalg.py` flags preconditioning as explicit
+// future work in its own header comment ("later, this will be extended
+// into preconditioning version of matrix free cg"), and Taichi Lang's own
+// upstream `matrixfree_cg.py` (checked directly) only has the plain CG
+// already ported above, plus an unrelated BiCGSTAB solver -- neither has a
+// preconditioned CG to port from. This is an original implementation of
+// the standard preconditioned CG algorithm (see e.g. Shewchuk, "An
+// Introduction to the Conjugate Gradient Method Without the Agonizing
+// Pain", section B2), built on the exact same infrastructure as the
+// plain-CG solver above (GPU-atomic reduction, create-once-solve-many,
+// 1D/2D/3D-generic, periodic true-residual recomputation) -- see
+// decisions 1/3/4/5/6 in the file's top comment, all of which carry over
+// unchanged.
+//
+// What's actually different from plain CG:
+// - A new scratch field `z`, the preconditioned residual `M^-1 @ r`.
+// - `p`/`alpha`/`beta` are now driven by `r.z` (not `r.r`): `p = z +
+//   beta*p`, `alpha = oldRZ/pAp`, `beta = newRZ/oldRZ` -- while
+//   convergence is still checked against the *true* residual `r.r`, not
+//   `r.z`. A preconditioner can scale z arbitrarily relative to r, so
+//   `r.z` isn't a faithful stand-in for "how close is Ax to b" the way it
+//   is in the unpreconditioned case (where z===r makes the two
+//   identical, and one reduction serves both purposes).
+// - A second dot product per iteration (`r.z` alongside `r.r`), plus one
+//   `applyPreconditioner` dispatch per iteration -- a real extra
+//   GPU-round-trip cost every iteration, in exchange for a good
+//   preconditioner typically needing far fewer iterations to converge
+//   than plain CG on the same system. Whether that trade is worth it
+//   depends entirely on how good/cheap `applyPreconditioner` is for the
+//   caller's actual `A` -- this module has no way to judge that itself.
+// - The final success check compares `sqrt(newRTr)` against `tol`,
+//   *unlike* the sibling function above (which preserves the Python
+//   source's own raw-vs-sqrt inconsistency as a faithful-port quirk).
+//   There's no "faithful port" obligation here, so this uses the
+//   straightforwardly correct comparison instead of replicating a wart
+//   from code this function doesn't actually derive from.
+//
+// CONFIRMED correct on real WebGPU hardware -- see
+// examples/05-preconditioned-conjugate-gradient/main.js's header comment
+// for the reported numbers (an exact match to 4 decimal places, even
+// tighter than the plain-CG sibling's result, consistent with this test
+// case's perfect preconditioner converging in a single iteration and
+// therefore accumulating far less atomic fixed-point quantization noise).
+export function createPreconditionedConjugateGradientSolver( applyOperator, applyPreconditioner, b, x, options = {} ) {
+
+	if ( b.type !== x.type ) {
+
+		throw new Error( `conjugateGradient: element type mismatch, b.type(${ b.type }) != x.type(${ x.type }).` );
+
+	}
+
+	if ( ! shapesEqual( b.shape, x.shape ) ) {
+
+		throw new Error( `conjugateGradient: shape mismatch, b.shape(${ b.shape }) != x.shape(${ x.shape }).` );
+
+	}
+
+	if ( b.type !== 'float' ) {
+
+		throw new Error( `conjugateGradient: GPU atomic dot product only supports type "float", got "${ b.type }".` );
+
+	}
+
+	const shape = b.shape;
+	const type = b.type;
+	const atomicScale = options.atomicScale ?? DEFAULT_ATOMIC_DOT_SCALE;
+
+	const p  = tsl_array_n.arrayN( type, shape );
+	const r  = tsl_array_n.arrayN( type, shape );
+	const z  = tsl_array_n.arrayN( type, shape );
+	const Ap = tsl_array_n.arrayN( type, shape );
+	const Ax = tsl_array_n.arrayN( type, shape );
+
+	const alpha = tsl_array_n.array0( 'float' );
+	const beta  = tsl_array_n.array0( 'float' );
+
+	const dotAccum = tsl_array_n.array0( 'int' );
+	dotAccum.node.toAtomic();
+
+	const dispatchDotRR  = buildAtomicDotKernel( shape, atomicScale, dotAccum, r, r );
+	const dispatchDotRZ  = buildAtomicDotKernel( shape, atomicScale, dotAccum, r, z );
+	const dispatchDotPAp = buildAtomicDotKernel( shape, atomicScale, dotAccum, p, Ap );
+
+	const applyToX = applyOperator( x, Ax );
+	const applyToP = applyOperator( p, Ap );
+	const applyPreconditionerToR = applyPreconditioner( r, z );
+
+	const init = buildElementwiseKernel( shape, ( I ) => {
+
+		r( ...I ).assign( b( ...I ).sub( Ax( ...I ) ) );
+		p( ...I ).assign( 0 );
+		Ap( ...I ).assign( 0 );
+
+	} );
+
+	// r = b - Ax, the *true* residual -- unlike init() above, does not
+	// touch p/Ap, so it's safe to call mid-loop for the periodic drift
+	// correction (see RESIDUAL_RECOMPUTE_INTERVAL's comment). Callers must
+	// call applyToX() first to refresh Ax from the current x.
+	const recomputeR = buildElementwiseKernel( shape, ( I ) => {
+
+		r( ...I ).assign( b( ...I ).sub( Ax( ...I ) ) );
+
+	} );
+
+	const updateP = buildElementwiseKernel( shape, ( I ) => {
+
+		p( ...I ).assign( z( ...I ).add( p( ...I ).mul( beta() ) ) );
+
+	} );
+
+	const updateX = buildElementwiseKernel( shape, ( I ) => {
+
+		x( ...I ).addAssign( p( ...I ).mul( alpha() ) );
+
+	} );
+
+	const updateR = buildElementwiseKernel( shape, ( I ) => {
+
+		r( ...I ).subAssign( Ap( ...I ).mul( alpha() ) );
+
+	} );
+
+	function setScalar( field, value ) {
+
+		field.fromArray( new Float32Array( [ value ] ) );
+
+	}
+
+	async function solve( tol, maxiter ) {
+
+		applyToX(); // Ax = A @ x
+		init(); // r = b - Ax, p = 0, Ap = 0
+
+		const initRTr = await readAtomicDot( dotAccum, atomicScale, dispatchDotRR );
+		let newRTr = initRTr;
+		let oldRTr = initRTr;
+
+		applyPreconditionerToR(); // z0 = M^-1 @ r0
+		let oldRZ = await readAtomicDot( dotAccum, atomicScale, dispatchDotRZ );
+
+		updateP(); // p0 = z0 (p was 0)
+
+		let forceResidualRecompute = false;
+
+		if ( Math.sqrt( Math.abs( initRTr ) ) >= tol ) {
+
+			for ( let iter = 0; iter < maxiter; iter ++ ) {
+
+				applyToP(); // Ap = A @ p
+				const pAp = await readAtomicDot( dotAccum, atomicScale, dispatchDotPAp );
+
+				setScalar( alpha, oldRZ / pAp ); // alpha = rz / pTAp
+				updateX();
+
+				if ( forceResidualRecompute || ( iter % RESIDUAL_RECOMPUTE_INTERVAL === 0 && iter > 0 ) ) {
+
+					applyToX(); // Ax = A @ x (refresh -- x just changed)
+					recomputeR(); // r = b - Ax, correcting any drift from past incremental updates
+					forceResidualRecompute = false;
+
+				} else {
+
+					updateR(); // r -= alpha * Ap (cheap incremental update)
+
+				}
+
+				newRTr = await readAtomicDot( dotAccum, atomicScale, dispatchDotRR );
+
+				if ( Math.sqrt( Math.abs( newRTr ) ) < tol ) break;
+
+				// Residual grew since last iteration -- shouldn't happen in
+				// exact arithmetic; a sign the incremental r has drifted,
+				// so force a true recompute next iteration (see
+				// RESIDUAL_RECOMPUTE_INTERVAL's comment). Compared against
+				// the true rTr, not rz, consistent with this function's
+				// own convergence check above.
+				if ( newRTr > oldRTr ) forceResidualRecompute = true;
+				oldRTr = newRTr;
+
+				applyPreconditionerToR(); // z = M^-1 @ r, for the updated r
+				const newRZ = await readAtomicDot( dotAccum, atomicScale, dispatchDotRZ );
+
+				setScalar( beta, newRZ / oldRZ ); // beta = rz_i+1 / rz_i
+				updateP();
+				oldRZ = newRZ;
+
+			}
+
+		}
+
+		// Unlike the sibling function above, this checks the true residual
+		// directly -- see this function's own header comment for why.
+		return Math.sqrt( Math.abs( newRTr ) ) < tol;
+
+	}
+
+	return { solve, p, r, z, Ap, Ax };
 
 }

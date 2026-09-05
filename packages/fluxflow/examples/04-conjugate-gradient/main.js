@@ -88,7 +88,11 @@ try {
 	const result = Array.from( await x.toArray() );
 	const expected = Array.from( { length: N }, ( _, i ) => 1 / ( i + 1 ) );
 
-	const matches = result.every( ( v, i ) => Math.abs( v - expected[ i ] ) < 1e-3 );
+	// The length check guards against a vacuous "match": [].every(...) is
+	// trivially true in JS regardless of the predicate, so an empty/short
+	// GPU readback (a real failure mode seen elsewhere in this project)
+	// would otherwise silently report a false pass instead of itself.
+	const matches = result.length === expected.length && result.every( ( v, i ) => Math.abs( v - expected[ i ] ) < 1e-3 );
 
 	log(
 		'createConjugateGradientSolver — A=diag(1..8), b=[1,...,1]',
