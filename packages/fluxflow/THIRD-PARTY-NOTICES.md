@@ -332,14 +332,41 @@ project's own license text already reproduced above, under "fluxflow
 (Python) (Apache License 2.0)"; that section's terms apply here too, this
 isn't repeated a second time.
 
+## Provenance of `src/linalg/`
+
+`src/linalg/linalg.js` is a JavaScript/TSL port of `linalg/linalg.py`'s
+`mfcg` function, from the same Python `fluxflow` project (Apache License
+2.0). That file's own header comment says it is "almost identical to the
+original Taichi source code", ported directly from **Taichi Lang** itself
+(`python/taichi/linalg/matrixfree_cg.py`), also under the **Apache License
+2.0** — so, unlike `fluid-engine-dev` and `WebGL-Noise` above, this is a
+same-license derivation (Taichi's own Apache-2.0 code, via a project that is
+itself Apache-2.0), not a second license to reproduce:
+
+```
+Taichi Lang (Python, Apache-2.0, the Taichi team)
+  -> fluxflow (Python/Taichi, Apache-2.0, bert wang)
+    -> fluxflow (this package, JS/TSL, Apache-2.0, bert wang)
+```
+
+- **Source:** https://github.com/taichi-dev/taichi/blob/master/python/taichi/linalg/matrixfree_cg.py
+- **License:** Apache License 2.0 — full text already reproduced above, under "fluxflow (Python) (Apache License 2.0)"; not repeated a second time.
+
+Files in this package derived from Taichi Lang (through the Python
+`fluxflow` project's `linalg/linalg.py`):
+
+- `src/linalg/linalg.js`
+
 ## Design inspiration (not a code dependency)
 
 ### Taichi Lang
 
 The Python `fluxflow` project (and therefore this port's algorithms) is
 written against [Taichi Lang](https://github.com/taichi-dev/taichi)'s
-programming model. No Taichi source code itself is used or copied here — this
-is a credit for the language/tool, not a licensing dependency for Taichi
-itself (the actual ported algorithms are attributed above, to fluid-engine-dev
-and to the Python `fluxflow` project). Taichi is distributed under the Apache
-License 2.0 (https://github.com/taichi-dev/taichi/blob/master/LICENSE).
+programming model. Beyond the direct `linalg/linalg.js` derivation above, no
+further Taichi source code itself is used or copied here — this is a credit
+for the language/tool, not a licensing dependency for Taichi itself (the
+actual ported algorithms are attributed above, to fluid-engine-dev, to
+WebGL-Noise, and to the Python `fluxflow` project). Taichi is distributed
+under the Apache License 2.0
+(https://github.com/taichi-dev/taichi/blob/master/LICENSE).
