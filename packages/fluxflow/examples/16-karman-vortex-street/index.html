@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>fluxflow — Karman vortex street</title>
+	<style>
+		body { margin: 0; font-family: system-ui, sans-serif; background: #2b2d33; color: #eee; display: flex; flex-direction: column; align-items: center; gap: 0.75rem; padding: 1.5rem; box-sizing: border-box; }
+		#canvases { display: flex; flex-direction: column; gap: 1rem; }
+		.canvas-block { display: flex; flex-direction: column; align-items: center; gap: 0.35rem; }
+		canvas { image-rendering: pixelated; width: 1024px; height: 512px; border: 2px solid #6b7280; touch-action: none; }
+		.canvas-label { font-size: 0.8rem; opacity: 0.7; }
+		#status { font-size: 0.9rem; line-height: 1.6; opacity: 0.85; }
+		.err { color: #f87171; }
+		p { max-width: 800px; font-size: 0.85rem; opacity: 0.7; margin: 0; text-align: center; }
+		#perf { font-size: 0.9rem; line-height: 1.6; font-variant-numeric: tabular-nums; }
+		#perf .slow { color: #f87171; }
+		#controls { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; justify-content: center; background: #1f2024; border: 1px solid #3f4148; border-radius: 0.5rem; padding: 0.75rem 1rem; font-size: 0.85rem; }
+		#controls label { display: flex; align-items: center; gap: 0.4rem; white-space: nowrap; }
+		#controls input[type="range"] { width: 120px; }
+		#controls select { background: #2b2d33; color: #eee; border: 1px solid #6b7280; border-radius: 0.25rem; padding: 0.15rem 0.3rem; }
+	</style>
+</head>
+<body>
+	<div id="canvases">
+		<div class="canvas-block">
+			<canvas id="outDye" width="256" height="128"></canvas>
+			<div class="canvas-label">dye (white = present, black = absent; red circle = cylinder)</div>
+		</div>
+		<div class="canvas-block">
+			<canvas id="outVorticity" width="256" height="128"></canvas>
+			<div class="canvas-label">vorticity (red = positive, blue = negative, black = zero; green circle = cylinder)</div>
+		</div>
+	</div>
+	<div id="status">initializing…</div>
+	<div id="perf">fps: -- | sim speed: --</div>
+	<div id="controls">
+		<label>force mode
+			<select id="forceMode">
+				<option value="uniform" selected>uniform (steady push)</option>
+				<option value="oscillating">oscillating (steady push + wiggle near cylinder)</option>
+			</select>
+		</label>
+		<label>strength <input type="range" id="forceStrength" min="0" max="0.5" step="0.005" value="0.05" /> <span id="forceStrengthValue">0.050</span></label>
+		<label>wiggle freq (Hz) <input type="range" id="forceFreq" min="0" max="2" step="0.01" value="0.2" /> <span id="forceFreqValue">0.20</span></label>
+	</div>
+	<p>A visual Karman-vortex-street demo built on examples/15-flow-past-cylinder/'s own inflow+outflow+collider+MGPCG pipeline, retuned for an elongated domain, a smaller cylinder, and a deliberate small offset from the domain's own centerline to trigger asymmetric shedding. This port has no viscosity model, so shedding is driven by numerical dissipation and the deliberate asymmetry, not a controlled Reynolds number -- see this example's own main.js header comment for the full explanation. The vorticity canvas is what actually shows the alternating shedding (dye fades too fast downstream to show it on its own) -- look for alternating red/blue bands behind the cylinder. "sim speed" above is how many simulated seconds pass per real second (fps * dt) -- well under 1x means the flow's apparent slowness is GPU throughput, not the chosen physical velocity. Open the console for a periodic diagnostic readout.</p>
+	<script type="module" src="./main.js"></script>
+</body>
+</html>

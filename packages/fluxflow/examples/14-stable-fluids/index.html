@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>fluxflow — stable fluids</title>
+	<style>
+		body { margin: 0; font-family: system-ui, sans-serif; background: #2b2d33; color: #eee; display: flex; flex-direction: column; align-items: center; gap: 0.75rem; padding: 1.5rem; box-sizing: border-box; }
+		#out { image-rendering: pixelated; width: 512px; height: 512px; border: 2px solid #6b7280; touch-action: none; }
+		#status { font-size: 0.9rem; line-height: 1.6; opacity: 0.85; }
+		.err { color: #f87171; }
+		p { max-width: 512px; font-size: 0.85rem; opacity: 0.7; margin: 0; text-align: center; }
+	</style>
+</head>
+<body>
+	<canvas id="out" width="32" height="32"></canvas>
+	<div id="status">initializing…</div>
+	<p>A fully autonomous, deterministic solver-stability test -- no mouse/keyboard input at all. A small fixed region near the left wall continuously pushes fluid rightward and injects dye; everything else (swirling, curling, containment at the walls, staying numerically stable over time) is external forces + pressure projection + advection + boundary conditions alone. Open the console for a periodic diagnostic readout (velocity/pressure/dye min/max).</p>
+	<script type="module" src="./main.js"></script>
+</body>
+</html>

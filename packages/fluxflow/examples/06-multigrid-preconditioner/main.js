@@ -50,6 +50,21 @@
 // low-frequency test case is exactly what multigrid's coarse-grid
 // correction is *for*, confirming restrict()/correct()/the recursion
 // itself are working, not just relax().
+//
+// Also checks createMultigridPreconditioner's own `dirichletMask` option
+// (added for grid_pressure_solver2.js -- see that file's own header
+// comment): one cell is marked Dirichlet with a sentinel target value
+// unrelated to the smooth `b` field above; after one V-cycle (4 levels,
+// so the mask's own "applied at level 0 only, never coarsened" design is
+// actually exercised, not just a trivial single-level case), that cell
+// should read back as exactly its target regardless of what the coarser
+// levels did to it in between. This needs no atomics at all (same as the
+// check above), so it's the one place in this port a Dirichlet check can
+// run in this dev sandbox at all -- but per limitation 2 above, a
+// single-dispatch/readback check in this specific sandbox has an
+// established history of not reliably matching expectations for reasons
+// unrelated to correctness, so treat this the same way: a real-hardware
+// confirmation, not an in-sandbox pass/fail gate.
 
 import * as tsl_array_n from 'tsl_array_n';
 import { linalg } from 'fluxflow';
@@ -153,6 +168,39 @@ try {
 		);
 
 	}
+
+	// dirichletMask: one cell pinned to a sentinel value unrelated to the
+	// smooth b field above -- see header comment.
+	const dirichletCellFlatIndex = ( N >> 1 ) + N * ( N >> 1 ); // center-ish cell, i + N*j layout
+	const dirichletTarget = 42;
+
+	const maskArray = new Float32Array( N * N );
+	maskArray[ dirichletCellFlatIndex ] = 1;
+	const mask = tsl_array_n.arrayN( 'float', shape );
+	mask.fromArray( maskArray );
+
+	const bWithDirichletArray = bArray.slice();
+	bWithDirichletArray[ dirichletCellFlatIndex ] = dirichletTarget;
+	const bWithDirichlet = tsl_array_n.arrayN( 'float', shape );
+	bWithDirichlet.fromArray( bWithDirichletArray );
+
+	const zForDirichlet = tsl_array_n.arrayN( 'float', shape );
+	zForDirichlet.fromArray( new Float32Array( N * N ) );
+
+	const applyPreconditionerWithMask = linalg.createMultigridPreconditioner( shape, gridSpacing, {
+		numberOfLevels: 4,
+		dirichletMask: ( i, j ) => mask( i, j ).greaterThan( 0.5 )
+	} );
+	applyPreconditionerWithMask( bWithDirichlet, zForDirichlet )();
+
+	const zWithDirichletArray = await zForDirichlet.toArray();
+	const dirichletReadback = zWithDirichletArray[ dirichletCellFlatIndex ];
+	const dirichletOk = Math.abs( dirichletReadback - dirichletTarget ) < 1e-2;
+
+	log(
+		`createMultigridPreconditioner — dirichletMask, numberOfLevels:4`,
+		`pinned cell reads back as ${ dirichletReadback?.toFixed?.( 4 ) } (target ${ dirichletTarget }) -- ${ dirichletOk ? 'match' : 'MISMATCH' } (needs real WebGPU hardware to confirm, see header comment)`
+	);
 
 } catch ( error ) {
 

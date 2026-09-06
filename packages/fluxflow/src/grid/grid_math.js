@@ -15,7 +15,7 @@
 // way -- pure naming cleanup, the numeric logic corresponds line-for-line to
 // the source.
 
-import { int, float, vec2, mat2, min, max, floor, abs, or } from 'three/tsl';
+import { int, float, vec2, mat2, min, max, floor, abs, or, clamp } from 'three/tsl';
 
 // ------------------------------------------------------------
 // interpolation
@@ -237,6 +237,62 @@ export function scalarGradientAtPosition2( data, gridSpacing, dataOrigin, pos, s
 
 }
 
+// One axis's gradient-safe (lo, hi, t) triple, used only by
+// bilinearGradientAtPosition2 below -- deliberately NOT the same clamped
+// pair bilinearCoordsAndWeights2 returns (i0c/i1c above), because that
+// pair is allowed to collapse to the *same* index once `coord` runs a half
+// cell past the grid's own last cell center (whichever of i0c/i1c would
+// have gone out of range gets clamped to the other one instead). That's
+// the right behavior for a *sampled value* (clamp-to-boundary), but wrong
+// for a *gradient*: reading the same cell twice makes that axis's finite
+// difference exactly (v-v)=0, not a real degenerate case, just an
+// implementation artifact of clamping both indices to the same cell.
+//
+// CONFIRMED as a real, real-hardware bug via examples/15-flow-past-cylinder/:
+// grid_outflow_solver2.js's applyOutflowVelocityBC() samples an outflow
+// SDF's gradient (this function, via sdf_collider2.js's own `gradient()`)
+// at U-face positions that run half a cell past the SDF's own last cell
+// center (the SDF is a resolutionX-wide cell-centered grid, cell centers
+// at x=0.5..63.5 for resolutionX=64, but a face-centered velocity grid's
+// own U-faces run one further, to x=64 exactly). At that exact point,
+// i0c/i1c both clamped to the same last column, degenerating the SDF's
+// own gradient to (0, gy) instead of a real, non-zero horizontal
+// component -- silently breaking this code's own "which way is upstream"
+// reference exactly where it mattered most, confirmed as a genuine
+// contributor to a real-hardware divergence (not merely float32 overflow:
+// the outer PCG loop this fed into is separately confirmed to need real
+// multigrid coarsening -- see multigrid.js's own header comment -- but a
+// spuriously-zeroed gradient direction here is a second, independent
+// problem on top of that one).
+//
+// Fixed here (in the shared function, not just outflow's own call site --
+// sdf_collider2.js's `gradient()` is also used for collider no-flux
+// projection, and this fix helps that too, at no cost, since a collider
+// SDF query point rarely lands exactly on the grid's own physical edge):
+// `lo`/`hi` are kept as two genuinely DISTINCT indices whenever the grid
+// has at least 2 cells along this axis (clamping `lo` back by one instead
+// of letting `hi` collapse onto it), and `t` -- the blend weight between
+// them -- is clamped to [0,1] rather than left to run past 1 the way a
+// query point beyond the grid would otherwise produce. Net effect: a
+// query point beyond the grid's own cell-center range now reads back the
+// boundary's own real (non-degenerate) gradient, a 0th-order constant
+// extrapolation past the edge -- not a spurious 0 in that axis. Fully
+// backward-compatible for any in-range query (`idx` already within
+// `[0, n-2]`): `lo=idx, hi=idx+1, t=frac` exactly matches the old
+// i0c/i1c/fx-or-fy triple, so nothing changes for a collider whose SDF
+// query points stay within the grid's own interior, only for one that
+// runs past its edge.
+function gradientAxisInfo( coord, n ) {
+
+	const idx = int( floor( coord ) );
+	const lo = max( 0, min( idx, n - 2 ) );
+	const hi = min( lo.add( 1 ), n - 1 );
+	const t = clamp( coord.sub( lo.toFloat() ), 0, 1 );
+
+	return { lo, hi, t };
+
+}
+
 // Gradient of a scalar field at a continuous position: an analytic
 // derivative of the same bilinear surface that collocatedValueAtPosition2
 // samples (not a blend of the 4 corners' own discrete gradients like
@@ -245,20 +301,26 @@ export function scalarGradientAtPosition2( data, gridSpacing, dataOrigin, pos, s
 // point. Use this when the gradient needs to match the sampled value
 // precisely (e.g. an SDF's surface normal); use scalarGradientAtPosition2
 // when a bit more smoothing across neighboring cells is desired.
+//
+// Deliberately does NOT reuse bilinearCoordsAndWeights2 the way the sibling
+// gradient/sample functions in this file do -- see gradientAxisInfo's own
+// header comment for why a gradient needs its own, non-collapsing index
+// pair near the grid's edge, unlike a sampled value.
 export function bilinearGradientAtPosition2( data, gridSpacing, dataOrigin, pos, shape ) {
 
-	const { i0c, j0c, i1c, j1c, w10, w01, w11 } = bilinearCoordsAndWeights2( pos, dataOrigin, gridSpacing, shape );
+	const [ nx, ny ] = shape;
+	const gridPos = pos.sub( dataOrigin ).div( gridSpacing );
 
-	const fx = w10.add( w11 );
-	const fy = w01.add( w11 );
+	const xi = gradientAxisInfo( gridPos.x, nx );
+	const yi = gradientAxisInfo( gridPos.y, ny );
 
-	const v00 = data( i0c, j0c );
-	const v10 = data( i1c, j0c );
-	const v01 = data( i0c, j1c );
-	const v11 = data( i1c, j1c );
+	const v00 = data( xi.lo, yi.lo );
+	const v10 = data( xi.hi, yi.lo );
+	const v01 = data( xi.lo, yi.hi );
+	const v11 = data( xi.hi, yi.hi );
 
-	const gx = float( 1 ).sub( fy ).mul( v10.sub( v00 ) ).add( fy.mul( v11.sub( v01 ) ) ).div( gridSpacing.x );
-	const gy = float( 1 ).sub( fx ).mul( v01.sub( v00 ) ).add( fx.mul( v11.sub( v10 ) ) ).div( gridSpacing.y );
+	const gx = float( 1 ).sub( yi.t ).mul( v10.sub( v00 ) ).add( yi.t.mul( v11.sub( v01 ) ) ).div( gridSpacing.x );
+	const gy = float( 1 ).sub( xi.t ).mul( v01.sub( v00 ) ).add( xi.t.mul( v11.sub( v10 ) ) ).div( gridSpacing.y );
 
 	return vec2( gx, gy );
 

@@ -8,6 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import { createFaceCenteredGrid2 } from '../src/grid/grid_data2.js';
 import { createGridBlockedBoundaryConditionSolver2 } from '../src/grid/grid_blocked_boundary_condition_solver2.js';
+import { createSDFInflow2 } from '../src/grid/sdf_inflow_outflow2.js';
 import { DIRECTION_ALL } from '../src/grid/constant.js';
 
 describe( 'GridBlockedBoundaryConditionSolver2', () => {
@@ -61,6 +62,46 @@ describe( 'GridBlockedBoundaryConditionSolver2', () => {
 
 		expect( () => solver.setCollider( null, [ 4, 4 ], [ 1, 1 ], [ 0, 0 ] ) ).not.toThrow();
 		expect( solver.collider ).toBe( null );
+
+	} );
+
+	it( 'constructs with a single inflow object', () => {
+
+		const velocity = createFaceCenteredGrid2( 4, 4, 1, 1, 0, 0 );
+		const inflow = createSDFInflow2( 4, 4, 1, 1, 0, 0, { velocity: [ 1, 0 ] } );
+
+		expect( () => createGridBlockedBoundaryConditionSolver2( velocity, 4, 4, 1, 1, 0, 0, null, inflow ) ).not.toThrow();
+
+	} );
+
+	it( 'constructs with an array of inflow objects', () => {
+
+		const velocity = createFaceCenteredGrid2( 4, 4, 1, 1, 0, 0 );
+		const a = createSDFInflow2( 4, 4, 1, 1, 0, 0, { velocity: [ 1, 0 ] } );
+		const b = createSDFInflow2( 4, 4, 1, 1, 0, 0, { velocity: [ 0, 1 ], mode: 'add' } );
+
+		expect( () => createGridBlockedBoundaryConditionSolver2( velocity, 4, 4, 1, 1, 0, 0, null, [ a, b ] ) ).not.toThrow();
+
+	} );
+
+	it( 'exposes setInflows as a function, callable with null/single/array', () => {
+
+		const velocity = createFaceCenteredGrid2( 4, 4, 1, 1, 0, 0 );
+		const solver = createGridBlockedBoundaryConditionSolver2( velocity, 4, 4, 1, 1, 0, 0 );
+		const inflow = createSDFInflow2( 4, 4, 1, 1, 0, 0, { velocity: [ 1, 0 ] } );
+
+		expect( typeof solver.setInflows ).toBe( 'function' );
+		expect( () => solver.setInflows( inflow ) ).not.toThrow();
+		expect( () => solver.setInflows( [ inflow ] ) ).not.toThrow();
+		expect( () => solver.setInflows( null ) ).not.toThrow();
+
+	} );
+
+	it( 'existing 8-argument calls (no inflows) are unaffected', () => {
+
+		const velocity = createFaceCenteredGrid2( 4, 4, 1, 1, 0, 0 );
+
+		expect( () => createGridBlockedBoundaryConditionSolver2( velocity, 4, 4, 1, 1, 0, 0, null ) ).not.toThrow();
 
 	} );
 
