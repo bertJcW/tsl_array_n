@@ -9,4 +9,7 @@ export * from './sdf_collider2.js';
 export * from './grid_blocked_boundary_condition_solver2.js';
 export * from './advection_solver2.js';
 export * from './external_force_solver2.js';
+export * from './grid_pressure_solver2.js';
+export * from './sdf_inflow_outflow2.js';
+export * from './grid_outflow_solver2.js';
 export * from './grid_solver2.js';

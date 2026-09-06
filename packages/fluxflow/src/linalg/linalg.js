@@ -119,6 +119,34 @@ const DEFAULT_ATOMIC_DOT_SCALE = 65536;
 // iterations, or the residual genuinely increases at some point.
 const RESIDUAL_RECOMPUTE_INTERVAL = 50;
 
+// Beta-restart threshold for createPreconditionedConjugateGradientSolver's
+// own solve() -- see that function's own header comment at the beta
+// computation site for the full derivation. Every healthy beta actually
+// observed across many real-hardware solves (a Dirichlet-masked pressure
+// system, this port's own hardest case for a preconditioner to stay SPD
+// on) fell in the 0.03-0.3 range; 10 is a generous, order-of-magnitude-plus
+// margin above the highest of those, chosen so this never fires on a
+// legitimately converging solve while still catching the runaway (observed
+// betas of 2-4, sustained, compounding geometrically) well before it can
+// reach a magnitude that corrupts x.
+const MAX_BETA_MAGNITUDE = 10;
+
+// Sibling bound for alpha (see this same file's own beta-restart comment,
+// and the sign-check right next to this constant's own use site, for the
+// full derivation). Unlike MAX_BETA_MAGNITUDE (tuned against a specific
+// observed healthy range, since beta is a dimensionless ratio of
+// like-scaled quantities), alpha's own "reasonable" magnitude genuinely
+// depends on a caller's specific problem scale (grid spacing, atomicScale,
+// the physical magnitude of b) -- there's no single universal healthy
+// range to tune against the way there is for beta. This is deliberately
+// generous purely as a last-resort backstop against a runaway magnitude
+// the sign check alone wouldn't catch (oldRZ and pAp both negative, so
+// alpha is positive, but pAp is only *just* above isDegenerateDot's own
+// floor while oldRZ is comparatively large) -- callers with an unusually
+// large problem scale should pass a larger atomicScale (see that option's
+// own comment) rather than rely on this bound being loose enough.
+const MAX_ALPHA_MAGNITUDE = 1e6;
+
 function shapesEqual( a, b ) {
 
 	return a.length === b.length && a.every( ( v, i ) => v === b[ i ] );
@@ -171,6 +199,46 @@ async function readAtomicDot( accum, scale, dispatch ) {
 
 	const [ scaledSum ] = await accum.toArray();
 	return scaledSum / scale;
+
+}
+
+// A dot product read back through the fixed-point atomic accumulator above
+// is quantized in units of `1/scale` (decision 1 in the file header
+// comment): the smallest magnitude it can ever report as nonzero is
+// `1/scale` (a single-count accumulated int), so anything genuinely smaller
+// than half that is indistinguishable from an exact 0 -- it either reads
+// back as literal `0`, or as noise no more meaningful than 0 would be.
+// alpha/beta below both divide by exactly this kind of quantity
+// (p.Ap for alpha, the previous iteration's r.r or r.z for beta); a
+// genuine 0 denominator -- or one quantized down to it -- produces
+// Infinity/NaN with no way to recover, so every division site checks its
+// own denominator against this floor first and bails out (breaking the
+// iteration, keeping whatever x already holds) rather than risk it.
+//
+// This is NOT a jet-ported check -- jet's own reference `pcg()`
+// (cg-inl.h, see THIRD-PARTY-NOTICES.md) has no equivalent guard, because
+// it runs in plain double-precision CPU arithmetic with no artificial
+// quantization step at all, so an exactly-zero denominator there could
+// only come from a genuinely singular operator (e.g. a fully closed,
+// all-Neumann pressure domain with no Dirichlet anchor -- see
+// grid_pressure_solver2.js's own header comment) landing the search
+// direction exactly in that operator's null space, an already-rare event
+// in floating point. This port's own GPU-atomic reduction adds a second,
+// independent, and much more easily triggered way to land on an exact
+// zero: quantization simply rounding a small-but-nonzero true value down
+// to the integer 0 before the atomic add ever happens -- a real risk
+// unique to this port's own reduction strategy, confirmed as the likely
+// cause of a real-hardware failure where a closed-domain pressure solve's
+// RHS was finite and well-posed (sum of divergence ~0, as a closed domain
+// requires) yet its pressure came back 100% non-finite from the very
+// first solve() call: exactly what a `pAp` (or `oldRZ`/`oldRTr`) that
+// quantized to 0 partway through the iteration would produce.
+// Exported (like buildElementwiseKernel above) so its threshold math can be
+// unit-tested directly without a GPU -- both solve() functions below use it
+// as an internal guard, not something a caller normally calls itself.
+export function isDegenerateDot( value, scale ) {
+
+	return Math.abs( value ) < 0.5 / scale;
 
 }
 
@@ -288,6 +356,12 @@ export function createConjugateGradientSolver( applyOperator, b, x, options = {}
 				applyToP(); // Ap = A @ p
 				const pAp = await readAtomicDot( dotAccum, atomicScale, dispatchDotPAp );
 
+				// p has (numerically) run into A's null space, or the atomic
+				// reduction quantized a tiny-but-nonzero pAp down to 0 -- see
+				// isDegenerateDot's own comment. Either way alpha would be a
+				// degenerate division; stop here rather than corrupt x.
+				if ( isDegenerateDot( pAp, atomicScale ) ) break;
+
 				setScalar( alpha, oldRTr / pAp ); // alpha = rTr / pTAp
 				updateX();
 
@@ -312,6 +386,11 @@ export function createConjugateGradientSolver( applyOperator, b, x, options = {}
 				// so force a true recompute next iteration (see
 				// RESIDUAL_RECOMPUTE_INTERVAL's comment).
 				if ( newRTr > oldRTr ) forceResidualRecompute = true;
+
+				// Guards the beta division below -- see isDegenerateDot's own
+				// comment. oldRTr is *this* iteration's denominator (not yet
+				// overwritten from newRTr), so check it here, right before use.
+				if ( isDegenerateDot( oldRTr, atomicScale ) ) break;
 
 				setScalar( beta, newRTr / oldRTr ); // beta = rTr_i+1 / rTr_i
 				updateP();
@@ -432,6 +511,20 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	const dispatchDotRZ  = buildAtomicDotKernel( shape, atomicScale, dotAccum, r, z );
 	const dispatchDotPAp = buildAtomicDotKernel( shape, atomicScale, dotAccum, p, Ap );
 
+	// Live view of the most recent solve()'s own final r.r -- exposed (not
+	// just returned from solve() as a boolean, which every existing caller
+	// already treats as "converged or not") so a caller can add its own
+	// last-resort safety net on top: a non-finite or wildly-implausible
+	// residual is a direct, *already computed* (no extra GPU work) signal
+	// that x itself likely just got corrupted this call, even in cases
+	// (confirmed on real hardware) where the loop ran to maxiter without
+	// ever tripping isDegenerateDot or either restart guard below --
+	// neither guard is a substitute for a caller-side check on the actual
+	// outcome. See grid_pressure_solver2.js's own use of this for exactly
+	// that: reverting a frame's pressure update entirely if this comes
+	// back non-finite, rather than let a bad solve reach velocity.
+	const state = { residualSquared: 0 };
+
 	const applyToX = applyOperator( x, Ax );
 	const applyToP = applyOperator( p, Ap );
 	const applyPreconditionerToR = applyPreconditioner( r, z );
@@ -501,7 +594,48 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 				applyToP(); // Ap = A @ p
 				const pAp = await readAtomicDot( dotAccum, atomicScale, dispatchDotPAp );
 
-				setScalar( alpha, oldRZ / pAp ); // alpha = rz / pTAp
+				// p has (numerically) run into A's null space, or the atomic
+				// reduction quantized a tiny-but-nonzero pAp down to 0 -- see
+				// isDegenerateDot's own comment. Either way alpha would be a
+				// degenerate division; stop here rather than corrupt x. This
+				// is exactly the failure mode confirmed on real WebGPU
+				// hardware for a fully closed (all-Neumann, no Dirichlet
+				// anchor) pressure domain: p accumulates a null-space
+				// (constant) component over the iterations (CG never reduces
+				// it, since A@constant=0 exactly), and once p is dominated by
+				// it, Ap collapses toward 0 everywhere -- exactly the
+				// condition this check catches.
+				if ( isDegenerateDot( pAp, atomicScale ) ) break;
+
+				const alphaValue = oldRZ / pAp;
+
+				// Sibling of the beta-restart fix below (see that one's own
+				// header comment for the fuller derivation) -- same class of
+				// concern, one step earlier: an implausibly large alpha,
+				// magnitude-wise, is caught here the same way
+				// isDegenerateDot's own pAp check above stops the solve
+				// rather than risk a corrupting update.
+				//
+				// *** A negative-alpha check was tried here too and
+				// confirmed, via real-hardware regression, to make things
+				// *worse* -- worth recording so it isn't tried again ***
+				//
+				// alpha=oldRZ/pAp "should" be non-negative if oldRZ and pAp
+				// always shared the operator's own consistent sign -- but a
+				// merely-approximate preconditioner (a few V-cycle sweeps)
+				// apparently produces an occasional, small, genuinely-
+				// recoverable negative alpha as ordinary noise, not
+				// exclusively as a sign of the runaway this file actually
+				// needs to guard against. Breaking the whole solve on every
+				// such occurrence (tried directly) stopped CG earlier than
+				// it needed to, leaving a worse-converged pressure behind
+				// each time -- confirmed to *reduce* real-hardware stability
+				// (956 stable frames -> 178) on the exact same repro this
+				// fix's other half (beta) was confirmed against. Magnitude
+				// alone, without the sign condition, is what's kept here.
+				if ( Math.abs( alphaValue ) > MAX_ALPHA_MAGNITUDE ) break;
+
+				setScalar( alpha, alphaValue ); // alpha = rz / pTAp
 				updateX();
 
 				if ( forceResidualRecompute || ( iter % RESIDUAL_RECOMPUTE_INTERVAL === 0 && iter > 0 ) ) {
@@ -532,7 +666,60 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 				applyPreconditionerToR(); // z = M^-1 @ r, for the updated r
 				const newRZ = await readAtomicDot( dotAccum, atomicScale, dispatchDotRZ );
 
-				setScalar( beta, newRZ / oldRZ ); // beta = rz_i+1 / rz_i
+				// Guards the beta division below -- see isDegenerateDot's own
+				// comment. oldRZ is *this* iteration's denominator (not yet
+				// overwritten from newRZ), so check it here, right before
+				// use. Unlike oldRTr in the sibling function above, r.z has
+				// no other convergence check anywhere in this loop (only r.r
+				// is compared against tol), so this is the *only* guard
+				// protecting this particular division.
+				if ( isDegenerateDot( oldRZ, atomicScale ) ) break;
+
+				// *** A real, confirmed-on-real-hardware CG robustness fix,
+				// found via direct real-hardware dot-product logging ***
+				//
+				// Textbook PCG assumes the preconditioner M is SPD, which
+				// guarantees r.z keeps one consistent sign *and* a bounded
+				// relative magnitude from one iteration to the next (see
+				// multigrid.js's own createMultigridPreconditioner header
+				// comment for a real asymmetric-relax bug this port had and
+				// fixed, since found and fixed there first). Even with that
+				// fix, a truncated, approximate preconditioner (a few
+				// V-cycle sweeps, not an exact solve) still isn't
+				// *guaranteed* SPD for every r that occurs in practice --
+				// confirmed on real hardware: newRZ occasionally comes back
+				// with the opposite sign from oldRZ, or simply far larger in
+				// magnitude, with neither denominator ever near zero
+				// (isDegenerateDot's own magnitude check, above, never
+				// trips). Either way, beta ends up large enough that
+				// `p = z + beta*p` compounds geometrically -- observed
+				// directly: |p.Ap| roughly tripling every single iteration,
+				// from betas consistently in the 2-4 range -- into an
+				// astronomically large x update within the same solve()
+				// call, entirely without either denominator ever looking
+				// "degenerate" by magnitude, and (confirmed by testing the
+				// sign check alone first) without every occurrence even
+				// being a clean sign flip -- some are simply an
+				// implausibly large *same-signed* ratio. Guarding both
+				// ways: a flipped sign, or a magnitude far outside every
+				// healthy value actually observed across many real-hardware
+				// solves (typically 0.03-0.3; MAX_BETA_MAGNITUDE's own 10x
+				// margin above the highest of those is generous enough to
+				// never fire on a legitimately converging solve). Either
+				// condition means z is no longer a trustworthy continuation
+				// of p's own search history, so the safe, standard response
+				// (the same idea as restarted/flexible CG variants in the
+				// literature) is to restart: fall back to steepest descent
+				// for this one step (beta=0, i.e. p=z) -- keeping z itself,
+				// still a perfectly good direction on its own, while
+				// discarding the now-untrustworthy combination with p's
+				// prior history, rather than let a bad beta compound across
+				// iterations.
+				const rzSignFlipped = ( oldRZ > 0 ) !== ( newRZ > 0 );
+				const betaRaw = newRZ / oldRZ;
+				const restartP = rzSignFlipped || Math.abs( betaRaw ) > MAX_BETA_MAGNITUDE;
+
+				setScalar( beta, restartP ? 0 : betaRaw ); // beta = rz_i+1 / rz_i
 				updateP();
 				oldRZ = newRZ;
 
@@ -540,12 +727,14 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 		}
 
+		state.residualSquared = newRTr;
+
 		// Unlike the sibling function above, this checks the true residual
 		// directly -- see this function's own header comment for why.
 		return Math.sqrt( Math.abs( newRTr ) ) < tol;
 
 	}
 
-	return { solve, p, r, z, Ap, Ax };
+	return { solve, p, r, z, Ap, Ax, state };
 
 }

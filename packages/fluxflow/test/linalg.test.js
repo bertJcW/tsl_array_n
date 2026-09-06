@@ -5,10 +5,14 @@
 // instead: examples/04-conjugate-gradient/ (plain CG) and
 // examples/05-preconditioned-conjugate-gradient/ (preconditioned CG),
 // both against a diagonal operator with a known exact solution.
+//
+// isDegenerateDot is the one exception: a pure function of two plain
+// numbers, no GPU involved at all, so its own threshold math is verified
+// directly below instead of only through solve()'s live behavior.
 
 import { describe, it, expect } from 'vitest';
 import * as tsl_array_n from 'tsl_array_n';
-import { createConjugateGradientSolver, createPreconditionedConjugateGradientSolver } from '../src/linalg/linalg.js';
+import { createConjugateGradientSolver, createPreconditionedConjugateGradientSolver, isDegenerateDot } from '../src/linalg/linalg.js';
 
 // A no-op stand-in for a real matvec/preconditioner factory -- fine for
 // these tests since none of them call .solve() (the only thing that would
@@ -233,6 +237,43 @@ describe( 'createPreconditionedConjugateGradientSolver', () => {
 		expect( preconditionerCalls.length ).toBe( 1 );
 		expect( preconditionerCalls[ 0 ].input ).toBe( solver.r );
 		expect( preconditionerCalls[ 0 ].output ).toBe( solver.z );
+
+	} );
+
+} );
+
+describe( 'isDegenerateDot', () => {
+
+	it( 'flags exactly 0 as degenerate for any scale', () => {
+
+		expect( isDegenerateDot( 0, 65536 ) ).toBe( true );
+
+	} );
+
+	it( 'flags a value smaller than half the quantization step as degenerate', () => {
+
+		// half-step is 0.5/65536 ~= 7.63e-6 -- anything strictly under that
+		// couldn't have been read back as a nonzero quantized value anyway.
+		expect( isDegenerateDot( 1e-8, 65536 ) ).toBe( true );
+		expect( isDegenerateDot( - 1e-8, 65536 ) ).toBe( true );
+
+	} );
+
+	it( 'does not flag a value at least half the quantization step', () => {
+
+		expect( isDegenerateDot( 1 / 65536, 65536 ) ).toBe( false );
+		expect( isDegenerateDot( - 1 / 65536, 65536 ) ).toBe( false );
+		expect( isDegenerateDot( 1, 65536 ) ).toBe( false );
+
+	} );
+
+	it( 'scales its threshold with the atomicScale argument', () => {
+
+		// a coarser (smaller) scale has a wider quantization floor, so the
+		// same value can be degenerate there yet perfectly resolvable once
+		// scale is large enough to shrink the floor below it.
+		expect( isDegenerateDot( 1e-4, 64 ) ).toBe( true );
+		expect( isDegenerateDot( 1e-4, 1e9 ) ).toBe( false );
 
 	} );
 

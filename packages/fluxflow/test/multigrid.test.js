@@ -12,7 +12,7 @@
 
 import { describe, it, expect } from 'vitest';
 import * as tsl_array_n from 'tsl_array_n';
-import { createMultigridPreconditioner } from '../src/linalg/multigrid.js';
+import { createMultigridPreconditioner, createLaplacianOperator } from '../src/linalg/multigrid.js';
 
 describe( 'createMultigridPreconditioner', () => {
 
@@ -76,6 +76,69 @@ describe( 'createMultigridPreconditioner', () => {
 		const z = tsl_array_n.arrayN( 'float', [ 16, 16 ] );
 
 		expect( () => applyPreconditioner( r, z ) ).not.toThrow();
+
+	} );
+
+	it( 'builds without throwing given a dirichletMask, single level', () => {
+
+		const mask = tsl_array_n.arrayN( 'float', [ 8, 8 ] );
+		const applyPreconditioner = createMultigridPreconditioner( [ 8, 8 ], [ 1, 1 ], {
+			dirichletMask: ( i, j ) => mask( i, j ).greaterThan( 0.5 )
+		} );
+
+		const r = tsl_array_n.arrayN( 'float', [ 8, 8 ] );
+		const z = tsl_array_n.arrayN( 'float', [ 8, 8 ] );
+
+		expect( () => applyPreconditioner( r, z ) ).not.toThrow();
+
+	} );
+
+	it( 'builds without throwing given a dirichletMask, multiple levels (mask applied at level 0 only)', () => {
+
+		const mask = tsl_array_n.arrayN( 'float', [ 16, 16 ] );
+		const applyPreconditioner = createMultigridPreconditioner( [ 16, 16 ], [ 1, 1 ], {
+			numberOfLevels: 4,
+			dirichletMask: ( i, j ) => mask( i, j ).greaterThan( 0.5 )
+		} );
+
+		const r = tsl_array_n.arrayN( 'float', [ 16, 16 ] );
+		const z = tsl_array_n.arrayN( 'float', [ 16, 16 ] );
+
+		expect( () => applyPreconditioner( r, z ) ).not.toThrow();
+
+	} );
+
+} );
+
+describe( 'createLaplacianOperator', () => {
+
+	it( 'returns a 2-arg factory whose own return value is a 0-arg dispatcher', () => {
+
+		const applyLaplacian = createLaplacianOperator( [ 8, 8 ], [ 1, 1 ] );
+
+		expect( typeof applyLaplacian ).toBe( 'function' );
+		expect( applyLaplacian.length ).toBe( 2 );
+
+		const input = tsl_array_n.arrayN( 'float', [ 8, 8 ] );
+		const output = tsl_array_n.arrayN( 'float', [ 8, 8 ] );
+		const dispatch = applyLaplacian( input, output );
+
+		expect( typeof dispatch ).toBe( 'function' );
+		expect( dispatch.length ).toBe( 0 );
+
+	} );
+
+	it( 'builds without throwing given a dirichletMask', () => {
+
+		const mask = tsl_array_n.arrayN( 'float', [ 8, 8 ] );
+		const applyLaplacian = createLaplacianOperator( [ 8, 8 ], [ 1, 1 ], {
+			dirichletMask: ( i, j ) => mask( i, j ).greaterThan( 0.5 )
+		} );
+
+		const input = tsl_array_n.arrayN( 'float', [ 8, 8 ] );
+		const output = tsl_array_n.arrayN( 'float', [ 8, 8 ] );
+
+		expect( () => applyLaplacian( input, output ) ).not.toThrow();
 
 	} );
 

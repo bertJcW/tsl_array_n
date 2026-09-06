@@ -94,6 +94,23 @@ describe( 'grid_math — gradient', () => {
 
 	} );
 
+	// A position exactly on (or past) the grid's own last cell edge --
+	// confirmed on real hardware to matter: grid_outflow_solver2.js samples
+	// this exact function at face-centered positions that run half a cell
+	// past a cell-centered SDF grid's own last cell center, which used to
+	// collapse this function's internal index pair to the same column/row
+	// and silently zero out that axis's gradient component. This is a
+	// structural (no-throw) check only -- see this file's own header
+	// comment for why a numeric assertion needs a live example instead; the
+	// actual before/after numeric behavior was verified with an independent
+	// plain-JS reference implementation of the same formula, not here.
+	it( 'bilinearGradientAtPosition2 at the grid\'s own boundary edge', () => {
+
+		const edgePos = vec2( shape[ 0 ], shape[ 1 ] );
+		expectNode( gm.bilinearGradientAtPosition2( scalar, gridSpacing, dataOrigin, edgePos, shape ) );
+
+	} );
+
 	it( 'vectorGradientAtPosition2', () => {
 
 		expectNode( gm.vectorGradientAtPosition2( vector, gridSpacing, dataOrigin, pos, shape ) );

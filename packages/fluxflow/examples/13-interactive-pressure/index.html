@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>fluxflow — interactive pressure</title>
+	<style>
+		body { margin: 0; font-family: system-ui, sans-serif; background: #111; color: #eee; display: flex; flex-direction: column; align-items: center; gap: 0.75rem; padding: 1.5rem; box-sizing: border-box; }
+		#canvases { display: flex; gap: 1rem; }
+		.canvas-block { display: flex; flex-direction: column; align-items: center; gap: 0.35rem; }
+		canvas { image-rendering: pixelated; width: 384px; height: 384px; border: 1px solid #333; touch-action: none; }
+		.canvas-label { font-size: 0.8rem; opacity: 0.7; }
+		#status { font-size: 0.9rem; line-height: 1.6; opacity: 0.85; }
+		.err { color: #f87171; }
+		p { max-width: 800px; font-size: 0.85rem; opacity: 0.7; margin: 0; text-align: center; }
+	</style>
+</head>
+<body>
+	<div id="canvases">
+		<div class="canvas-block">
+			<canvas id="outVelocity" width="48" height="48"></canvas>
+			<div class="canvas-label">velocity (red/blue = x, green/blue = y)</div>
+		</div>
+		<div class="canvas-block">
+			<canvas id="outPressure" width="48" height="48"></canvas>
+			<div class="canvas-label">pressure (white = high, black = low, gray = zero)</div>
+		</div>
+	</div>
+	<div id="status">initializing…</div>
+	<p>The full solver: external forces (wind + arrow keys) → pressure projection (MGPCG) → advection, every frame. Click/drag on either canvas to pin a circular region's pressure to a target value (a "pressure source") -- hold Shift while dragging to flip it to a sink instead. Watch the velocity field react to the resulting pressure gradient.</p>
+	<script type="module" src="./main.js"></script>
+</body>
+</html>

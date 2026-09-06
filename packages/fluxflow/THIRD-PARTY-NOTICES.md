@@ -315,6 +315,127 @@ base-class/override-class split (`SemiLagrangian2` vs.
 `CubicSemiLagrangian2`) into a single factory function, matching this
 whole port's factory-over-inheritance convention.
 
+### mantaflow (Apache License 2.0) — inflow/outflow, `src/grid/sdf_inflow_outflow2.js` + `src/grid/grid_outflow_solver2.js`
+
+At the user's own explicit request: inflow/outflow as first-class,
+SDF-based scene objects (`createSDFInflow2`/`createSDFOutflow2`), and what
+their presence actually does to the simulation each frame, is derived from
+**mantaflow** (https://github.com/thunil/mantaflow, Copyright 2018 the
+mantaflow team, Tobias Pfaff & Nils Thuerey), fetched and read directly via
+the GitHub API (no local checkout in this repo). Same license as this
+whole package (Apache License 2.0), so no second license-text block is
+needed:
+
+```
+mantaflow (C++, Apache License 2.0, Tobias Pfaff & Nils Thuerey)
+  -> fluxflow (this package, JS/TSL, Apache-2.0, bert wang)
+```
+
+- **Source:** https://github.com/thunil/mantaflow/blob/master/source/plugin/extforces.cpp (`setOpenBound`, `resetOutflow`, `setInflowBcs`/`KnSetInflow`), .../pressure.cpp (`MakeRhs`, `knCorrectVelocity`), .../advection.cpp (`getBulkVel`, `extrapolateVelConvectiveBC`, `copyChangedVels`, `applyOutflowBC`)
+- **License:** Apache License 2.0 — full text already reproduced above, under "fluxflow (Python) (Apache License 2.0)"; not repeated a second time.
+
+mantaflow's own outflow treatment turned out to be three genuinely
+independent mechanisms (confirmed by reading all three source files
+directly, after an initial single-file read had suggested it was just one)
+— each is credited separately below, since what carries over differs for
+each:
+
+1. **Pressure** (`extforces.cpp`'s `setOpenBound`, `pressure.cpp`'s
+   `MakeRhs`/`knCorrectVelocity`): the *concept* carries over --
+   non-fluid cells get no pressure equation of their own, and any
+   neighboring fluid cell treats that neighbor's pressure as exactly 0.
+   No literal code carries over at all: this port's own pre-existing,
+   more general Dirichlet-pressure mechanism (`grid_pressure_solver2.js`'s
+   `dirichlet`, built on `multigrid.js`'s `dirichletMask`) already
+   reproduces this exactly, with zero changes to the pressure solver
+   itself -- see `sdf_inflow_outflow2.js`'s own header comment for the
+   full derivation.
+2. **Velocity** (`advection.cpp`'s `getBulkVel`/
+   `extrapolateVelConvectiveBC`/`copyChangedVels`/`applyOutflowBC`): the
+   convective/radiation boundary condition *formula* carries over fairly
+   directly -- averaging a local "bulk velocity", then extrapolating via
+   `(vel - velPrev) / factor + vel(upstream neighbor)` where
+   `factor = timeStep * max(1, bulkVel[component])`. A detail easy to miss
+   on a first read, confirmed real by re-reading `advection.cpp` a second
+   time directly at the exact call site: mantaflow's own `applyOutflowBC`
+   does NOT pass its own `timeStep` argument straight through into
+   `extrapolateVelConvectiveBC` -- it passes `max(1.0, timeStep*4)`
+   instead, so `factor`'s own "timeStep" is a floor of 1.0 for any
+   ordinary (CFL-bounded, i.e. well under 0.25) simulation dt, not the raw
+   dt itself. This port's own `grid_outflow_solver2.js` (`
+   OUTFLOW_TIMESTEP_FLOOR`/`OUTFLOW_TIMESTEP_SCALE`) reproduces this exact
+   floor -- an earlier version used the raw simulation dt directly, which
+   is NOT a faithful port of this formula despite looking like one, and
+   was confirmed as a real, independent contributor to a real-hardware
+   divergence (a raw dt of ~0.033 amplifies `vel - velPrev` roughly 30x
+   more than mantaflow's own floor allows). Adapted from mantaflow's own
+   axis-aligned, per-cell-index neighbor search (built for its own
+   always-a-literal-wall outflow regions) to this port's SDF-based,
+   arbitrarily-oriented outflow objects: the "upstream" direction is read
+   from the outflow SDF's own gradient (the same technique
+   `grid_blocked_boundary_condition_solver2.js`'s existing
+   `noFluxProjectionU`/`noFluxProjectionV` already use for collider
+   normals) instead of a fixed compass direction, and both the bulk
+   velocity and the upstream neighbor's velocity are read via
+   `FaceCenteredGrid2`'s own existing bilinear `.sample(pos)`
+   (`grid_data2.js`) instead of mantaflow's own discrete stencil
+   averaging.
+3. **Scalar-field cleanup** (`extforces.cpp`'s `resetOutflow`): the
+   concept (zero a scalar field within outflow cells every step) carries
+   over. What's dropped: everything specific to mantaflow's own
+   particle/level-set machinery (`resetOutflow` also kills FLIP/PIC
+   particles and resets a level-set `phi` -- this port has neither, being
+   a pure Eulerian grid method with no free-surface tracking). What's
+   generalized: `clearOutflowScalarField(scalarGrid)` accepts *any*
+   caller-supplied `ScalarGrid2` (dye, in every existing example -- never
+   a library-owned concept in this port) rather than one hardcoded
+   density field.
+
+Two deliberate extensions beyond mantaflow's own literal mechanism, for
+both inflow and outflow: SDF-shaped (not wall-only) placement -- an inflow
+object can represent a source anywhere in the domain (e.g. a circular
+"fountain"), not just a literal wall, and an outflow object can cover an
+arbitrary-shaped portion of a wall, not "the whole wall or nothing" the
+way mantaflow's own `openBound` string works; and inflow's settable
+`mode` (`'set'`, matching mantaflow's own `KnSetInflow` hard-override
+behavior, or `'add'`, superimposing onto whatever velocity is already
+there -- requested directly by the user, with no equivalent in
+mantaflow's own literal code).
+
+### mantaflow (Apache License 2.0) — symmetric multigrid relaxation, `src/linalg/multigrid.js`
+
+A second, separate consultation of mantaflow (same project as above,
+different source file), at the user's own explicit suggestion, while
+tracking down a long-run divergence that only manifested once a Dirichlet
+pressure mask was active over many frames (first surfaced via the
+inflow/outflow mechanism above). No code is copied from mantaflow here --
+what carries over is a design principle, confirmed by reading mantaflow's
+own multigrid solver directly:
+
+```
+mantaflow (C++, Apache License 2.0, Tobias Pfaff & Nils Thuerey)
+  -> fluxflow (this package, JS/TSL, Apache-2.0, bert wang)
+```
+
+- **Source:** https://github.com/thunil/mantaflow/blob/master/source/multigrid.cpp (`GridMg::doVCycle`, `GridMg::smoothGS`), .../multigrid.h (`GridMg::setSmoothing`)
+- **License:** Apache License 2.0 — full text already reproduced above, under "fluxflow (Python) (Apache License 2.0)"; not repeated a second time.
+
+`GridMg::doVCycle` calls its own `smoothGS(level, reversedOrder)` with
+`reversedOrder=false` for every pre-smoothing repetition and `true` for
+every post-smoothing one, specifically so the two-color (red-black)
+sweep's own color order reverses between them -- keeping the whole
+V-cycle a symmetric linear operator, a standard requirement for using
+multigrid as a preconditioner inside conjugate gradient (an asymmetric
+preconditioner can produce a search direction that grows without bound
+across CG iterations, confirmed directly on real hardware as this port's
+own actual root cause). `multigrid.js`'s own `relax()` had no such
+reversal before this -- see that function's own header comment for the
+full investigation and fix. Only the *principle* (reverse color order for
+symmetry) carries over; the implementation is this port's own, adapted to
+its own dimension-generic (1D/2D/3D), non-Galerkin multigrid design,
+which has no direct structural equivalent to mantaflow's own
+topology-aware coarse-grid generation.
+
 ## Provenance of `src/noise/`
 
 `src/noise/noise.js` is a JavaScript/TSL port of `noise/noise.py` from the
@@ -460,6 +581,72 @@ described in full in `multigrid.js`'s own header comment):
   constant-coefficient Poisson/Laplacian on a plain rectangular domain
   with a fixed zero-flux boundary treatment -- a deliberate scope cut, not
   an oversight; see `multigrid.js`'s own header comment for the reasoning.
+- The optional `dirichletMask` parameter (`laplacianAt`/
+  `laplacianDiagonalAt`/`createLaplacianOperator`/
+  `createMultigridPreconditioner`, added for `grid_pressure_solver2.js`
+  below) generalizes jet's own hardcoded-zero "air" cell to an arbitrary
+  per-cell fixed value, via an identity-row substitution applied at the
+  finest level only -- this mechanism (the mask parameter itself, the
+  identity-row substitution, and the single-level-only design, justified
+  by a relax-formula argument in `multigrid.js`'s own header comment) is
+  this port's own design; jet's own MGPCG takes a different approach
+  entirely (an explicit, variable-coefficient per-cell matrix rebuilt at
+  every level), out of scope here per the point above.
+
+### jet/fluid-engine-dev (MIT) — `src/grid/grid_pressure_solver2.js`, direct, no Python intermediary
+
+`src/grid/grid_pressure_solver2.js` (pressure projection) has no Python
+source to port from at all -- the Python `fluxflow` project's own
+`grid_solver2.py` never got past an abstract `computePressure` hook (same
+situation as `advection_solver2.js` above). Read directly from jet's
+`grid_single_phase_pressure_solver2.h`/`.cpp`. Same direct chain as the
+other jet-sourced `src/grid/`/`src/linalg/` entries (no Python
+intermediary):
+
+```
+fluid-engine-dev (C++, MIT, Doyub Kim)
+  -> fluxflow (this package, JS/TSL, Apache-2.0, bert wang)
+```
+
+- **Source:** https://github.com/doyubkim/fluid-engine-dev/blob/master/include/jet/grid_single_phase_pressure_solver2.h, .../grid_single_phase_pressure_solver2.cpp
+- **License:** MIT — full text already reproduced above, under "fluid-engine-dev (MIT) — via fluxflow (Python)"; not repeated a second time.
+
+What carries over from jet: the fluid/pinned cell classification and the
+overall per-cell stencil shape (an identity row for a pinned cell, a
+divergence-based row for a fluid cell, a pinned neighbor contributing to a
+fluid cell's row exactly like a normal fluid neighbor would). What's this
+port's own generalization, not jet's: jet's own "air" cells are hardcoded
+to exactly 0 (an open-boundary/atmosphere assumption); this generalizes
+that to an arbitrary caller-supplied target value per cell (true
+Dirichlet, not a single constant), and jet's own "boundary" (interior
+solid/collider) category is not ported at all, matching `multigrid.js`'s
+existing no-collider scope cut -- this file only knows about "fluid" and
+"Dirichlet-pinned" cells, not a third "solid" one. Also this port's own:
+the velocity-correction formula's overall *sign* is flipped relative to
+jet's own literal code, a deliberate adjustment to stay consistent with
+this port's pre-existing `createLaplacianOperator` sign convention rather
+than jet's own (jet's own internal Laplacian is negated relative to this
+port's) -- see this file's own header comment for the full derivation.
+The matrix-free GPU realization (reusing `multigrid.js`'s existing
+machinery with a mask, instead of jet's own `FdmMatrix2`/sparse-row code)
+is original.
+
+`src/grid/grid_solver2.js`'s own per-frame orchestration is also modeled
+directly on jet's C++, beyond the hook names/shape already attributed
+above (through `grid_solver2.py`): the exact stage order (external forces,
+viscosity, pressure, advection) and, more specifically, the pattern of
+re-applying the domain-boundary/collider velocity constraint
+(`createGridBlockedBoundaryConditionSolver2`'s own `constrainVelocity()`,
+already ported and attributed above) after *every* stage that changes
+velocity, not just once per frame, is read directly from
+`GridFluidSolver2::onAdvanceTimeStep`/`applyBoundaryCondition`
+(`grid_fluid_solver2.cpp`) -- found and fixed after this orchestrator's
+first version omitted it entirely, which let boundary velocity drift
+unconstrained over many frames (see the file's own header comment for
+the user-reported symptom and root cause).
+
+- **Source:** https://github.com/doyubkim/fluid-engine-dev/blob/master/include/jet/grid_fluid_solver2.h, .../grid_fluid_solver2.cpp
+- **License:** MIT — full text already reproduced above, under "fluid-engine-dev (MIT) — via fluxflow (Python)"; not repeated a second time.
 
 ## Design inspiration (not a code dependency)
 
