@@ -154,6 +154,7 @@ const injectionDensity = 1;
 const dyeDecay = 0.9997; // slower than example 15's own 0.995 -- this domain is much longer, dye needs to survive the trip to the cylinder and beyond
 const vorticityColorScale = 0.3; // see drawVorticity's own comment
 const diagnosticInterval = 30; // frames between console readouts
+const DRAW_INTERVAL = 2; // frames between readback+draw -- see animate()'s own comment
 
 function makeCirclePolygon( cx, cy, radius, segments ) {
 
@@ -292,7 +293,43 @@ try {
 		// numberOfLevels: a grid this size needs real multigrid coarsening,
 		// not numberOfLevels:1. atomicScale: see this file's own header
 		// comment for why 256 (not example 15's own 1024).
-		pressure: { multigrid: { numberOfLevels: 4 }, tolerance: 1e-5, maxIterations: 100, atomicScale: 256 }
+		//
+		// *** Performance tuning, per the user's own request -- read this
+		// before changing any of these four numbers again ***
+		//
+		// The dominant per-frame cost isn't the grid size itself, it's
+		// linalg.js's own CG solve needing a synchronous GPU->CPU readback
+		// for its atomic dot-product reduction 2-3 times PER ITERATION
+		// (pAp, newRTr, newRZ) -- confirmed on real hardware via the fps/
+		// sim-speed display: frame time tracked almost exactly with how
+		// many CG iterations that frame's own solve needed, not with
+		// anything about the grid's own cell count. Two levers, meant to
+		// be tuned TOGETHER, not separately:
+		// - tolerance/maxIterations bound the worst case directly: fewer
+		//   allowed iterations means fewer possible readbacks per frame,
+		//   at the cost of a solve that may not fully converge every
+		//   frame (safe either way -- diagnostics.converged/rejected and
+		//   the pressure/velocity circuit breakers already handle a solve
+		//   that doesn't converge or looks implausible, just with lower
+		//   visual quality on a frame that stops early).
+		// - numberOfSmoothingIterationsDown/Up/numberOfCoarsestIterations
+		//   raise the *preconditioner's* own strength -- pure GPU work,
+		//   no readback at all -- specifically so CG needs FEWER
+		//   iterations to reach the same tolerance, which is a NET WIN on
+		//   readback count even though each individual V-cycle now does
+		//   more GPU-only work. Loosening tolerance/maxIterations alone,
+		//   without this, risks stopping most frames well short of
+		//   converged; strengthening the preconditioner alone, without
+		//   loosening tolerance, doesn't help if maxIterations was never
+		//   the actual limiting factor. Tune both together and watch
+		//   whether `rejected`/`converged` in the console log change for
+		//   the worse before tightening either further.
+		pressure: {
+			multigrid: { numberOfLevels: 4, numberOfSmoothingIterationsDown: 3, numberOfSmoothingIterationsUp: 3, numberOfCoarsestIterations: 30 },
+			tolerance: 1e-3,
+			maxIterations: 40,
+			atomicScale: 256
+		}
 	} );
 
 	const dyeAdvectionSolver = grid.createSemiLagrangianAdvectionSolver2( { velocityGrid: solver.velocityGrid, dt, collider } );
@@ -564,21 +601,42 @@ try {
 
 		}
 
-		computeVorticity();
+		// Draw-readback decoupled from the simulation's own per-frame
+		// advance, per the user's own request -- see this file's own
+		// header comment: a readback (toArray()) is itself a CPU<->GPU
+		// synchronization point, same class of cost as the pressure
+		// solver's own per-iteration one above, just far less frequent
+		// (2 per drawn frame here, vs. up to a few dozen inside a single
+		// solve() call). The simulation keeps advancing every single
+		// frame regardless (onAdvanceTimeStep/advect/inject/clearOutflow
+		// above are untouched) -- only how often the *result* gets read
+		// back and painted is throttled. checkForNonFinite is throttled
+		// along with it (a cosmetic tradeoff, not a safety one: the real
+		// safety guarantee is grid_pressure_solver2.js's/grid_blocked_
+		// boundary_condition_solver2.js's own always-on circuit breakers,
+		// which run every frame inside onAdvanceTimeStep above regardless
+		// of DRAW_INTERVAL -- a value that somehow still went non-finite
+		// would just be caught up to DRAW_INTERVAL-1 frames later than
+		// before, not missed).
+		if ( ! nanDetected && frame % DRAW_INTERVAL === 0 ) {
 
-		const [ dyeData, vorticityData ] = await Promise.all( [
-			currentState.data.toArray(),
-			vorticityGrid.toArray()
-		] );
+			computeVorticity();
 
-		checkForNonFinite( dyeData, frame );
+			const [ dyeData, vorticityData ] = await Promise.all( [
+				currentState.data.toArray(),
+				vorticityGrid.toArray()
+			] );
 
-		if ( ! nanDetected && frame % diagnosticInterval === 0 ) await logDiagnostics( frame, dyeData, vorticityData );
+			checkForNonFinite( dyeData, frame );
 
-		if ( ! nanDetected ) {
+			if ( ! nanDetected && frame % diagnosticInterval === 0 ) await logDiagnostics( frame, dyeData, vorticityData );
 
-			drawDye( dyeData );
-			drawVorticity( vorticityData );
+			if ( ! nanDetected ) {
+
+				drawDye( dyeData );
+				drawVorticity( vorticityData );
+
+			}
 
 		}
 
