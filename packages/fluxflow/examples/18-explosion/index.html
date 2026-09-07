@@ -34,6 +34,7 @@
 	<div id="perf">fps: --</div>
 	<div id="controls">
 		<button id="detonate">detonate again</button>
+		<label><input type="checkbox" id="macCormack" /> MacCormack advection (reloads to apply)</label>
 	</div>
 	<p>A single, one-shot burst (not the continuous source examples/17-smoke-fire/ uses) -- a large, hot, dense disc near the bottom, plus a brief outward velocity impulse, then nothing: no further injection at all. What happens next is entirely buoyancy and momentum (grid.createGridSmokeSolver2, the same reusable solver as examples/17) acting on that one initial condition. A mushroom-cloud shape, if it appears, is not hand-drawn or scripted -- it is the well-known vortex-ring instability of a large buoyant/momentum-driven blob rising through cooler, denser surrounding fluid (the same mechanism real explosion/rising-thermal simulations rely on), an emergent consequence of buoyancy plus advection, nothing added specifically to produce that shape. Click "detonate again" to clear the domain and re-trigger the burst without reloading the page.</p>
 	<script type="module" src="./main.js"></script>

@@ -42,6 +42,22 @@ const fireCanvas = document.querySelector( '#outFire' );
 const statusEl = document.querySelector( '#status' );
 const perfEl = document.querySelector( '#perf' );
 const detonateButton = document.querySelector( '#detonate' );
+const macCormackCheckbox = document.querySelector( '#macCormack' );
+
+// Same "bake at construction time, apply via URL param + reload" pattern as
+// examples/16-karman-vortex-street/main.js's own macCormackEnabled -- see
+// that file's own header comment for why this can't be a live toggle the
+// way vorticityConfinement's own enabled flag is.
+const macCormackEnabled = new URLSearchParams( window.location.search ).get( 'macCormack' ) === '1';
+macCormackCheckbox.checked = macCormackEnabled;
+
+macCormackCheckbox.addEventListener( 'change', () => {
+
+	const url = new URL( window.location.href );
+	url.searchParams.set( 'macCormack', macCormackCheckbox.checked ? '1' : '0' );
+	window.location.href = url.toString();
+
+} );
 
 function status( text, isErr ) {
 
@@ -82,53 +98,102 @@ try {
 	const outflow = grid.createSDFOutflow2( NX, NY, 1, 1, 0, 0 );
 	outflow.addPolygon( makeTopWallStripPolygon( NY - 2, NY + OUTER_MARGIN ) );
 
+	// grid.createVorticityConfinement2 -- see that file's own header comment
+	// for the full design (ported from mantaflow's own vorticityConfinement/
+	// KnConfForce, extforces.cpp). Composed into smoke's own `force` option
+	// below, exactly like any other extra force (grid_smoke_solver2.js's
+	// own header comment on why this composes cleanly with buoyancy).
+	// vorticityConfinementStrength has no canonical default to port (see
+	// vorticity_confinement2.js's own header comment) -- tuned empirically
+	// on real hardware against this scene's own vortex-ring rollup.
+	const vorticityConfinementStrength = 0.5;
+	const vorticityConfinement = grid.createVorticityConfinement2( { velocityGrid, gridSpacing: [ 1, 1 ], strength: vorticityConfinementStrength } );
+
 	const smoke = grid.createGridSmokeSolver2( {
 		velocityGrid,
 		gridSpacing: [ 1, 1 ],
 		origin: [ 0, 0 ],
+		force: vorticityConfinement.force,
 		outflows: outflow,
 		closedDomainBoundaryFlag: grid.DIRECTION_ALL & ~grid.DIRECTION_UP,
 		dt,
 		buoyancyTemperatureFactor,
+		advection: { order: macCormackEnabled ? 2 : 1 }, // see this file's own macCormackEnabled/macCormackCheckbox comments above -- grid_smoke_solver2.js forwards this to BOTH velocity's own self-advection and density/temperature advection
 		pressure: { multigrid: { numberOfLevels: 4 }, tolerance: 1e-4, maxIterations: 60 }
 	} );
 
-	// One-shot burst kernels -- density/temperature only ever written into
-	// stateA (the ping-pong slot that's always active immediately after
-	// construction; see grid_smoke_solver2.js's own header comment for
-	// why the *other* slot needs no separate write -- the first
-	// onAdvanceTimeStep() call advects stateA's own contents into it
-	// naturally). Velocity is written directly into velocityGrid's own
-	// dataU/dataV -- no ping-pong at this level, this *is* the field
-	// createGridSolver2 reads/advects every frame.
-	const setDensityBurst = tsl_array_n.kernel( smoke.density.stateA.dataSize, ( i, j ) => {
+	// *** density/temperature burst: injected on frame 0 itself, through a
+	// per-slot kernel pair, NOT written directly into stateA before the
+	// render loop starts ***
+	//
+	// An earlier version of this file wrote the burst straight into
+	// density.stateA/temperature.stateA via their own dedicated kernel
+	// (called once from detonate(), before any tick). That reliably left
+	// density/temperature reading back as all-zero from frame 0 onward on
+	// real hardware -- root-caused to this project's own documented
+	// WebGL2-fallback "single writer per field" constraint (examples/12-
+	// interactive-advection/main.js's own header comment, and grid_solver2.js's:
+	// a field written by a kernel object other than its one already-
+	// established GPU writer corrupts once both have dispatched -- here,
+	// stateA's own rightful writer is grid_smoke_solver2.js's internal
+	// decayDensityA, which doesn't get its own first dispatch until frame
+	// 1 (activeIsA starts true, so frame 0 advances into stateB, not
+	// stateA) -- a standalone pre-loop kernel touching stateA *first*
+	// apparently corrupts whatever dual-buffering the backend sets up for
+	// it once decayDensityA finally dispatches). Injecting through a
+	// per-slot kernel pair *after* smoke.onAdvanceTimeStep(), exactly
+	// mirroring examples/17-smoke-fire/main.js's own createSourceKernel
+	// pattern (already proven safe on real hardware -- decayDensityA/B
+	// dispatch first every frame there too, with injection following
+	// right after), avoids the ordering that triggers it. burstPending
+	// makes this a true one-shot (unlike example 17's own per-frame
+	// re-injection): applied on the very next onAdvanceTimeStep() after
+	// detonate(), then never again until the next detonate() call.
+	function createBurstKernel( stateGrid, burstValue ) {
 
-		const pos = smoke.density.stateA.dataPosition( i, j );
-		const dx = pos.x.sub( burstCenterX );
-		const dy = pos.y.sub( burstCenterY );
-		const inBurst = dx.mul( dx ).add( dy.mul( dy ) ).lessThan( burstRadius * burstRadius );
+		return tsl_array_n.kernel( stateGrid.dataSize, ( i, j ) => {
 
-		smoke.density.stateA.data( i, j ).assign( inBurst.select( float( burstDensity ), float( 0 ) ) );
+			const pos = stateGrid.dataPosition( i, j );
+			const dx = pos.x.sub( burstCenterX );
+			const dy = pos.y.sub( burstCenterY );
+			const inBurst = dx.mul( dx ).add( dy.mul( dy ) ).lessThan( burstRadius * burstRadius );
 
-	} );
+			stateGrid.data( i, j ).assign( max( stateGrid.data( i, j ), inBurst.select( float( burstValue ), float( 0 ) ) ) );
 
-	const setTemperatureBurst = tsl_array_n.kernel( smoke.temperature.stateA.dataSize, ( i, j ) => {
+		} );
 
-		const pos = smoke.temperature.stateA.dataPosition( i, j );
-		const dx = pos.x.sub( burstCenterX );
-		const dy = pos.y.sub( burstCenterY );
-		const inBurst = dx.mul( dx ).add( dy.mul( dy ) ).lessThan( burstRadius * burstRadius );
+	}
 
-		smoke.temperature.stateA.data( i, j ).assign( inBurst.select( float( burstTemperature ), float( 0 ) ) );
+	const burstDensityA = createBurstKernel( smoke.density.stateA, burstDensity );
+	const burstDensityB = createBurstKernel( smoke.density.stateB, burstDensity );
+	const burstTemperatureA = createBurstKernel( smoke.temperature.stateA, burstTemperature );
+	const burstTemperatureB = createBurstKernel( smoke.temperature.stateB, burstTemperature );
 
-	} );
+	let burstPending = false;
 
-	// Outward radial push, strongest at the burst's own center and
-	// tapering linearly to 0 at burstRadius -- a rough, deliberately
-	// simple stand-in for a real blast wave's own falloff shape, not a
-	// physically-derived one. `max(dist, 0.001)` avoids a literal 0/0 at
-	// the exact center (a real cell will essentially never land exactly
-	// there, but a query *position*, unlike a cell index, can).
+	function applyPendingBurst() {
+
+		if ( ! burstPending ) return;
+		burstPending = false;
+
+		const usingA = smoke.density.current === smoke.density.stateA;
+
+		if ( usingA ) { burstDensityA(); burstTemperatureA(); }
+		else { burstDensityB(); burstTemperatureB(); }
+
+	}
+
+	// Velocity has no such conflict (confirmed on real hardware: these two
+	// kernels, dispatched once from detonate() before the render loop the
+	// same way the pre-fix density kernel was, do NOT corrupt dataU/dataV
+	// the way the density one did) -- left as a direct one-shot kernel
+	// pair, unlike density/temperature above. Outward radial push,
+	// strongest at the burst's own center and tapering linearly to 0 at
+	// burstRadius -- a rough, deliberately simple stand-in for a real
+	// blast wave's own falloff shape, not a physically-derived one.
+	// `max(dist, 0.001)` avoids a literal 0/0 at the exact center (a real
+	// cell will essentially never land exactly there, but a query
+	// *position*, unlike a cell index, can).
 	const setVelocityBurstU = tsl_array_n.kernel( velocityGrid.dataSizeU, ( i, j ) => {
 
 		const pos = velocityGrid.uPosition( i, j );
@@ -169,10 +234,9 @@ try {
 		velocityGrid.dataU.fromArray( new Float32Array( velocityGrid.dataSizeU[ 0 ] * velocityGrid.dataSizeU[ 1 ] ) );
 		velocityGrid.dataV.fromArray( new Float32Array( velocityGrid.dataSizeV[ 0 ] * velocityGrid.dataSizeV[ 1 ] ) );
 
-		setDensityBurst();
-		setTemperatureBurst();
 		setVelocityBurstU();
 		setVelocityBurstV();
+		burstPending = true;
 
 		frame = 0;
 		nanDetected = false;
@@ -367,7 +431,14 @@ try {
 
 		updatePerf();
 
+		// Must run before onAdvanceTimeStep() -- see vorticity_confinement2.js's
+		// own header comment on why (computes this frame's confinement
+		// force from whichever velocity the *previous* frame finished
+		// with, the same timing convention grid_adaptive_timestep2.js's
+		// own update() already established).
+		vorticityConfinement.update();
 		await smoke.onAdvanceTimeStep();
+		applyPendingBurst();
 
 		if ( ! nanDetected && frame % DRAW_INTERVAL === 0 ) {
 

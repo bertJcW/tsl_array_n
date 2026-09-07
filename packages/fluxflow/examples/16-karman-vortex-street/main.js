@@ -141,6 +141,22 @@ const forceFreqInput = document.querySelector( '#forceFreq' );
 const forceStrengthValueEl = document.querySelector( '#forceStrengthValue' );
 const forceFreqValueEl = document.querySelector( '#forceFreqValue' );
 const adaptiveDtCheckbox = document.querySelector( '#adaptiveDt' );
+const vorticityConfinementCheckbox = document.querySelector( '#vorticityConfinement' );
+const macCormackCheckbox = document.querySelector( '#macCormack' );
+
+// advection_solver2.js's own `order` option is baked into the advection
+// kernels at construction time (same "kernels bind at build/call time"
+// convention as every other solver in this port) -- unlike
+// vorticityConfinementEnabled below (a live node multiplying an
+// already-sampled force, toggleable with no rebuild), there's no way to
+// switch it live without reconstructing the whole solver. Read from a URL
+// query param instead, matching a common, honest pattern for a setting
+// that genuinely needs a reload to take effect -- the checkbox's own
+// `change` listener (below, near the other controls) just updates the URL
+// and reloads, rather than pretending this is live-togglable when it
+// isn't.
+const macCormackEnabled = new URLSearchParams( window.location.search ).get( 'macCormack' ) === '1';
+macCormackCheckbox.checked = macCormackEnabled;
 
 function status( text, isErr ) {
 
@@ -309,19 +325,60 @@ try {
 
 	} );
 
+	// grid.createVorticityConfinement2 -- see that file's own header
+	// comment for the full design (ported from mantaflow's own
+	// vorticityConfinement/KnConfForce, extforces.cpp), and
+	// examples/18-explosion/'s own header comment for how
+	// vorticityConfinementStrength was tuned on real hardware (0.15 too
+	// subtle to see clearly, 1.5 visibly overdriven, 0.5 a good balance --
+	// same value reused here rather than re-deriving one for this scene).
+	// Off by default (mantaflow's own convention too -- see
+	// vorticity_confinement2.js's own header comment on why there's no
+	// canonical "on" default), toggled live via vorticityConfinementEnabled
+	// (0/1) rather than rebuilding the force kernel -- this multiplies the
+	// *already-sampled* confinement contribution inside the force kernel
+	// (cheap, no dispatch), while update() below is only actually called
+	// when the checkbox is on, skipping its own 2 dispatches/frame
+	// otherwise (this project's own CG performance investigation found
+	// unnecessary dispatches to be a real, non-trivial cost).
+	const vorticityConfinementStrength = 0.5;
+	const vorticityConfinementEnabled = tsl_array_n.array0( 'float' );
+	vorticityConfinementEnabled.fromArray( new Float32Array( [ 0 ] ) );
+	const vorticityConfinement = grid.createVorticityConfinement2( { velocityGrid, gridSpacing: [ 1, 1 ], strength: vorticityConfinementStrength } );
+
+	vorticityConfinementCheckbox.addEventListener( 'change', () => {
+
+		vorticityConfinementEnabled.fromArray( new Float32Array( [ vorticityConfinementCheckbox.checked ? 1 : 0 ] ) );
+
+	} );
+
+	macCormackCheckbox.addEventListener( 'change', () => {
+
+		const url = new URL( window.location.href );
+		url.searchParams.set( 'macCormack', macCormackCheckbox.checked ? '1' : '0' );
+		window.location.href = url.toString();
+
+	} );
+
+	function combinedForce( pos ) {
+
+		return force( pos ).add( vorticityConfinement.force( pos ).mul( vorticityConfinementEnabled() ) );
+
+	}
+
 	const closedDomainBoundaryFlag = grid.DIRECTION_ALL & ~grid.DIRECTION_RIGHT & ~grid.DIRECTION_LEFT;
 
 	const solver = grid.createGridSolver2( {
 		velocityGrid,
 		gridSpacing: [ 1, 1 ],
 		origin: [ 0, 0 ],
-		force,
+		force: combinedForce,
 		collider,
 		inflows: inflow,
 		outflows: outflow,
 		closedDomainBoundaryFlag,
 		dt: dt(), // invoke the array0 callable to get its live node reference -- external_force_solver2.js/advection_solver2.js expect an already-resolved node here (or a plain number), not the callable itself; the callable (`dt`, unwrapped) is what adaptiveTimeStep.update() below writes new values into via .fromArray()
-		advection: { collider }, // NOT automatic -- see example 15's own header comment
+		advection: { collider, order: macCormackEnabled ? 2 : 1 }, // collider forwarding NOT automatic -- see example 15's own header comment. order: see this file's own macCormackEnabled/macCormackCheckbox comments above
 		// numberOfLevels: a grid this size needs real multigrid coarsening,
 		// not numberOfLevels:1. atomicScale: see this file's own header
 		// comment for why 256 (not example 15's own 1024).
@@ -639,6 +696,13 @@ try {
 		// before onAdvanceTimeStep() reads it -- onAdvanceTimeStep() itself
 		// takes no argument, since (see that file's own header comment)
 		// its default stages never read whatever's passed to them anyway.
+		// Skipped entirely when the checkbox is off -- see this file's own
+		// construction-time comment on vorticityConfinement for why this
+		// (not just the live enabled-flag alone) is worth the extra
+		// branch: avoids 2 unnecessary dispatches/frame in the common
+		// "off" case.
+		if ( vorticityConfinementCheckbox.checked ) vorticityConfinement.update();
+
 		if ( adaptiveDtCheckbox.checked ) {
 
 			lastNumSubSteps = await adaptiveTimeStep.update();

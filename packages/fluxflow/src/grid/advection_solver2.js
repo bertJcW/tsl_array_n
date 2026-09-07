@@ -59,14 +59,26 @@
 
 import * as tsl_array_n from 'tsl_array_n';
 import { float, min, max, length, ceil, abs, If, Loop, Break } from 'three/tsl';
-import { collocatedCubicValueAtPosition2, faceCenteredCubicValueAtPosition2 } from './grid_math.js';
+import { collocatedCubicValueAtPosition2, faceCenteredCubicValueAtPosition2, bilinearCoordsAndWeights2 } from './grid_math.js';
 
 const EPSILON = 1e-6;
 
 // sampleVelocity/sampleBoundary: (pos) => node, closures bound by the
 // factory below. dt: a node (see createSemiLagrangianAdvectionSolver2's
-// own comment on why this isn't a plain JS number here).
-function backTrace( sampleVelocity, sampleBoundary, startPos, dt, h, maxSubsteps ) {
+// own comment on why this isn't a plain JS number here). direction:
+// default 1 (this function's own original, only behavior for order-1
+// advection -- trace *backward* along velocity, unchanged). MacCormack's
+// own second (mantaflow calls it its own "-dt") step needs the opposite:
+// trace *forward* along velocity for the same duration -- direction=-1
+// flips both sub-step formulas' own sign (`pt.sub(v.mul(dt).mul(-1))` ==
+// `pt.add(v.mul(dt))`), reusing this exact same adaptive-substep/
+// boundary-crossing-clamp logic for both directions rather than
+// duplicating it. Provably inert when direction=1 (multiplying by a
+// constant 1.0 node changes nothing, in exact IEEE754 arithmetic or after
+// any reasonable shader-compiler constant-folding) -- order-1 callers are
+// unaffected, confirmed by the real-hardware regression check this
+// change's own verification round ran, not just asserted here.
+function backTrace( sampleVelocity, sampleBoundary, startPos, dt, h, maxSubsteps, direction = 1 ) {
 
 	const pt = startPos.toVar();
 	const remainingT = dt.toVar();
@@ -83,9 +95,9 @@ function backTrace( sampleVelocity, sampleBoundary, startPos, dt, h, maxSubsteps
 		const numSubSteps = max( ceil( length( vel0 ).mul( remainingT ).div( h ) ), 1 );
 		const subDt = remainingT.div( numSubSteps );
 
-		const midPt = pt.sub( vel0.mul( subDt.mul( 0.5 ) ) );
+		const midPt = pt.sub( vel0.mul( subDt.mul( 0.5 ) ).mul( direction ) );
 		const midVel = sampleVelocity( midPt );
-		const nextPt = pt.sub( midVel.mul( subDt ) );
+		const nextPt = pt.sub( midVel.mul( subDt ).mul( direction ) );
 
 		const phi0 = sampleBoundary( pt );
 		const phi1 = sampleBoundary( nextPt );
@@ -142,7 +154,24 @@ function backTrace( sampleVelocity, sampleBoundary, startPos, dt, h, maxSubsteps
 // one dt field's own live node across every stage that needs it without
 // rebuilding any kernel here.
 // options.maxSubsteps: cap on backTrace's adaptive substep loop, default 32.
-export function createSemiLagrangianAdvectionSolver2( { velocityGrid, collider, dt, maxSubsteps = 32 } ) {
+// options.order: 1 (default) or 2 -- matching mantaflow's own exact option
+// name/values (source/plugin/advection.cpp's own `order` parameter). 1 is
+// this file's original plain semi-Lagrangian step, completely unchanged.
+// 2 is MacCormack -- read directly from mantaflow's own fnAdvectSemiLagrange/
+// MacCormackCorrect/MacCormackClamp (see ../../THIRD-PARTY-NOTICES.md for
+// the attribution): a second, backward-in-time trace estimates how much
+// error the forward step introduced, corrects for half of it, then clamps
+// the correction to the locally-observed range (mantaflow's own
+// "clampMode 2", the variant its own code comment marks as "recommended
+// in Andy's paper" -- Selle, Fedkiw, Kim, Liu, Rossignac, "An
+// Unconditionally Stable MacCormack Method" -- over its own more complex
+// clampMode 1) so the correction can never introduce a new, unphysical
+// extremum -- the well-known fix for plain MacCormack's own unconditional
+// instability. Costs 3 dispatches per advected field instead of 1
+// (forward, backward, correct+clamp) -- a real, inherent cost, not this
+// port's own overhead; defaults to 1 so every existing caller is
+// completely unaffected.
+export function createSemiLagrangianAdvectionSolver2( { velocityGrid, collider, dt, maxSubsteps = 32, order = 1 } ) {
 
 	const dtNode = typeof dt === 'number' ? float( dt ) : dt;
 	const h = min( velocityGrid.gridSpacing.x, velocityGrid.gridSpacing.y );
@@ -159,9 +188,66 @@ export function createSemiLagrangianAdvectionSolver2( { velocityGrid, collider, 
 
 	}
 
-	function trace( startPos ) {
+	// direction: see backTrace's own header comment -- default 1 (trace
+	// backward, this file's original and only behavior for order 1).
+	// MacCormack's own second step passes -1 (trace forward, the same
+	// duration) to estimate the first step's own error.
+	function trace( startPos, direction = 1 ) {
 
-		return backTrace( sampleVelocity, sampleBoundary, startPos, dtNode, h, maxSubsteps );
+		return backTrace( sampleVelocity, sampleBoundary, startPos, dtNode, h, maxSubsteps, direction );
+
+	}
+
+	// Order-2 only: gathers orig-field min/max over the 4 grid cells
+	// bilinearCoordsAndWeights2 finds around tracedPos (the exact same
+	// position the forward step's own cubic sample used) -- mantaflow's
+	// own doClampComponent/doClampComponentMAC, clampMode 2, adapted from
+	// its FlagGrid-based "is this neighbor a valid fluid cell" check
+	// (checkFlag) to this port's own SDF-collider convention:
+	// sampleBoundary(pos) > 0 at each neighbor's own position (matching
+	// how every other boundary check in this file already works).
+	// data/dataOrigin/gridSpacing/shape/positionFn: the field being read
+	// and its own coordinate system (input.data/.dataOrigin/.gridSpacing/
+	// .dataSize/.dataPosition for a scalar field, or the dataU/dataV-
+	// specific equivalents for a face-centered one -- see the call sites
+	// below; taken explicitly rather than reaching into the outer
+	// closure's own velocityGrid, so this stays correct even if a future
+	// caller's field genuinely has its own distinct gridSpacing node).
+	function gatherLocalMinMax( data, dataOrigin, gridSpacing, shape, positionFn, tracedPos ) {
+
+		const { i0c, j0c, i1c, j1c } = bilinearCoordsAndWeights2( tracedPos, dataOrigin, gridSpacing, shape );
+		const neighbors = [ [ i0c, j0c ], [ i1c, j0c ], [ i0c, j1c ], [ i1c, j1c ] ];
+
+		let minv = float( 1e30 );
+		let maxv = float( -1e30 );
+		let haveValid = null;
+
+		for ( const [ ni, nj ] of neighbors ) {
+
+			const valid = sampleBoundary( positionFn( ni, nj ) ).greaterThan( 0 );
+			const value = data( ni, nj );
+
+			minv = valid.select( min( minv, value ), minv );
+			maxv = valid.select( max( maxv, value ), maxv );
+			haveValid = haveValid === null ? valid : haveValid.or( valid );
+
+		}
+
+		return { minv, maxv, haveValid };
+
+	}
+
+	// Order-2 only: mantaflow's own clampMode-2 decision -- if no valid
+	// neighbor was found, or the corrected value falls outside the local
+	// [min,max] range those neighbors' own orig values span, fall back to
+	// the plain forward-step value instead of the (potentially
+	// overshooting) corrected one.
+	function clampCorrection( correctedValue, fwdValue, data, dataOrigin, gridSpacing, shape, positionFn, tracedPos ) {
+
+		const { minv, maxv, haveValid } = gatherLocalMinMax( data, dataOrigin, gridSpacing, shape, positionFn, tracedPos );
+		const inRange = correctedValue.greaterThanEqual( minv ).and( correctedValue.lessThanEqual( maxv ) );
+
+		return haveValid.and( inRange ).select( correctedValue, fwdValue );
 
 	}
 
@@ -171,7 +257,7 @@ export function createSemiLagrangianAdvectionSolver2( { velocityGrid, collider, 
 	// solver's own velocityGrid).
 	function advectFaceCentered2( input, output ) {
 
-		const dispatchU = tsl_array_n.kernel( input.dataSizeU, ( i, j ) => {
+		const dispatchU1 = tsl_array_n.kernel( input.dataSizeU, ( i, j ) => {
 
 			const pos = input.uPosition( i, j );
 
@@ -190,7 +276,7 @@ export function createSemiLagrangianAdvectionSolver2( { velocityGrid, collider, 
 
 		} );
 
-		const dispatchV = tsl_array_n.kernel( input.dataSizeV, ( i, j ) => {
+		const dispatchV1 = tsl_array_n.kernel( input.dataSizeV, ( i, j ) => {
 
 			const pos = input.vPosition( i, j );
 
@@ -209,10 +295,136 @@ export function createSemiLagrangianAdvectionSolver2( { velocityGrid, collider, 
 
 		} );
 
+		if ( order === 1 ) return function dispatch() {
+
+			dispatchU1();
+			dispatchV1();
+
+		};
+
+		// order 2 (MacCormack) -- see createSemiLagrangianAdvectionSolver2's
+		// own header comment. fwdU/fwdV together form one scratch
+		// FaceCenteredGrid2-shaped pair (same staggered layout as input),
+		// since faceCenteredCubicValueAtPosition2 needs *both* components
+		// together to interpolate correctly even when only one component's
+		// own result is kept -- exactly how the order-1 kernels above
+		// already read both input.dataU/input.dataV regardless of which
+		// one (.x/.y) they extract.
+		const fwdU = tsl_array_n.arrayN( 'float', input.dataSizeU );
+		const fwdV = tsl_array_n.arrayN( 'float', input.dataSizeV );
+		const bwdU = tsl_array_n.arrayN( 'float', input.dataSizeU );
+		const bwdV = tsl_array_n.arrayN( 'float', input.dataSizeV );
+
+		const dispatchForwardU = tsl_array_n.kernel( input.dataSizeU, ( i, j ) => {
+
+			const pos = input.uPosition( i, j );
+
+			If( sampleBoundary( pos ).greaterThan( 0 ), () => {
+
+				const tracedPos = trace( pos );
+				fwdU( i, j ).assign( faceCenteredCubicValueAtPosition2( input.dataU, input.dataV, input.gridSpacing, input.dataOriginU, input.dataOriginV, tracedPos, input.dataSizeU, input.dataSizeV ).x );
+
+			} ).Else( () => {
+
+				fwdU( i, j ).assign( input.dataU( i, j ) );
+
+			} );
+
+		} );
+
+		const dispatchForwardV = tsl_array_n.kernel( input.dataSizeV, ( i, j ) => {
+
+			const pos = input.vPosition( i, j );
+
+			If( sampleBoundary( pos ).greaterThan( 0 ), () => {
+
+				const tracedPos = trace( pos );
+				fwdV( i, j ).assign( faceCenteredCubicValueAtPosition2( input.dataU, input.dataV, input.gridSpacing, input.dataOriginU, input.dataOriginV, tracedPos, input.dataSizeU, input.dataSizeV ).y );
+
+			} ).Else( () => {
+
+				fwdV( i, j ).assign( input.dataV( i, j ) );
+
+			} );
+
+		} );
+
+		const dispatchBackwardU = tsl_array_n.kernel( input.dataSizeU, ( i, j ) => {
+
+			const pos = input.uPosition( i, j );
+
+			If( sampleBoundary( pos ).greaterThan( 0 ), () => {
+
+				const tracedPos = trace( pos, -1 );
+				bwdU( i, j ).assign( faceCenteredCubicValueAtPosition2( fwdU, fwdV, input.gridSpacing, input.dataOriginU, input.dataOriginV, tracedPos, input.dataSizeU, input.dataSizeV ).x );
+
+			} ).Else( () => {
+
+				bwdU( i, j ).assign( fwdU( i, j ) );
+
+			} );
+
+		} );
+
+		const dispatchBackwardV = tsl_array_n.kernel( input.dataSizeV, ( i, j ) => {
+
+			const pos = input.vPosition( i, j );
+
+			If( sampleBoundary( pos ).greaterThan( 0 ), () => {
+
+				const tracedPos = trace( pos, -1 );
+				bwdV( i, j ).assign( faceCenteredCubicValueAtPosition2( fwdU, fwdV, input.gridSpacing, input.dataOriginU, input.dataOriginV, tracedPos, input.dataSizeU, input.dataSizeV ).y );
+
+			} ).Else( () => {
+
+				bwdV( i, j ).assign( fwdV( i, j ) );
+
+			} );
+
+		} );
+
+		const dispatchCorrectAndClampU = tsl_array_n.kernel( input.dataSizeU, ( i, j ) => {
+
+			const pos = input.uPosition( i, j );
+
+			If( sampleBoundary( pos ).greaterThan( 0 ), () => {
+
+				const tracedPos = trace( pos );
+				const fwdValue = fwdU( i, j );
+				const correctedValue = fwdValue.add( input.dataU( i, j ).sub( bwdU( i, j ) ).mul( 0.5 ) );
+				const clamped = clampCorrection( correctedValue, fwdValue, input.dataU, input.dataOriginU, input.gridSpacing, input.dataSizeU, input.uPosition, tracedPos );
+
+				output.dataU( i, j ).assign( clamped );
+
+			} );
+
+		} );
+
+		const dispatchCorrectAndClampV = tsl_array_n.kernel( input.dataSizeV, ( i, j ) => {
+
+			const pos = input.vPosition( i, j );
+
+			If( sampleBoundary( pos ).greaterThan( 0 ), () => {
+
+				const tracedPos = trace( pos );
+				const fwdValue = fwdV( i, j );
+				const correctedValue = fwdValue.add( input.dataV( i, j ).sub( bwdV( i, j ) ).mul( 0.5 ) );
+				const clamped = clampCorrection( correctedValue, fwdValue, input.dataV, input.dataOriginV, input.gridSpacing, input.dataSizeV, input.vPosition, tracedPos );
+
+				output.dataV( i, j ).assign( clamped );
+
+			} );
+
+		} );
+
 		return function dispatch() {
 
-			dispatchU();
-			dispatchV();
+			dispatchForwardU();
+			dispatchForwardV();
+			dispatchBackwardU();
+			dispatchBackwardV();
+			dispatchCorrectAndClampU();
+			dispatchCorrectAndClampV();
 
 		};
 
@@ -222,7 +434,7 @@ export function createSemiLagrangianAdvectionSolver2( { velocityGrid, collider, 
 	// temperature, advected through this solver's own velocityGrid.
 	function advectScalar2( input, output ) {
 
-		return tsl_array_n.kernel( input.dataSize, ( i, j ) => {
+		const dispatchOrder1 = tsl_array_n.kernel( input.dataSize, ( i, j ) => {
 
 			const pos = input.dataPosition( i, j );
 
@@ -236,6 +448,80 @@ export function createSemiLagrangianAdvectionSolver2( { velocityGrid, collider, 
 			} );
 
 		} );
+
+		if ( order === 1 ) return dispatchOrder1;
+
+		// order 2 (MacCormack) -- see createSemiLagrangianAdvectionSolver2's
+		// own header comment for the full algorithm. fwd/bwd: scratch
+		// fields scoped to this one advectScalar2(input, output) call,
+		// matching this port's established "fields bound at construction/
+		// call time" convention (same as e.g. grid_smoke_solver2.js's own
+		// ping-pong scratch fields).
+		const fwd = tsl_array_n.arrayN( 'float', input.dataSize );
+		const bwd = tsl_array_n.arrayN( 'float', input.dataSize );
+
+		const dispatchForward = tsl_array_n.kernel( input.dataSize, ( i, j ) => {
+
+			const pos = input.dataPosition( i, j );
+
+			If( sampleBoundary( pos ).greaterThan( 0 ), () => {
+
+				const tracedPos = trace( pos );
+				fwd( i, j ).assign( collocatedCubicValueAtPosition2( input.data, input.gridSpacing, input.dataOrigin, tracedPos, input.dataSize ) );
+
+			} ).Else( () => {
+
+				fwd( i, j ).assign( input.data( i, j ) );
+
+			} );
+
+		} );
+
+		// Traces *forward* (direction=-1) from this cell's own position,
+		// sampling fwd (not input) -- mantaflow's own "bwd <- SemiLagrange
+		// (fwd, -dt)". If fwd/trace were error-free, bwd would equal input
+		// exactly; the difference is this step's own error estimate.
+		const dispatchBackward = tsl_array_n.kernel( input.dataSize, ( i, j ) => {
+
+			const pos = input.dataPosition( i, j );
+
+			If( sampleBoundary( pos ).greaterThan( 0 ), () => {
+
+				const tracedPos = trace( pos, -1 );
+				bwd( i, j ).assign( collocatedCubicValueAtPosition2( fwd, input.gridSpacing, input.dataOrigin, tracedPos, input.dataSize ) );
+
+			} ).Else( () => {
+
+				bwd( i, j ).assign( fwd( i, j ) );
+
+			} );
+
+		} );
+
+		const dispatchCorrectAndClamp = tsl_array_n.kernel( input.dataSize, ( i, j ) => {
+
+			const pos = input.dataPosition( i, j );
+
+			If( sampleBoundary( pos ).greaterThan( 0 ), () => {
+
+				const tracedPos = trace( pos ); // recomputed -- the exact same position dispatchForward already sampled fwd at
+				const fwdValue = fwd( i, j );
+				const correctedValue = fwdValue.add( input.data( i, j ).sub( bwd( i, j ) ).mul( 0.5 ) );
+				const clamped = clampCorrection( correctedValue, fwdValue, input.data, input.dataOrigin, input.gridSpacing, input.dataSize, input.dataPosition, tracedPos );
+
+				output.data( i, j ).assign( clamped );
+
+			} );
+
+		} );
+
+		return function dispatch() {
+
+			dispatchForward();
+			dispatchBackward();
+			dispatchCorrectAndClamp();
+
+		};
 
 	}
 

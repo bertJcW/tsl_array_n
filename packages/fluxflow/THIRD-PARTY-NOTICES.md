@@ -481,6 +481,82 @@ reaction-front/combustion model. Flagged explicitly so it is never mistaken for 
 simulation (mantaflow's own fire plugin, or Nguyen/Fedkiw/Jensen's *"Physically Based Modeling and
 Animation of Fire"*, SIGGRAPH 2002, are the actual references for that, and neither is used here).
 
+### mantaflow (Apache License 2.0) — vorticity confinement, `src/grid/vorticity_confinement2.js`
+
+Found by directly comparing this port's smoke/fire solver against mantaflow's own (per the user's own
+explicit request), read directly from mantaflow's `extforces.cpp` (`vorticityConfinement`/
+`KnConfForce`), fetched and read directly via the GitHub API (no local checkout in this repo). Same
+license as this whole package (Apache License 2.0), so no second license-text block is needed:
+
+```
+mantaflow (C++, Apache License 2.0, Tobias Pfaff & Nils Thuerey)
+  -> fluxflow (this package, JS/TSL, Apache-2.0, bert wang)
+```
+
+- **Source:** https://github.com/thunil/mantaflow/blob/master/source/plugin/extforces.cpp (`vorticityConfinement`, `KnConfForce`)
+- **License:** Apache License 2.0 — full text already reproduced above, under "fluxflow (Python) (Apache License 2.0)"; not repeated a second time.
+
+The technique itself is not mantaflow's own invention -- both mantaflow's own code comment and this
+port's implementation trace it to Fedkiw, Stam & Jensen, *"Visual Simulation of Smoke"* (SIGGRAPH
+2001), the same paper jet/fluid-engine-dev's own `GridSmokeSolver2` already cites (see above) --
+notably, jet itself never implements this particular piece, only mantaflow does among this port's two
+C++ references. What carries over from mantaflow: the general formula (`eta = normalize(grad(|curl|))`,
+`force = strength * cross(eta, curl)`) and its N-D-to-2D specialization -- re-derived independently
+here rather than copied (`src/grid/vorticity_confinement2.js`'s own header comment shows the expansion:
+`eta3D x curl3D = (eta.y*curl, -eta.x*curl, 0)` for a 2D flow's curl vector `(0,0,curl)`), confirming
+the sign/axis convention rather than assuming it. What's this port's own addition, not mantaflow's:
+mantaflow's own `KnConfForce` calls `normalize(grad)` with no guard against a zero gradient (a locally
+uniform-`|vorticity|` region, or an extremum) -- this port adds an explicit epsilon check, zeroing the
+confinement force there instead of propagating a NaN direction, matching the same defensive pattern
+already established elsewhere in this port for this exact class of risk (`linalg.js`'s own
+`isDegenerateDot`, `grid_math.js`'s own `bilinearGradientAtPosition2` fix,
+`grid_outflow_solver2.js`'s own `EXTRAPOLATED_VELOCITY_CLAMP`). Also unlike mantaflow's own two C++
+helper functions (`GetCentered`/`CurlOp`, generic across grid types), this port reuses
+`grid_math.js`'s already-existing, already-tested `faceCenteredCurlAtCenter2` (built for
+`examples/16-karman-vortex-street/`'s own vorticity visualization) and `scalarGradient2` directly,
+rather than porting mantaflow's own separate curl/gradient machinery.
+
+### mantaflow (Apache License 2.0) — optional MacCormack advection, `src/grid/advection_solver2.js`
+
+Found the same way as vorticity confinement above (directly comparing this port's own solver against
+mantaflow's), read directly from mantaflow's `advection.cpp` (`fnAdvectSemiLagrange`,
+`MacCormackCorrect`, `MacCormackClamp`/`doClampComponent`/`doClampComponentMAC`), fetched and read
+directly via the GitHub API (no local checkout in this repo). Same license as this whole package
+(Apache License 2.0), so no second license-text block is needed:
+
+```
+mantaflow (C++, Apache License 2.0, Tobias Pfaff & Nils Thuerey)
+  -> fluxflow (this package, JS/TSL, Apache-2.0, bert wang)
+```
+
+- **Source:** https://github.com/thunil/mantaflow/blob/master/source/plugin/advection.cpp (`fnAdvectSemiLagrange`, `MacCormackCorrect`, `MacCormackClamp`, `doClampComponent`, `doClampComponentMAC`)
+- **License:** Apache License 2.0 — full text already reproduced above, under "fluxflow (Python) (Apache License 2.0)"; not repeated a second time.
+
+`createSemiLagrangianAdvectionSolver2`'s new `order` option (1 default/unchanged, 2 opt-in) matches
+mantaflow's own exact option name and values. What carries over from mantaflow: the overall MacCormack
+structure (a forward trace, a second backward-in-time trace used only to estimate that step's own
+error, a half-error correction, then a clamp) and specifically mantaflow's own "clampMode 2" -- gather
+the original field's min/max over the same 4 neighbor cells the forward trace sampled from, and fall
+back to the plain forward value if the corrected value falls outside that range or no valid neighbor
+was found. mantaflow's own code comment marks clampMode 2 as *"recommended in Andy's paper"* (Andy
+Selle, Ronald Fedkiw, ByungMoon Kim, Yingjie Liu, Jarek Rossignac, *"An Unconditionally Stable
+MacCormack Method"*, Journal of Scientific Computing, 2008 -- the actual fix for plain MacCormack's own
+well-known unconditional instability) -- this port implements clampMode 2 specifically, not
+mantaflow's own more complex clampMode 1 (a hard clamp plus extra dual-position/obstacle checks),
+for that reason. What's this port's own adaptation, not a literal port: mantaflow's own trace kernels
+(`SemiLagrange`/`SemiLagrangeMAC`) are a plain one-step or RK2-midpoint trace with no boundary handling
+of their own (mantaflow handles obstacles separately, via a discrete per-cell `FlagGrid`); this port
+instead reuses its own pre-existing `backTrace` (an adaptive-substep RK2 trace with boundary-crossing
+clamping built directly in, already ported from jet/fluid-engine-dev, see above) for *both* the forward
+and the backward-in-time step, via a new `direction` parameter (provably inert at its own default,
+confirmed not to change any order-1 behavior by an exact-value real-hardware regression check --
+`examples/09-advection/`'s own two precise numeric tests, unchanged in every digit). mantaflow's own
+`checkFlag` (is this neighbor a valid fluid cell) is likewise adapted to this port's own SDF-collider
+convention, evaluated as `sampleBoundary(pos) > 0` at each neighbor's own position rather than a
+discrete flag lookup -- the same substitution `grid_outflow_solver2.js`'s own bulk-velocity averaging
+already established. `bilinearCoordsAndWeights2` (`grid_math.js`, already exported, already used
+internally elsewhere) is reused directly for the clamp step's own 4-neighbor gather, not reimplemented.
+
 ## Provenance of `src/noise/`
 
 `src/noise/noise.js` is a JavaScript/TSL port of `noise/noise.py` from the
