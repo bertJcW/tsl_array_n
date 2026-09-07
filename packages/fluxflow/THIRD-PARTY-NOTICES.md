@@ -648,6 +648,52 @@ the user-reported symptom and root cause).
 - **Source:** https://github.com/doyubkim/fluid-engine-dev/blob/master/include/jet/grid_fluid_solver2.h, .../grid_fluid_solver2.cpp
 - **License:** MIT — full text already reproduced above, under "fluid-engine-dev (MIT) — via fluxflow (Python)"; not repeated a second time.
 
+## Provenance of `src/time/`
+
+### jet/fluid-engine-dev (MIT) — `src/time/cfl.js`, direct, no Python intermediary
+
+`src/time/cfl.js`'s `computeAdaptiveSubSteps` ports the CFL (Courant-
+Friedrichs-Lewy) substep-count formula from `PhysicsAnimation::
+advanceTimeStep`'s adaptive-substepping branch (`physics_animation.cpp`)
+and `GridFluidSolver2::cfl()`/`numberOfSubTimeSteps()`
+(`grid_fluid_solver2.cpp`) -- same direct chain as the other jet-sourced
+entries above (no Python intermediary; `grid_solver2.py`'s own abstract
+base never had a CFL/substepping concept at all):
+
+```
+fluid-engine-dev (C++, MIT, Doyub Kim)
+  -> fluxflow (this package, JS/TSL, Apache-2.0, bert wang)
+```
+
+- **Source:** https://github.com/doyubkim/fluid-engine-dev/blob/master/include/jet/physics_animation.h, .../physics_animation.cpp, .../grid_fluid_solver2.h, .../grid_fluid_solver2.cpp
+- **License:** MIT — full text already reproduced above, under "fluid-engine-dev (MIT) — via fluxflow (Python)"; not repeated a second time.
+
+What carries over from jet: the formula itself (`cfl = maxVelocityMagnitude
+* frameDt / minGridSpacing`, `numSubSteps = max(1, ceil(cfl /
+courantNumber))`), and the default `courantNumber` of 5, matching jet's own
+`GridFluidSolver2::_maxCfl` default. What's this port's own addition, not
+jet's: a `maxSubSteps` cap (jet's own C++ has no equivalent -- a defensive
+circuit breaker, same spirit as `linalg.js`'s `MAX_ALPHA_MAGNITUDE`/
+`MAX_BETA_MAGNITUDE`), and computing the substep count *once* per
+`grid_adaptive_timestep2.js` `update()` call rather than re-checking before
+every individual substep the way `PhysicsAnimation::advanceTimeStep`'s own
+`while (remainingTime > kEpsilonD)` loop does -- a deliberate simplification
+documented in that file's own header comment, trading jet's finer-grained
+adaptivity for one GPU readback per rendered frame instead of one per
+substep (this port's own CG performance investigation, `../../docs/perf-
+investigation-cg-gpu-resident-alpha-beta.md`, found GPU/CPU synchronization
+points to be a real, non-trivial cost on real hardware).
+
+`src/linalg/reduction.js` (the GPU max-velocity-magnitude reduction that
+feeds this formula's `maxVelocityMagnitude` input, for the grid solver via
+`src/grid/grid_adaptive_timestep2.js`) is **original**, not ported from
+jet or anywhere else -- jet's own `cfl()` is a plain single-threaded CPU
+loop with `std::max` (C++ has no GPU-atomics equivalent to port), so the
+`atomicMax`-based parallel reduction is this port's own generalization of
+the atomic-dot-product machinery `src/linalg/linalg.js` already uses for
+CG (`atomicAdd`), substituting `atomicMax` and dropping the sign-handling
+a dot product's accumulator needs (a magnitude is always non-negative).
+
 ## Design inspiration (not a code dependency)
 
 ### Taichi Lang

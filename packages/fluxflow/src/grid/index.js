@@ -13,3 +13,4 @@ export * from './grid_pressure_solver2.js';
 export * from './sdf_inflow_outflow2.js';
 export * from './grid_outflow_solver2.js';
 export * from './grid_solver2.js';
+export * from './grid_adaptive_timestep2.js';

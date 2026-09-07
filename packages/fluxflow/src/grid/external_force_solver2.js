@@ -34,12 +34,21 @@ import { float } from 'three/tsl';
 // -- no changes needed to this file at all.
 //
 // options.dt: same flexible convention as advection_solver2.js -- a plain
-// JS number (baked in as a constant at kernel-build time) or a node such
-// as an array0('float')'s own callable reference (kept live: update the
-// array0's contents via fromArray() between dispatches and this solver's
-// already-built kernels pick up the new value on their next dispatch,
-// the same pattern linalg.js's alpha/beta scalars and
-// advection_solver2.js's own dt already rely on).
+// JS number (baked in as a constant at kernel-build time) or a node
+// obtained by *calling* an array0('float') field (e.g. `dtField()`, not
+// the callable field reference itself -- passing the field unInvoked
+// throws downstream, since it's a plain JS function with none of a real
+// TSL node's own methods, not a node with deferred/live semantics of its
+// own). The node returned by that call stays live: update the array0's
+// *contents* via dtField.fromArray() between dispatches (a separate call,
+// on the field itself, not the node) and this solver's already-built
+// kernels pick up the new value on their next dispatch, the same pattern
+// linalg.js's alpha/beta scalars and advection_solver2.js's own dt
+// already rely on. Confirmed exactly this distinction matters on real
+// hardware while building examples/16-karman-vortex-street/'s own
+// adaptive-dt checkbox (grid_adaptive_timestep2.js) -- passing the field
+// itself here threw `dt.toVar is not a function` from inside
+// advection_solver2.js's own backTrace.
 export function createExternalForceSolver2( { velocityGrid, force, dt } ) {
 
 	const dtNode = typeof dt === 'number' ? float( dt ) : dt;

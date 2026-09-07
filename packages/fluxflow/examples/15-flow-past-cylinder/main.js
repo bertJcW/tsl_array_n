@@ -72,14 +72,23 @@
 // In this dev sandbox: hits the same atomics compile-time wall as every
 // other MGPCG-based example in this port (WGSL atomics have no GLSL
 // translation on the WebGL2 fallback backend). CONFIRMED correct and
-// stable on real WebGPU hardware (1500+ frames, all-finite velocity/
-// pressure/divergence, reaching a steady fixed point) with inflow, all
-// three parts of outflow (pressure, convective velocity extrapolation,
-// and scalar cleanup), the collider, and the whole-domain force all
-// active together, at their default settings -- see
-// grid_math.js's own bilinearGradientAtPosition2 and
-// grid_outflow_solver2.js's own OUTFLOW_TIMESTEP_FLOOR/SCALE for the two
-// real bugs that were found and fixed to get here.
+// stable on real WebGPU hardware with inflow, all three parts of outflow
+// (pressure, convective velocity extrapolation, and scalar cleanup), the
+// collider, and the whole-domain force all active together, at their
+// default settings -- see grid_math.js's own bilinearGradientAtPosition2
+// and grid_outflow_solver2.js's own OUTFLOW_TIMESTEP_FLOOR/SCALE for two
+// real bugs found and fixed along the way, and that same file's own
+// header comment for a third, more serious one (an asymmetric multigrid
+// relaxation schedule, not specific to this file) found afterward via a
+// longer-run investigation, root-caused, and fixed. Re-confirmed stable
+// with a fresh, deliberately long real-hardware run after that fix: peak
+// velocity magnitude reaches a non-growing plateau (~28, at the outflow's
+// own outer boundary -- consistent with the whole-domain force
+// continuously adding momentum with no viscosity to dissipate it, until
+// the outflow's own convective extrapolation reaches equilibrium) by
+// roughly frame 500 and holds it, unchanged, through frame 5300+ --
+// `diagnostics.converged`/`rejected` stayed healthy and no non-finite
+// value appeared anywhere in that entire run.
 
 import * as tsl_array_n from 'tsl_array_n';
 import { vec2, float, max } from 'three/tsl';
