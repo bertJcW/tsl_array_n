@@ -83,7 +83,11 @@ import { atomicAdd, round } from 'three/tsl';
 // about +/-2.1e9). 65536 (2^16) is a reasonable default for O(1)-magnitude
 // fields; tune via the `atomicScale` option for your own problem's actual
 // value range.
-const DEFAULT_ATOMIC_DOT_SCALE = 65536;
+// Exported so other GPU-atomic-reduction primitives (e.g. reduction.js's
+// max-magnitude reducer, used by the CFL/adaptive-timestep module) can
+// share the same default fixed-point scale/tuning convention instead of
+// duplicating it.
+export const DEFAULT_ATOMIC_DOT_SCALE = 65536;
 
 // jet/fluid-engine-dev's own `pcg()` (include/jet/detail/cg-inl.h, MIT
 // license, Doyub Kim -- see ../../THIRD-PARTY-NOTICES.md) recomputes the

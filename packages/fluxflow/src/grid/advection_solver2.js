@@ -129,14 +129,18 @@ function backTrace( sampleVelocity, sampleBoundary, startPos, dt, h, maxSubsteps
 // always returns 1, i.e. "outside", matching jet's default
 // ConstantScalarField2(kMaxD) -- "no boundary").
 // options.dt: the time-step, a plain JS number (baked in as a constant at
-// kernel-build time -- fine for a fixed-dt test) or a node such as an
-// array0('float')'s own callable reference (kept live: update the
-// array0's contents via fromArray() between dispatches and every
-// already-built kernel here picks up the new value on its next dispatch,
-// the same pattern linalg.js's alpha/beta scalars already rely on) --
-// this factory itself only converts a plain number to a node once, so a
-// real CFL-adaptive solver can share one dt field across every stage that
-// needs it without rebuilding any kernel here.
+// kernel-build time -- fine for a fixed-dt test) or a node obtained by
+// *calling* an array0('float') field (e.g. `dtField()`, not the callable
+// field reference itself -- see external_force_solver2.js's own dt
+// comment for the exact real-hardware error passing the field unInvoked
+// produces). The node returned by that call stays live: update the
+// array0's *contents* via dtField.fromArray() between dispatches (on the
+// field itself, not the node) and every already-built kernel here picks
+// up the new value on its next dispatch, the same pattern linalg.js's
+// alpha/beta scalars already rely on -- this factory itself only converts
+// a plain number to a node once, so a real CFL-adaptive solver can share
+// one dt field's own live node across every stage that needs it without
+// rebuilding any kernel here.
 // options.maxSubsteps: cap on backTrace's adaptive substep loop, default 32.
 export function createSemiLagrangianAdvectionSolver2( { velocityGrid, collider, dt, maxSubsteps = 32 } ) {
 

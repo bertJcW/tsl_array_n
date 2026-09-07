@@ -95,6 +95,14 @@
 // back to its library default (true, full convective velocity
 // extrapolation) -- the earlier `false` workaround here was papering over
 // that bug, not a real tuning choice, and is no longer needed.
+// Independently re-confirmed in a later session with a fresh, deliberately
+// long real-hardware run: peak velocity magnitude (at the outflow's own
+// outer boundary, same characteristic location and ~28 plateau value as
+// example 15's own) rises and settles by roughly frame 2000 (this scene's
+// much longer domain means disturbances take longer to reach that
+// boundary than example 15's smaller one), then holds flat, unchanged,
+// through frame 5750+ -- `diagnostics.converged`/`rejected` stayed
+// healthy and no non-finite value appeared anywhere in that entire run.
 //
 // *** Confirmed on real hardware: this scene genuinely sheds, alternating
 // -- read this before judging the result by the dye canvas alone ***
@@ -132,6 +140,7 @@ const forceStrengthInput = document.querySelector( '#forceStrength' );
 const forceFreqInput = document.querySelector( '#forceFreq' );
 const forceStrengthValueEl = document.querySelector( '#forceStrengthValue' );
 const forceFreqValueEl = document.querySelector( '#forceFreqValue' );
+const adaptiveDtCheckbox = document.querySelector( '#adaptiveDt' );
 
 function status( text, isErr ) {
 
@@ -142,7 +151,19 @@ function status( text, isErr ) {
 
 const NX = 256;
 const NY = 128;
-const dt = 1 / 30;
+// Nominal per-frame simulated-time budget. Real, per-substep dt (below,
+// `dt`) is a live GPU node -- when the "adaptive dt (CFL)" checkbox is on,
+// grid.createGridAdaptiveTimeStep2 (src/grid/grid_adaptive_timestep2.js,
+// new this round -- see ../../docs/perf-investigation-cg-gpu-resident-
+// alpha-beta.md for why this was built and PicSolver2's own real-hardware
+// verification methodology; the design was CFL-grounded against jet/
+// fluid-engine-dev's GridFluidSolver2/PhysicsAnimation, see THIRD-PARTY-
+// NOTICES.md) divides this into N equal, smaller substeps per rendered
+// frame instead of always exactly one -- so `simTime`/sim-speed below,
+// which only care about the *total* simulated time advanced per rendered
+// frame, keep using this constant either way (N substeps of targetDt/N
+// each always sum back to exactly targetDt, by construction).
+const targetDt = 1 / 30;
 const pushStrength = 0.05; // initial value only -- see the force control panel, live-adjustable from here
 const inflowSpeed = 2;
 const cylinderRadius = 6;
@@ -188,6 +209,17 @@ try {
 	status( `backend: ${ renderer.backend?.constructor?.name ?? 'unknown' }` );
 
 	const velocityGrid = grid.createFaceCenteredGrid2( NX, NY, 1, 1, 0, 0 );
+
+	// Live node, not a plain number -- required for adaptive dt to have any
+	// effect at all (grid_solver2.js/external_force_solver2.js/
+	// advection_solver2.js all bake a *plain-number* dt into their kernels
+	// once, at construction time; only a node like this one is re-read live
+	// -- see grid_adaptive_timestep2.js's own header comment). Holds
+	// targetDt when the adaptive checkbox is off (the exact previous
+	// behavior of this file, unchanged), or a smaller per-substep value
+	// written by adaptiveTimeStep.update() each frame when it's on.
+	const dt = tsl_array_n.array0( 'float' );
+	dt.fromArray( new Float32Array( [ targetDt ] ) );
 
 	// dye state, ping-ponged -- see example 15's own header comment for why
 	// this is four fields, not two.
@@ -288,7 +320,7 @@ try {
 		inflows: inflow,
 		outflows: outflow,
 		closedDomainBoundaryFlag,
-		dt,
+		dt: dt(), // invoke the array0 callable to get its live node reference -- external_force_solver2.js/advection_solver2.js expect an already-resolved node here (or a plain number), not the callable itself; the callable (`dt`, unwrapped) is what adaptiveTimeStep.update() below writes new values into via .fromArray()
 		advection: { collider }, // NOT automatic -- see example 15's own header comment
 		// numberOfLevels: a grid this size needs real multigrid coarsening,
 		// not numberOfLevels:1. atomicScale: see this file's own header
@@ -332,7 +364,23 @@ try {
 		}
 	} );
 
-	const dyeAdvectionSolver = grid.createSemiLagrangianAdvectionSolver2( { velocityGrid: solver.velocityGrid, dt, collider } );
+	// Deliberately kept at the fixed targetDt, not the (possibly adaptive)
+	// `dt` node above -- dye here is a passive visualization tracer only,
+	// not something anything else in this file reads back for physics, so
+	// decoupling it from the velocity solver's own substep count avoids
+	// dye advecting only a fraction of the intended distance whenever
+	// adaptive mode splits a frame into several smaller velocity substeps
+	// (the shared `dt` node would otherwise still hold the *last*
+	// substep's own small value once the substep loop below finishes, not
+	// the full frame's targetDt).
+	const dyeAdvectionSolver = grid.createSemiLagrangianAdvectionSolver2( { velocityGrid: solver.velocityGrid, dt: targetDt, collider } );
+
+	// See this file's own header comment (targetDt) and grid_adaptive_
+	// timestep2.js for the full mechanism. Constructed unconditionally
+	// (cheap -- one extra reduction kernel build, never dispatched unless
+	// the checkbox is actually checked in animate() below) so toggling the
+	// checkbox on mid-run needs no rebuild.
+	const adaptiveTimeStep = grid.createGridAdaptiveTimeStep2( { velocityGrid, gridSpacing: [ 1, 1 ], dt, targetDt } );
 
 	const advectAtoB = dyeAdvectionSolver.advectScalar2( stateA, rawAdvectedB );
 	const advectBtoA = dyeAdvectionSolver.advectScalar2( stateB, rawAdvectedA );
@@ -526,15 +574,18 @@ try {
 	let frame = 0;
 	let nanDetected = false;
 	let simTime = 0;
+	let lastNumSubSteps = 1; // read by updatePerf() below; see animate()'s own adaptive-dt branch
 
 	// Rolling average over the last N real-world frame times -- answers
 	// "is the flow's apparent slowness a chosen physical speed or a GPU
-	// throughput limit" directly: `dt` (a fixed simulated-seconds-per-call)
-	// advances the SAME amount regardless of how long a call actually
-	// takes, so "sim speed" (fps*dt) below 1x means the simulation is
-	// running in slow motion relative to its own intended timescale --
-	// exactly what heavy per-frame GPU work (a 256x128 MGPCG solve, up to
-	// 4 CPU<->GPU array readbacks) would cause, independent of inflowSpeed/
+	// throughput limit" directly: `targetDt` (the fixed simulated-seconds-
+	// per-rendered-frame budget) advances the SAME amount regardless of how
+	// long a call actually takes OR how many adaptive substeps it took to
+	// get there (see this file's own targetDt comment), so "sim speed"
+	// (fps*targetDt) below 1x means the simulation is running in slow
+	// motion relative to its own intended timescale -- exactly what heavy
+	// per-frame GPU work (a 256x128 MGPCG solve, up to 4 CPU<->GPU array
+	// readbacks per substep) would cause, independent of inflowSpeed/
 	// pushStrength's own chosen values.
 	const FPS_WINDOW = 30;
 	const frameTimes = [];
@@ -549,9 +600,9 @@ try {
 
 		const avgMs = frameTimes.reduce( ( a, b ) => a + b, 0 ) / frameTimes.length;
 		const fps = 1000 / avgMs;
-		const simSpeed = fps * dt;
+		const simSpeed = fps * targetDt;
 
-		perfEl.innerHTML = `fps: ${ fps.toFixed( 1 ) } | sim speed: <span class="${ simSpeed < 0.9 ? 'slow' : '' }">${ simSpeed.toFixed( 2 ) }x real-time</span>`;
+		perfEl.innerHTML = `fps: ${ fps.toFixed( 1 ) } | sim speed: <span class="${ simSpeed < 0.9 ? 'slow' : '' }">${ simSpeed.toFixed( 2 ) }x real-time</span> | substeps: ${ lastNumSubSteps }`;
 
 	}
 
@@ -578,10 +629,28 @@ try {
 
 		updatePerf();
 
-		simTime += dt;
+		simTime += targetDt;
 		simTimeUniform.fromArray( new Float32Array( [ simTime ] ) );
 
-		await solver.onAdvanceTimeStep( dt );
+		// See grid_adaptive_timestep2.js's own header comment for why
+		// adaptiveTimeStep.update() (a GPU max-velocity reduction + one
+		// readback) decides both how many substeps this frame needs and
+		// writes each substep's own smaller dt into the shared `dt` node
+		// before onAdvanceTimeStep() reads it -- onAdvanceTimeStep() itself
+		// takes no argument, since (see that file's own header comment)
+		// its default stages never read whatever's passed to them anyway.
+		if ( adaptiveDtCheckbox.checked ) {
+
+			lastNumSubSteps = await adaptiveTimeStep.update();
+			for ( let i = 0; i < lastNumSubSteps; i ++ ) await solver.onAdvanceTimeStep();
+
+		} else {
+
+			dt.fromArray( new Float32Array( [ targetDt ] ) ); // reset in case adaptive mode was on and left a smaller value here
+			lastNumSubSteps = 1;
+			await solver.onAdvanceTimeStep();
+
+		}
 
 		let currentState;
 
