@@ -90,6 +90,14 @@ describe( 'createGridSmokeSolver2', () => {
 
 	} );
 
+	it( 'forwards advection.order to both velocity and density/temperature advection without throwing', () => {
+
+		const velocityGrid = createFaceCenteredGrid2( 8, 8, 1, 1, 0, 0 );
+
+		expect( () => createGridSmokeSolver2( { velocityGrid, dt: 1 / 30, advection: { order: 2 } } ) ).not.toThrow();
+
+	} );
+
 	it( 'constructs with inflows/outflows/collider/closedDomainBoundaryFlag forwarded', () => {
 
 		const velocityGrid = createFaceCenteredGrid2( 8, 8, 1, 1, 0, 0 );

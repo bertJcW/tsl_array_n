@@ -228,7 +228,16 @@ export function createGridSmokeSolver2( {
 		velocityGrid, gridSpacing, origin, force: combinedForce, collider, inflows, outflows, closedDomainBoundaryFlag, dt, advection, pressure
 	} );
 
-	const scalarAdvectionSolver = createSemiLagrangianAdvectionSolver2( { velocityGrid: solver.velocityGrid, dt, collider } );
+	// order: reuses the SAME `advection` options object already forwarded
+	// to the internal createGridSolver2 call above (for velocity's own
+	// self-advection) -- so a caller's single `advection: { order: 2 }`
+	// option applies MacCormack to density/temperature too, not just
+	// velocity. Nothing else from `advection` (e.g. maxSubsteps) is
+	// reused here on purpose: this solver's own dt/collider are already
+	// its own explicit options, not meant to be overridden through the
+	// nested `advection` object the way createGridSolver2's own advection
+	// stage is configured.
+	const scalarAdvectionSolver = createSemiLagrangianAdvectionSolver2( { velocityGrid: solver.velocityGrid, dt, collider, order: advection.order } );
 
 	const advectDensityAtoB = scalarAdvectionSolver.advectScalar2( density.stateA, density.rawB );
 	const advectDensityBtoA = scalarAdvectionSolver.advectScalar2( density.stateB, density.rawA );

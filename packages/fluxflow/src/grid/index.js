@@ -15,3 +15,4 @@ export * from './grid_outflow_solver2.js';
 export * from './grid_solver2.js';
 export * from './grid_adaptive_timestep2.js';
 export * from './grid_smoke_solver2.js';
+export * from './vorticity_confinement2.js';
