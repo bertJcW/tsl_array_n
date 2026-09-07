@@ -436,6 +436,51 @@ its own dimension-generic (1D/2D/3D), non-Galerkin multigrid design,
 which has no direct structural equivalent to mantaflow's own
 topology-aware coarse-grid generation.
 
+### jet/fluid-engine-dev (MIT) — `src/grid/grid_smoke_solver2.js`, direct, no Python intermediary
+
+`src/grid/grid_smoke_solver2.js` (a reusable smoke/fire solver) has no Python source to port from at
+all -- the Python `fluxflow` project's own `grid_solver2.py` never got past an abstract hook, same
+situation as `advection_solver2.js`/`grid_pressure_solver2.js` above. Read directly from jet's
+`GridSmokeSolver2` (`include/jet/grid_smoke_solver2.h`, `src/jet/grid_smoke_solver2.cpp`), which itself
+cites Fedkiw, Stam & Jensen, *"Visual Simulation of Smoke"*, SIGGRAPH 2001. Same direct chain as the
+other jet-sourced `src/grid/`/`src/linalg/` entries (no Python intermediary):
+
+```
+fluid-engine-dev (C++, MIT, Doyub Kim)
+  -> fluxflow (this package, JS/TSL, Apache-2.0, bert wang)
+```
+
+- **Source:** https://github.com/doyubkim/fluid-engine-dev/blob/master/include/jet/grid_smoke_solver2.h, .../grid_smoke_solver2.cpp
+- **License:** MIT — full text already reproduced above, under "fluid-engine-dev (MIT) — via fluxflow (Python)"; not repeated a second time.
+
+What carries over from jet: the buoyancy formula itself (`f = buoyancyDensityFactor*density +
+buoyancyTemperatureFactor*(temperature - ambientTemperature)`, applied along an `up` vector) and its
+default constants (`-0.000625`, `5.0`), and the exponential density/temperature decay-per-frame idea
+and its own default constants (`0.001` each). What's this port's own generalization or omission, not
+jet's: jet extends `GridFluidSolver2` by class inheritance and registers density/temperature as generic
+"advectable data" on its own grid-system object; this port has no inheritance, so the same shape is
+built by composition instead (`grid_smoke_solver2.js` constructs its own internal `createGridSolver2`,
+with buoyancy folded into that factory's existing `force` option, plus its own density/temperature
+advection) -- see that file's own header comment for a real subtlety this required (a live parity flag
+driving a `select()` inside the once-built buoyancy kernel, so it correctly reads whichever ping-pong
+slot is active each frame). jet's own optional diffusion step (`computeDiffusion`, gated on a
+diffusion solver being set) is not ported at all -- this matches this port's own already-existing,
+already-documented viscosity/diffusion deferral (`grid_solver2.js`'s own `computeViscosity` stays a
+no-op), and matches jet's own default behavior too (`_smokeDiffusionCoefficient`/
+`_temperatureDiffusionCoefficient` both default to `0.0`, i.e. off, in jet itself). jet's own
+`ambientTemperature` is a live, per-frame domain-wide average (a reduction over the whole temperature
+field); this port defaults it to a fixed caller-supplied constant instead, deliberately, to avoid an
+extra per-frame GPU reduction + readback -- this project's own CG performance investigation (see
+`../docs/perf-investigation-cg-gpu-resident-alpha-beta.md`) found that kind of per-frame synchronization
+to be a real, non-trivial cost on real hardware. **"Fire" is not part of jet's `GridSmokeSolver2`, or
+anywhere else in jet or mantaflow (confirmed via `grep -ril "fire|combustion|flame|fuel"` across jet's
+entire source tree, zero hits) -- it is this port's own original design choice**, treating "fire" as a
+parameterization and rendering of the same density+temperature solver (a hot source plus a
+temperature-driven color ramp at render time, demonstrated in `examples/17-smoke-fire/`), not a ported
+reaction-front/combustion model. Flagged explicitly so it is never mistaken for a real combustion
+simulation (mantaflow's own fire plugin, or Nguyen/Fedkiw/Jensen's *"Physically Based Modeling and
+Animation of Fire"*, SIGGRAPH 2002, are the actual references for that, and neither is used here).
+
 ## Provenance of `src/noise/`
 
 `src/noise/noise.js` is a JavaScript/TSL port of `noise/noise.py` from the

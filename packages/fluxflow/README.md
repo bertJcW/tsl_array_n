@@ -28,6 +28,7 @@ import { grid } from 'fluxflow';
 | `grid_outflow_solver2.js` | (no counterpart -- original code, concept from mantaflow, see below) | `createGridOutflowSolver2` -- the velocity (convective boundary condition) and scalar-field-cleanup parts of what an outflow object does each frame |
 | `grid_solver2.js` | `grid_solver2.py` | `createGridSolver2` -- now a concrete orchestrator wiring external forces, pressure projection, and advection together every frame (jet's own established stage order), with optional inflow/outflow objects and a collider; viscosity stays a no-op, explicitly deferred |
 | `grid_adaptive_timestep2.js` | (no counterpart -- ported from jet/fluid-engine-dev instead, see below) | `createGridAdaptiveTimeStep2` -- CFL-based adaptive dt for a `FaceCenteredGrid2`; the grid-specific wiring on top of `time`'s solver-agnostic substep math and `linalg`'s GPU max-magnitude reduction |
+| `grid_smoke_solver2.js` | (no counterpart -- ported from jet/fluid-engine-dev instead, see below) | `createGridSmokeSolver2` -- a reusable smoke/fire solver: buoyancy + density/temperature advection and decay, composed on top of `createGridSolver2` |
 
 ### `advection_solver2.js` -- semi-Lagrangian advection, monotonic cubic interpolation
 
@@ -128,6 +129,86 @@ for ( let i = 0; i < numSubSteps; i ++ ) await solver.onAdvanceTimeStep();
 **`dt` must be a live `array0('float')` node, not a plain number** -- `grid_solver2.js`'s `onAdvanceTimeStep(timeStepInSeconds)` passes its own argument to each stage, but every default stage function ignores it; the `dt` actually baked into the force/advection kernels is whatever was captured once, at `createGridSolver2()` **construction** time. `createGridAdaptiveTimeStep2` throws a clear error if given a plain number rather than silently doing nothing. A second, easy-to-miss requirement, found the hard way while wiring this into `examples/16-karman-vortex-street/`: a live `dt` field must be *invoked* (`dtField()`) before being passed to `createGridSolver2({ dt: dtField() })`/`createSemiLagrangianAdvectionSolver2` -- passing the callable field itself throws (`dt.toVar is not a function`, from inside `advection_solver2.js`'s `backTrace`); see `external_force_solver2.js`'s/`advection_solver2.js`'s own `options.dt` comments, corrected after this was found.
 
 Verified with structural vitest coverage (`test/cfl.test.js` -- pure numbers, no GPU at all; `test/reduction.test.js`/`test/grid_adaptive_timestep2.test.js` -- construction only) plus a real-hardware check on `examples/16`: the reducer's own max-velocity reading matched an independent CPU-side computation from a raw `dataU`/`dataV` readback; a deliberately strict `courantNumber` produced a real multi-substep count (3, for that run's actual velocity) that was then driven through `onAdvanceTimeStep()` that many times with no non-finite values afterward; 300+ further frames with the checkbox on (default `courantNumber`, substep count staying at 1 for this scene's actual velocity range -- correct given jet's own generous default, not a bug, confirmed by cross-checking the formula against the measured velocity directly) showed no instability; toggling the checkbox off cleanly falls back to the fixed-`1/30` behavior.
+
+### `grid_smoke_solver2.js` -- a reusable smoke/fire solver
+
+The first "content" solver this port has built (as opposed to plumbing: advection, pressure, boundary
+conditions) -- the user asked for one explicitly reusable, unlike every existing example's own dye,
+which every single one hand-rolls its own advection/decay/injection for. Read directly from
+jet/fluid-engine-dev's own `GridSmokeSolver2` (no Python source exists, same situation as
+`advection_solver2.js`/`grid_pressure_solver2.js` above), which extends `GridFluidSolver2` with
+density + temperature fields, a buoyancy force, and decay. jet does this via class inheritance; this
+port has none, so `createGridSmokeSolver2({ velocityGrid, ... })` builds the same shape by composition
+instead -- it constructs its own internal `createGridSolver2` (buoyancy folded into that factory's
+existing `force` option, composed with any caller-supplied extra force) plus its own density/
+temperature advection and decay, and returns `{ onAdvanceTimeStep, velocityGrid, density, temperature, solver }`.
+
+Buoyancy: `f = buoyancyDensityFactor*density + buoyancyTemperatureFactor*(temperature - ambientTemperature)`,
+applied along an `up` vector -- jet's own formula and default constants (`-0.000625`/`5.0`) carried over
+exactly. `ambientTemperature` defaults to a fixed constant (`0`), not jet's own live domain-averaged
+temperature -- deliberately, to avoid one more per-frame GPU reduction + readback (this project's own
+CG performance investigation found that kind of synchronization to be a real cost on real hardware; see
+`docs/perf-investigation-cg-gpu-resident-alpha-beta.md`). Diffusion is not ported at all, matching this
+port's own already-deferred viscosity *and* matching jet's own default (`0.0`, i.e. off, unless a
+caller explicitly sets a diffusion coefficient *and* solver -- neither exists in jet's own default
+construction either).
+
+**A real subtlety, worth understanding before touching this file**: density/temperature use this port's
+established 4-field ping-pong (two "state" + two "raw advected scratch" fields, alternated by frame
+parity -- the exact shape every existing example already hand-rolls for dye), since a storage field
+needs exactly one permanent writer kernel on this project's WebGL2-fallback dev sandbox. But
+`createExternalForceSolver2`'s own `force(pos)` closure is invoked exactly once, at construction time,
+to build its kernel's node graph -- not re-invoked every frame. A buoyancy force naively reading one
+fixed ping-pong slot would read stale data every other frame. Fixed with a single live
+`array0('float')` parity flag (toggled via `.fromArray()` every frame, the same
+already-built-kernel-reads-a-live-node pattern this port already relies on for `dt`/`alpha`/`beta`/
+`simTimeUniform` elsewhere), driving a `select()` *inside* the once-built buoyancy kernel to read
+whichever slot is currently active -- zero extra dispatches (a plain CPU buffer write plus a
+branchless GPU `select`, not a kernel), unlike an alternative "copy to one stable field" design, which
+would cost 2 extra dispatches every frame. Reading "whichever slot is currently active" means buoyancy
+sees the *previous* frame's fully-advected-and-injected result -- this matches jet's own
+forces-before-advection operator-splitting order exactly, not a deviation.
+
+Density/temperature use `createCellCenteredScalarGrid2` (the proper half-cell-offset variant), not the
+plain `createScalarGrid2` every dye example uses -- dye's own half-cell sampling error is imperceptible
+for a passively-advected visual field, but density/temperature feed back into the buoyancy *force*, so
+the sample position actually matters here. Each state field exposes its own `sample(pos)` (the same
+`collocatedValueAtPosition2` wrapper `sdf_collider2.js` already establishes as precedent).
+
+**Source injection is deliberately not built in** -- no emitter abstraction exists anywhere in this
+port yet, and jet's own `GridSmokeSolver2` doesn't have one built in either. A caller builds their own
+injection kernel(s) against `density.stateA`/`stateB` (mirroring every existing example's own
+`createInjectKernel(rawAdvectedGrid, stateGrid)` dye pattern exactly), called once per frame after
+`onAdvanceTimeStep()`, choosing A or B via `density.current === density.stateA`.
+
+**"Fire" is not a separate physical model** -- there is no fire/combustion reference anywhere in jet or
+mantaflow (confirmed via `grep -ril "fire|combustion|flame|fuel"` across jet's entire source tree, zero
+hits). This is a deliberate scope decision: "fire" here means parameterizing and rendering the *same*
+density+temperature solver (a hot, bright source plus a temperature-driven color ramp at render time),
+not a reaction-front/combustion model -- a real one (mantaflow's own fire plugin, or Nguyen/Fedkiw/
+Jensen's *"Physically Based Modeling and Animation of Fire"*, SIGGRAPH 2002) would be a fundamentally
+larger, differently-shaped undertaking with no existing reference in this project.
+
+Verified with structural vitest coverage (`test/grid_smoke_solver2.test.js` -- construction, returned
+shape, plain-number and live-node tunables) plus a real-hardware check on the new
+`examples/17-smoke-fire/`: a heated source's density centroid rose from y≈7 (at the source) to y≈62
+over 350 frames with buoyancy at its default strength, then held that height (source's own injection
+balancing the domain's top-wall outflow) through frame 1050+ with zero non-finite values throughout;
+with `buoyancyTemperatureFactor` live-set to 0 (the demo's own "disable buoyancy" checkbox), the same
+source's centroid stayed at y≈5.5 (essentially pinned at the source) through frame 450+, directly
+isolating buoyancy's own contribution from plain advection/decay. A real-hardware screenshot after 250
+frames shows a convincing rising, billowing plume with a white-hot core fading through orange to gray
+smoke -- both canvases (density-only and the fire-colored blend) visually confirm the same structure.
+
+`examples/18-explosion/` -- built on the exact same solver, no new library code -- swaps `examples/17`'s
+own continuous small source for a single one-shot burst instead: a large, hot, dense disc plus a brief
+outward velocity impulse, applied once (a "detonate again" button re-triggers it without reloading),
+then nothing further -- no per-frame injection at all. What follows is entirely buoyancy and momentum
+acting on that one initial condition. Real-hardware screenshots show a clean, symmetric vortex-ring
+rollup within the first 90 frames (the textbook "mushroom cap" cross-section, the same instability real
+starting-plume/explosion simulations rely on) that continues to rise and pass through the top outflow
+through frame 240+, zero non-finite values throughout -- an emergent consequence of the existing
+solver, not anything special-cased to produce that shape.
 
 While investigating the stalled smoke demo, the user separately reported (on `examples/12-interactive-advection/`, unrelated to `grid_solver2.js`) a "long streak" visual artifact: dye reaching the domain edge, then moving under the force field, appeared to get "copied out and dragged into a very long region." Confirmed this wasn't an advection/boundary-clamping bug first (an independent plain-JS trace of the *oscillating-wind-alone* case did not reproduce any streak), then traced it to that example's own pointer-attraction term (inherited from `examples/11-interactive-forces/`) having *no* distance falloff at all (`normalize(...)` gives a constant-magnitude pull regardless of range) -- combined with a domain edge acting as a wall with no pressure to prevent pile-up, holding the pointer down could drag edge-accumulated dye all the way across the domain in a sustained smear. Not a bug in either example (a question, not a bug report -- 11/12 were not modified); the second iteration above deliberately used a radius-based falloff instead to avoid the same trap, and the current, non-interactive iteration sidesteps the question entirely by not using the pointer at all.
 
