@@ -6,7 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import * as tsl_array_n from 'tsl_array_n';
-import { createCopyKernel2, createExtrapolateToRegion2 } from '../src/grid/array_utils.js';
+import { createCopyKernel2, createExtrapolateToRegion2, createDecayKernel2 } from '../src/grid/array_utils.js';
 
 describe( 'array_utils', () => {
 
@@ -50,6 +50,34 @@ describe( 'array_utils', () => {
 		const run = createExtrapolateToRegion2( input, valid, output );
 
 		expect( typeof run ).toBe( 'function' );
+
+	} );
+
+	it( 'createDecayKernel2 returns a reusable dispatcher, plain-number decay', () => {
+
+		const field = tsl_array_n.array2( 'float', 4, 4 );
+
+		const decay = createDecayKernel2( field, 0.02 );
+
+		expect( typeof decay ).toBe( 'function' );
+
+	} );
+
+	it( 'createDecayKernel2 accepts a live array0 node for decay', () => {
+
+		const field = tsl_array_n.array2( 'float', 4, 4 );
+		const decay = tsl_array_n.array0( 'float' );
+		decay.fromArray( new Float32Array( [ 0.02 ] ) );
+
+		expect( () => createDecayKernel2( field, decay() ) ).not.toThrow();
+
+	} );
+
+	it( 'createDecayKernel2 infers shape from field when not given explicitly', () => {
+
+		const field = tsl_array_n.array2( 'float', 3, 5 );
+
+		expect( () => createDecayKernel2( field, 0.02 ) ).not.toThrow();
 
 	} );
 

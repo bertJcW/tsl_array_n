@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>fluxflow — fuel-based fire</title>
+	<style>
+		body { margin: 0; font-family: system-ui, sans-serif; background: #2b2d33; color: #eee; display: flex; flex-direction: column; align-items: center; gap: 0.75rem; padding: 1.5rem; box-sizing: border-box; }
+		#canvases { display: flex; gap: 1rem; }
+		.canvas-block { display: flex; flex-direction: column; align-items: center; gap: 0.35rem; }
+		canvas { image-rendering: pixelated; width: 288px; height: 384px; border: 2px solid #6b7280; background: #000; }
+		.canvas-label { font-size: 0.8rem; opacity: 0.7; }
+		#status { font-size: 0.9rem; line-height: 1.6; opacity: 0.85; }
+		.err { color: #f87171; }
+		p { max-width: 800px; font-size: 0.85rem; opacity: 0.7; margin: 0; text-align: center; }
+		#perf { font-size: 0.9rem; line-height: 1.6; font-variant-numeric: tabular-nums; background: rgba(20, 21, 24, 0.85); border: 1px solid #3f4148; border-radius: 0.35rem; padding: 0.35rem 0.6rem; }
+		#controls { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; justify-content: center; background: #1f2024; border: 1px solid #3f4148; border-radius: 0.5rem; padding: 0.75rem 1rem; font-size: 0.85rem; }
+		#controls label { display: flex; align-items: center; gap: 0.4rem; white-space: nowrap; }
+		#controls input[type="range"] { width: 120px; }
+	</style>
+</head>
+<body>
+	<div id="canvases">
+		<div class="canvas-block">
+			<canvas id="outFuel" width="96" height="128"></canvas>
+			<div class="canvas-label">fuel (unburned)</div>
+		</div>
+		<div class="canvas-block">
+			<canvas id="outFire" width="96" height="128"></canvas>
+			<div class="canvas-label">smoke + fire, combined (gray = cooled smoke, bright ramp = flame)</div>
+		</div>
+	</div>
+	<div id="status">initializing…</div>
+	<div id="perf">fps: --</div>
+	<div id="controls">
+		<label>fuel amount <input type="range" id="fuelAmount" min="0" max="1" step="0.02" value="1" /> <span id="fuelAmountValue">1.00</span></label>
+	</div>
+	<p>grid.createGridFireSolver2 (packages/fluxflow/src/grid/grid_fire_solver2.js) -- a real fuel/combustion
+	solver, ported from mantaflow's own fire.cpp, decoupled from any specific velocity solver: this scene
+	builds a plain grid.createGridSolver2 directly (not createGridSmokeSolver2) and composes the fire
+	solver's own buoyancy force into it. Fuel is supplied continuously by an SDF fuel source
+	(grid.createSDFFuelSource2) near the bottom, the same "SDF collider/inflow/outflow" family every other
+	scene object in this port already uses -- fuel burns down and is topped back up by the source every
+	frame, react (this batch of fuel's own remaining reaction potential) tracks it, and density/temperature
+	are driven by the burn itself rather than a caller-supplied source, unlike examples/17-smoke-fire's own
+	density+temperature-only "fire". Smoke and flame render into one combined canvas: gray smoke (a real
+	alpha-composited layer, so thin wisps let the flame glow through) sits over a flame color driven by heat
+	alone, sharply favoring the actually-reacting core over residual warmth drifting with the smoke -- the
+	brightest point fades toward pale blue past white, and smoke/flame each have their own independent
+	display-only brightness gain, on top of a real solver-level flameSmoke increase for more smoke, matching
+	how mantaflow's own scenes tune smoke and flame separately. The fuel-amount slider controls how
+	aggressively the source tops fuel back up
+	each frame (mode: 'set') -- near 0 the flame can't get enough fuel to ignite at all and gutters out,
+	while at 1 (the default) it holds a steady, clean burn; values can't go above 1 here since the burn rate
+	itself is fixed per frame, so once fuel is comfortably above what one step consumes, extra headroom
+	stops making a visible difference (see grid_fire_solver2.js's own burn-kernel comment). Pressure
+	options set an explicit atomicScale -- see main.js's own header comment for a real long-run stability bug
+	(found via a 3000+-frame run) this fixes. grid.createVelocityDamping2 -- a small uniform velocity decay
+	plugged into createGridSolver2's own (previously empty) viscosity stage -- keeps this scene's own
+	large-scale side-to-side recirculation from dominating the whole canvas over a long run; see that
+	file's own header comment for why a uniform decay, not a real viscosity model, is the right tool for a
+	problem this large-scale.</p>
+	<script type="module" src="./main.js"></script>
+</body>
+</html>

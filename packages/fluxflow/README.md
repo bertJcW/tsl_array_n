@@ -24,11 +24,14 @@ import { grid } from 'fluxflow';
 | `advection_solver2.js` | (no counterpart -- ported from jet/fluid-engine-dev instead, see below) | `createSemiLagrangianAdvectionSolver2` -- semi-Lagrangian advection with monotonic cubic interpolation and boundary handling built into the back-trace |
 | `external_force_solver2.js` | (no counterpart -- original code, see below) | `createExternalForceSolver2` -- applies an arbitrary caller-supplied force *function* (not just jet's own hardcoded-constant gravity) to a velocity grid |
 | `grid_pressure_solver2.js` | (no counterpart -- ported from jet/fluid-engine-dev instead, see below) | `createGridPressureSolver2` -- pressure projection via `linalg`'s multigrid-preconditioned CG, with Dirichlet (fixed-value) pressure cells generalized beyond jet's own hardcoded-zero "air" cells |
-| `sdf_inflow_outflow2.js` | (no counterpart -- original code, concept from mantaflow, see below) | `createSDFInflow2`/`createSDFOutflow2` -- inflow/outflow as reusable, SDF-based scene objects, architecturally parallel to `sdf_collider2.js`'s own colliders; `createOutflowPressureDirichlet2`/`combineDirichlet` helpers |
+| `sdf_inflow_outflow2.js` | (no counterpart -- original code, concept from mantaflow, see below) | `createSDFInflow2`/`createSDFOutflow2`/`createSDFFuelSource2` -- inflow/outflow/fuel-source as reusable, SDF-based scene objects, architecturally parallel to `sdf_collider2.js`'s own colliders; `createOutflowPressureDirichlet2`/`combineDirichlet` helpers |
 | `grid_outflow_solver2.js` | (no counterpart -- original code, concept from mantaflow, see below) | `createGridOutflowSolver2` -- the velocity (convective boundary condition) and scalar-field-cleanup parts of what an outflow object does each frame |
 | `grid_solver2.js` | `grid_solver2.py` | `createGridSolver2` -- now a concrete orchestrator wiring external forces, pressure projection, and advection together every frame (jet's own established stage order), with optional inflow/outflow objects and a collider; viscosity stays a no-op, explicitly deferred |
 | `grid_adaptive_timestep2.js` | (no counterpart -- ported from jet/fluid-engine-dev instead, see below) | `createGridAdaptiveTimeStep2` -- CFL-based adaptive dt for a `FaceCenteredGrid2`; the grid-specific wiring on top of `time`'s solver-agnostic substep math and `linalg`'s GPU max-magnitude reduction |
 | `grid_smoke_solver2.js` | (no counterpart -- ported from jet/fluid-engine-dev instead, see below) | `createGridSmokeSolver2` -- a reusable smoke/fire solver: buoyancy + density/temperature advection and decay, composed on top of `createGridSolver2` |
+| `vorticity_confinement2.js` | (no counterpart -- original code, concept from mantaflow, see below) | `createVorticityConfinement2` -- compensates for semi-Lagrangian advection's own numerical dissipation by pushing fluid toward already-concentrated vorticity |
+| `grid_fire_solver2.js` | (no counterpart -- ported from mantaflow instead, see below) | `createGridFireSolver2` -- a real fuel/combustion solver (fuel burns down, drives density/temperature), decoupled from any specific velocity solver -- composes into whichever one the caller is already using via a plain `force(pos)` |
+| `velocity_damping2.js` | (no counterpart -- original code, see below) | `createVelocityDamping2` -- a uniform per-frame velocity decay, pluggable into `createGridSolver2`'s own `computeViscosity` stage hook with zero changes to that file |
 
 ### `advection_solver2.js` -- semi-Lagrangian advection, monotonic cubic interpolation
 
@@ -278,6 +281,115 @@ and turbulent without looking overdriven, stable through frame 500+ with zero no
 `examples/16-karman-vortex-street/` (the new "vorticity confinement" checkbox, off by default), the
 wake stayed visibly sharp -- clean, well-defined bands rather than a blurred one -- through frame 2500+
 with it on, with zero regression when left off.
+
+### `grid_fire_solver2.js` -- a real fuel/combustion solver, decoupled from any specific velocity solver
+
+`grid_smoke_solver2.js`'s own "fire" is explicitly not combustion (see its own section above) -- this
+is the real thing, ported from mantaflow's `fire.cpp` (`KnProcessBurn`/`processBurn`,
+`KnUpdateFlame`/`updateFlame`; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)), built at the
+user's own later explicit request with two requirements: usable with *any* velocity solver the caller
+already has (not hard-wired to build its own `createGridSolver2` the way `createGridSmokeSolver2`
+does), and SDF-based fuel input, architecturally parallel to collider/inflow/outflow.
+
+`createGridFireSolver2({ velocityGrid, fuelSources?, dt, ... })` treats `velocityGrid` as read-only
+input -- sampled for advecting its own 4 fields (fuel, react, density, temperature) and for buoyancy,
+never constructed or written to. It returns `{ onAdvanceTimeStep, force, fuel, react, density,
+temperature }` -- `force(pos)` is a plain `(pos) => vec2` the caller composes into *whichever* solver
+they're using (`createGridSolver2` directly, `createGridSmokeSolver2`, or something fully custom),
+exactly the same composable-force contract `vorticity_confinement2.js` already established above. The
+caller must call their own chosen solver's `onAdvanceTimeStep()` first, then this file's own second,
+every frame -- this solver's own advection needs that frame's already-updated velocity, and its own
+buoyancy (same live-`parityFlag`-select trick as `grid_smoke_solver2.js`'s own) reads the *previous*
+frame's density/temperature regardless, matching jet's own forces-before-advection operator-splitting
+order.
+
+The burn step itself, ported directly from `KnProcessBurn`: fuel burns down at a constant
+`burningRate` (clamped to >=0); `react` (this batch of fuel's own remaining reaction potential) scales
+down in exact proportion to how much of the fuel present that step was just consumed, and
+`flame = sqrt(react)`; how much fuel was consumed drives both smoke emission (added to density, more
+so as the fuel supply nears exhaustion -- mantaflow's own "guttering candle gets smokier" formula) and,
+wherever `flame>0`, temperature is set to a lerp between `ignitionTemp` and `maxTemp` by `flame` --
+left untouched wherever no reaction is happening that step, matching `KnProcessBurn`'s own
+`if (heat && flame)` guard exactly. `burningRate`/`flameSmoke`/`ignitionTemp`/`maxTemp` default to
+mantaflow's own literal values (`0.75`/`1.0`/`1.25`/`1.75`). Not carried over: mantaflow's own optional
+colored-smoke mixing (no colored-smoke concept exists anywhere else in this port), and `flame` as its
+own ping-ponged GPU field (it's a pure function of `react`, cheaper recomputed once at render time from
+an already-read-back array than advected as a 5th field).
+
+`createSDFFuelSource2` (`sdf_inflow_outflow2.js`, a new sibling next to `createSDFInflow2`/
+`createSDFOutflow2` in that same file) mirrors `createSDFInflow2` exactly -- same SDF machinery, same
+`mode: 'set'|'add'` semantics -- just injecting a scalar `fuel` amount instead of a velocity vector.
+Fuel-source injection kernels are built one per (source, ping-pong slot) pair and dispatched every
+single frame in a fixed order, right after that slot's own rightful advect-then-copy writer -- the
+same shape `grid_blocked_boundary_condition_solver2.js`'s own `buildInflowKernels`/`applyInflow()`
+already established (a real, long-proven-on-real-hardware precedent that more than one kernel object
+touching a field is fine as long as every one of them dispatches consistently, every frame, from the
+very first one) and the same lesson `examples/18-explosion`'s own burst-injection fix confirmed the
+hard way this session (a one-off, pre-loop write is what actually broke on this project's WebGL2-
+fallback backend; a consistently-ordered per-frame pair did not). Setting `react=1` alongside fuel
+(regardless of `mode`) mirrors mantaflow's own scene-level convention of injecting fuel and react
+together at a source -- fresh fuel always means full reaction potential.
+
+Verified with structural vitest coverage (`test/grid_fire_solver2.test.js`, `test/sdf_inflow_outflow2.test.js`'s
+own new `createSDFFuelSource2` cases) plus a real-hardware check on the new `examples/19-fuel-fire/`:
+builds a *plain* `createGridSolver2` (not `createGridSmokeSolver2`) and composes the fire solver's own
+`force` into it, proving the decoupling actually works rather than just describing it. A small
+continuous fuel source near the bottom produced a genuine, self-sustaining flame -- fuel visibly
+burning down and being topped back up by the source every frame, density/temperature rising from the
+burn itself, no non-finite values -- confirmed stable over 1700+ real-hardware frames. **A real tuning
+finding, not a library bug**: an initially-chosen `buoyancyTemperatureFactor` (22, scaled up naively
+from `grid_smoke_solver2.js`'s own default to compensate for mantaflow's own much smaller temperature
+range) looked fine for several hundred frames but was a genuine, still-growing instability -- u/v's own
+per-frame *sum* grew steadily in magnitude with no sign of saturating, into the tens of thousands, even
+though individual cell values and `converged`/`rejected` still looked superficially fine. Root cause:
+unlike `examples/17`'s own modest continuous source or `examples/18`'s own single burst (which decays
+away, nothing added after frame 0), this scene's fuel source keeps burning *forever*, continuously
+adding buoyant energy every frame with nothing but this port's own numerical (not physical) dissipation
+to remove it -- a continuous heat source needs a much gentler buoyancy coefficient than a one-shot one.
+Reduced to `6` (close to the library's own default of `5.0`), re-confirmed over the same 1700+ frames: a
+genuine, bounded, large-scale oscillation instead (the plume's own net horizontal momentum swings from
+roughly -19500 back through zero to +2300 and reverses again, like a slow real-world plume sway; its net
+vertical momentum settles into a stable plateau, the expected steady-state balance between continuous
+buoyant injection and continuous outflow drainage) -- not a runaway.
+
+### `velocity_damping2.js` -- a uniform velocity decay, plugged into `createGridSolver2`'s existing (empty) viscosity stage
+
+Added at the user's own explicit request for `examples/19-fuel-fire/`, after they caught -- from their
+own real-hardware screenshots, not this port's own testing -- a large-scale, slowly-reversing sideways
+recirculation dominating that scene's entire canvas once its own fuel source was widened and its own
+buoyancy softened for a thicker plume "stem". Asked directly how to weigh "thicker stem" against
+"doesn't look chaotic," the user chose to invest in a real fix rather than tune around the symptom
+further.
+
+This port has no true Navier-Stokes viscosity model at all (`grid_solver2.js`'s own header comment:
+"Viscosity stays a no-op -- explicitly deferred... not built yet") -- but that same file already carries
+a `computeViscosity` stage hook, unused until now, in jet's own established stage order (external
+forces -> viscosity -> pressure -> advection). `createVelocityDamping2` is the first thing plugged into
+it, with zero changes needed to `grid_solver2.js` itself: `createGridSolver2`'s own `options.
+computeViscosity` fully *replaces* the default no-op stage (not called alongside it), so a caller passes
+a small closure that dispatches this file's own `applyDamping()` and then re-applies the boundary
+condition (`boundarySolver.constrainVelocity()`) exactly the way every other built-in stage already
+does -- `grid_solver2.js`'s own header comment already documents this as a caller override's own
+responsibility, learned from an earlier real bug in that same file.
+
+**Why a uniform decay (`field *= 1 - damping`, applied once to the whole velocity field, exactly the
+existing `smokeDecay`/`temperatureDecay` idea already used for scalar fields in `grid_smoke_solver2.js`/
+`grid_fire_solver2.js`) instead of a real Laplacian viscosity term**: a true diffusion-based viscosity
+damps *small*-scale features fastest and the largest-scale mode in the domain slowest -- exactly
+backwards from this problem, where the offending structure *is* the single largest-scale mode (a
+recirculation cell spanning nearly the whole canvas). A uniform decay damps every scale equally,
+including that one directly, is unconditionally stable (no diffusion-solve CFL-like constraint to worry
+about), and costs a single per-cell multiply.
+
+Verified directly on `examples/19-fuel-fire/`: with `dampingCoefficient: 0.02`, a fresh 3700+-frame
+real-hardware run went from u's own per-frame *sum* swinging into the tens of thousands and staying
+one-signed for thousands of frames at a stretch, to staying within roughly +/-300 for the entire run,
+while v's own sum settled into a smooth, non-oscillating plateau instead of an oscillating one --
+`converged` turned mostly `true` (up from mostly `false`) and framerate roughly doubled, both consistent
+with the pressure solver having a far easier, calmer velocity field to project each frame. Visually: a
+straight, symmetric, thick rising column with natural small-scale turbulent detail inside it, not a
+single dominant vortex consuming the canvas -- the actual "thicker but not chaotic" result the user
+asked for.
 
 ## Current state: `noise`
 

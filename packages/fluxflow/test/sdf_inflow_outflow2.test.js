@@ -8,6 +8,7 @@ import { vec2, float } from 'three/tsl';
 import {
 	createSDFInflow2,
 	createSDFOutflow2,
+	createSDFFuelSource2,
 	createOutflowPressureDirichlet2,
 	combineDirichlet
 } from '../src/grid/sdf_inflow_outflow2.js';
@@ -87,6 +88,64 @@ describe( 'createSDFOutflow2', () => {
 		expect( typeof outflow.gradient ).toBe( 'function' );
 		expect( typeof outflow.isInside ).toBe( 'function' );
 		expect( typeof outflow.addPolygon ).toBe( 'function' );
+
+	} );
+
+} );
+
+describe( 'createSDFFuelSource2', () => {
+
+	it( 'exposes the same SDF interface as a collider', () => {
+
+		const source = createSDFFuelSource2( 8, 8, 1, 1, -4, -4 );
+
+		expect( typeof source.sample ).toBe( 'function' );
+		expect( typeof source.gradient ).toBe( 'function' );
+		expect( typeof source.isInside ).toBe( 'function' );
+		expect( typeof source.addPolygon ).toBe( 'function' );
+
+	} );
+
+	it( 'defaults fuel to 1 and mode to "set"', () => {
+
+		const source = createSDFFuelSource2( 8, 8, 1, 1, -4, -4 );
+
+		expectNode( source.fuel );
+		expect( source.mode ).toBe( 'set' );
+
+	} );
+
+	it( 'accepts a plain-number fuel value, baked to a node', () => {
+
+		const source = createSDFFuelSource2( 8, 8, 1, 1, -4, -4, { fuel: 0.5 } );
+
+		expectNode( source.fuel );
+
+	} );
+
+	it( 'accepts a live float node as fuel', () => {
+
+		const liveFuel = float( 0.75 );
+		const source = createSDFFuelSource2( 8, 8, 1, 1, -4, -4, { fuel: liveFuel } );
+
+		expect( source.fuel ).toBe( liveFuel );
+
+	} );
+
+	it( 'accepts an explicit mode option', () => {
+
+		const source = createSDFFuelSource2( 8, 8, 1, 1, -4, -4, { mode: 'add' } );
+
+		expect( source.mode ).toBe( 'add' );
+
+	} );
+
+	it( 'mode is a plain mutable property', () => {
+
+		const source = createSDFFuelSource2( 8, 8, 1, 1, -4, -4 );
+
+		source.mode = 'add';
+		expect( source.mode ).toBe( 'add' );
 
 	} );
 

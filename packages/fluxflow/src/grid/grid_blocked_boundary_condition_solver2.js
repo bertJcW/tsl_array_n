@@ -43,11 +43,24 @@ import { DIRECTION_LEFT, DIRECTION_RIGHT, DIRECTION_DOWN, DIRECTION_UP, DIRECTIO
 // with pressure never once going non-finite -- the two fields need
 // independent protection, not just one. ***
 //
-// 1000 is astronomically larger than any physically-intended velocity in
-// this port's own examples (all stay under ~30 even at their most
-// energetic) -- generous on purpose, this only needs to catch a genuine
-// runaway, not bound normal physical variation.
-const MAX_VELOCITY_COMPONENT = 1000;
+// Was 1000, tightened after a real, if rare, cascade found on real
+// hardware in examples/19-fuel-fire/ (a continuously-burning scene run
+// for 1000s of frames -- see that file's own header comment for the full
+// story): a CG solve occasionally produced a pressure cell in the low
+// thousands (nowhere near grid_pressure_solver2.js's own old
+// MAX_PLAUSIBLE_PRESSURE, so not rejected), whose gradient correction
+// pushed velocity up near this clamp's own old 1000 ceiling -- "caught"
+// in the sense of staying finite, but a *clamped* 1000 is still a ~33-
+// cell-per-frame displacement at this scene's own dt, more than enough to
+// badly corrupt the very next advection sample (fuel/temperature read
+// back at implausible-but-finite values afterward, e.g. fuel above 1,
+// which then feed buoyancy and compound over subsequent frames). 100 is
+// still >3x this port's own highest ever confirmed-healthy peak (~28,
+// examples/15-16's own long-run plateau) -- generous margin for normal
+// variation, but an order of magnitude tighter, so a genuine runaway gets
+// clamped down to something advection can still sample sanely from,
+// instead of merely "not infinite."
+const MAX_VELOCITY_COMPONENT = 100;
 
 // Same meaning as uMarker/vMarker (1=fluid, 0=collider); kept file-local
 // just like in the source, not moved into constant.js

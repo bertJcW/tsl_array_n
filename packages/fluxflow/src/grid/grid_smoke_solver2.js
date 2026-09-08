@@ -80,56 +80,13 @@
 
 import * as tsl_array_n from 'tsl_array_n';
 import { vec2, float } from 'three/tsl';
-import { createCellCenteredScalarGrid2 } from './grid_data2.js';
-import { collocatedValueAtPosition2 } from './grid_math.js';
+import { createAdvectedScalarField } from './array_utils.js';
 import { createSemiLagrangianAdvectionSolver2 } from './advection_solver2.js';
 import { createGridSolver2 } from './grid_solver2.js';
 
 function numberOrNode( value ) {
 
 	return typeof value === 'number' ? float( value ) : value;
-
-}
-
-// stateA/stateB: createCellCenteredScalarGrid2 instances, each with a
-// local sample(pos) wrapper (sdf_collider2.js's own established precedent
-// for the same collocatedValueAtPosition2 call). NOT cleared here --
-// clearing is a real kernel dispatch (createCellCenteredScalarGrid2's own
-// clear()), which needs tsl_array_n.init() to have already run, and this
-// factory (like createFaceCenteredGrid2/createGridSolver2 elsewhere in
-// this port) must stay constructible without a real GPU context for
-// structural testing. Both state fields still expose their own clear()
-// (inherited from createCellCenteredScalarGrid2) for a caller to call
-// themselves after init() -- the same explicit-clear convention every
-// existing example already follows for its own dye fields, rather than
-// relying on a storage buffer's implicit zero-initialization.
-// rawA/rawB: bare { data } wrappers around a plain arrayN('float', ...)
-// field, matching every existing dye example's own "raw advected scratch"
-// shape exactly (advectScalar2's own output parameter only ever needs
-// output.data(i,j).assign(...), nothing else).
-function createAdvectedScalarField( resolutionX, resolutionY, gridSpacingX, gridSpacingY, originX, originY ) {
-
-	function buildState() {
-
-		const grid = createCellCenteredScalarGrid2( resolutionX, resolutionY, gridSpacingX, gridSpacingY, originX, originY );
-
-		return {
-			...grid,
-			sample( pos ) {
-
-				return collocatedValueAtPosition2( grid.data, grid.gridSpacing, grid.dataOrigin, pos, grid.resolution );
-
-			}
-		};
-
-	}
-
-	const stateA = buildState();
-	const stateB = buildState();
-	const rawA = { data: tsl_array_n.arrayN( 'float', [ resolutionX, resolutionY ] ) };
-	const rawB = { data: tsl_array_n.arrayN( 'float', [ resolutionX, resolutionY ] ) };
-
-	return { stateA, stateB, rawA, rawB };
 
 }
 
