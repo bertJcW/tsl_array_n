@@ -19,3 +19,4 @@ export * from './vorticity_confinement2.js';
 export * from './grid_fire_solver2.js';
 export * from './velocity_damping2.js';
 export * from './grid_flip_solver2.js';
+export * from './grid_two_phase_flip_solver2.js';

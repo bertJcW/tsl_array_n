@@ -89,6 +89,45 @@
 //    large Dirichlet region is still an accepted, un-optimized tradeoff of
 //    the coarser levels never seeing it at all -- correctness at the only
 //    level a caller ever reads no longer depends on that tradeoff.
+// 4. **Optional per-face coefficients (`options.faceWeights`), a partial
+//    walk-back of decision 1's own constant-coefficient scope cut.** Added
+//    for grid_two_phase_flip_solver2.js, whose variable-density pressure
+//    Poisson equation is `div(beta grad(p)) = div(u*)` with
+//    `beta = rho_liquid/rho` jumping by the whole liquid/gas density ratio
+//    across an interface that moves every frame -- see that file's own
+//    header comment for the derivation and the papers it comes from.
+//    Fully backward-compatible: absent the option, not a single extra node
+//    is emitted anywhere and every existing caller's kernel graph is
+//    unchanged (deliberately -- several shipped scenes are tuned against
+//    specific atomicScale/maxPlausiblePressure magnitudes that a stray
+//    `mul(1.0)` has no business perturbing).
+//
+//    `faceWeights` is an array of `shape.length` accessor functions;
+//    `faceWeights[axis](...I)` is beta on the **lower** face of cell `I`
+//    along `axis`. That is exactly MAC face-array indexing (a `[nx+1, ny]`
+//    array's element `(i,j)` *is* the lower-x face of cell `(i,j)`), so a
+//    caller passes its existing face grids straight in with no new layout,
+//    and index `I[axis]+1` is always in range by construction. Storing
+//    beta per *face* rather than per *cell* is what keeps the operator
+//    symmetric: two adjacent cells read the same single array element for
+//    the coupling between them, rather than each computing its own average
+//    that merely ought to agree. PCG's alpha/beta depend on that symmetry
+//    (see createMultigridPreconditioner's own header comment on the real
+//    breakdown a non-symmetric operator produced here before).
+//
+//    Same level-0-only restriction as decision 3, for the same reason and
+//    with a sharper cost: the coarse levels have no per-level beta, so the
+//    V-cycle preconditions the variable-coefficient system with a
+//    *constant*-coefficient approximation of it. That is still a perfectly
+//    valid preconditioner (it stays symmetric and positive definite, which
+//    is all PCG actually requires -- it is emphatically NOT required to be
+//    an accurate inverse), but it approximates the true operator less well
+//    the larger the density ratio gets, so iteration counts climb with it.
+//    This is why grid_two_phase_flip_solver2.js defaults to a moderate
+//    ~100:1 ratio rather than real air/water's ~816:1. Proper
+//    variable-coefficient multigrid needs restricted per-level
+//    coefficients, which needs the per-level operator storage decision 1
+//    cut -- the same wall, unmoved.
 //
 // The V-cycle itself needs no reduction/dot-product anywhere (relax,
 // residual, restrict, and correct are all local-stencil kernels) -- unlike
@@ -218,7 +257,7 @@ function computeLevelSpacings( gridSpacing, numberOfLevels ) {
 // Dirichlet use (e.g. examples/13's own pressure vent) would additionally
 // want that RHS correction for full physical accuracy, though the
 // symmetry (and therefore CG's basic stability) no longer depends on it.
-function laplacianAt( field, spacing, shape, I, dirichletMask ) {
+function laplacianAt( field, spacing, shape, I, dirichletMask, faceWeights ) {
 
 	const center = field( ...I );
 	const zero = float( 0 );
@@ -248,6 +287,27 @@ function laplacianAt( field, spacing, shape, I, dirichletMask ) {
 
 			dLower = lowerIsDirichlet.select( center, dLower );
 			dUpper = upperIsDirichlet.select( center.negate(), dUpper );
+
+		}
+
+		if ( faceWeights ) {
+
+			// The whole point of storing beta on FACES rather than in cells
+			// (see this function's own header comment, decision 4): a face's
+			// own weight is a single stored value both of its two adjacent
+			// cells read, so `A` stays exactly symmetric by construction --
+			// cell c's coefficient for neighbor n and cell n's coefficient
+			// for c are literally the same array element, not two separately
+			// averaged expressions that merely ought to agree. PCG requires
+			// that symmetry (see createMultigridPreconditioner's own header
+			// comment on why a non-symmetric operator breaks alpha/beta).
+			//
+			// Applied AFTER the Dirichlet substitution above, not before:
+			// a Dirichlet neighbor's own eliminated term is still a real
+			// flux through a real face (the value is merely known rather
+			// than solved for), so it carries that face's own weight too.
+			dLower = dLower.mul( faceWeights[ axis ]( ...I ) );
+			dUpper = dUpper.mul( faceWeights[ axis ]( ...upper ) );
 
 		}
 
@@ -323,7 +383,7 @@ function laplacianAt( field, spacing, shape, I, dirichletMask ) {
 // this cell's own diagonal, or the two would no longer represent the same
 // (merely reduced-to-free-variables) linear system. This was already
 // correct before the symmetry fix above and needed no change.
-function laplacianDiagonalAt( spacing, shape, I, dirichletMask ) {
+function laplacianDiagonalAt( spacing, shape, I, dirichletMask, faceWeights ) {
 
 	let sum = null;
 
@@ -333,8 +393,26 @@ function laplacianDiagonalAt( spacing, shape, I, dirichletMask ) {
 		const n = shape[ axis ];
 		const hSq = spacing[ axis ] * spacing[ axis ];
 
-		const hasLower = idx.greaterThan( 0 ).select( float( 1 ), float( 0 ) );
-		const hasUpper = idx.lessThan( n - 1 ).select( float( 1 ), float( 0 ) );
+		let hasLower = idx.greaterThan( 0 ).select( float( 1 ), float( 0 ) );
+		let hasUpper = idx.lessThan( n - 1 ).select( float( 1 ), float( 0 ) );
+
+		if ( faceWeights ) {
+
+			// Same present/absent masking as the unweighted form -- a
+			// genuinely absent neighbor contributes 0 either way -- with each
+			// *present* slot now carrying its own face's beta instead of an
+			// implicit 1, so this stays the exact diagonal of laplacianAt's
+			// own weighted stencil. Keeping the two in sync matters for the
+			// same reason the unweighted versions already had to be (see this
+			// function's own header comment): the relax sweep divides the
+			// residual by this value, so a diagonal that doesn't match the
+			// operator over-corrects every sweep and compounds into real
+			// divergence rather than merely converging slowly.
+			const upper = I.map( ( v, a ) => ( a === axis ? idx.add( 1 ) : v ) );
+			hasLower = hasLower.mul( faceWeights[ axis ]( ...I ) );
+			hasUpper = hasUpper.mul( faceWeights[ axis ]( ...upper ) );
+
+		}
 
 		const term = hasLower.add( hasUpper ).mul( - 1 / hSq );
 		sum = sum === null ? term : sum.add( term );
@@ -365,13 +443,13 @@ function colorOf( I ) {
 // see decision 3 in the file header comment.
 export function createLaplacianOperator( shape, gridSpacing, options = {} ) {
 
-	const { dirichletMask } = options;
+	const { dirichletMask, faceWeights } = options;
 
 	return function applyLaplacian( input, output ) {
 
 		return buildElementwiseKernel( shape, ( I ) => {
 
-			output( ...I ).assign( laplacianAt( input, gridSpacing, shape, I, dirichletMask ) );
+			output( ...I ).assign( laplacianAt( input, gridSpacing, shape, I, dirichletMask, faceWeights ) );
 
 		} );
 
@@ -384,13 +462,13 @@ export function createLaplacianOperator( shape, gridSpacing, options = {} ) {
 // cell's neighbors are always the opposite color on a proper checkerboard,
 // this is safe to run as one dispatch per color with no data race,
 // without needing a stride-2 dispatch primitive tsl_array_n doesn't have.
-function buildRelaxKernel( shape, spacing, sorFactor, color, x, b, dirichletMask ) {
+function buildRelaxKernel( shape, spacing, sorFactor, color, x, b, dirichletMask, faceWeights ) {
 
 	return buildElementwiseKernel( shape, ( I ) => {
 
 		const isColor = colorOf( I ).equal( color );
-		const Ax = laplacianAt( x, spacing, shape, I, dirichletMask );
-		const diagonal = laplacianDiagonalAt( spacing, shape, I, dirichletMask );
+		const Ax = laplacianAt( x, spacing, shape, I, dirichletMask, faceWeights );
+		const diagonal = laplacianDiagonalAt( spacing, shape, I, dirichletMask, faceWeights );
 		const current = x( ...I );
 		const updated = current.add( b( ...I ).sub( Ax ).div( diagonal ).mul( sorFactor ) );
 
@@ -402,11 +480,11 @@ function buildRelaxKernel( shape, spacing, sorFactor, color, x, b, dirichletMask
 
 // buffer = b - A@x, the true residual -- reused by the V-cycle before
 // restricting down to the next coarser level.
-function buildResidualKernel( shape, spacing, x, b, buffer, dirichletMask ) {
+function buildResidualKernel( shape, spacing, x, b, buffer, dirichletMask, faceWeights ) {
 
 	return buildElementwiseKernel( shape, ( I ) => {
 
-		buffer( ...I ).assign( b( ...I ).sub( laplacianAt( x, spacing, shape, I, dirichletMask ) ) );
+		buffer( ...I ).assign( b( ...I ).sub( laplacianAt( x, spacing, shape, I, dirichletMask, faceWeights ) ) );
 
 	} );
 
@@ -716,6 +794,10 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 	const numberOfFinalIterations = options.numberOfFinalIterations ?? 2;
 	const sorFactor = options.sorFactor ?? 1.0;
 	const dirichletMask = options.dirichletMask;
+	// Like dirichletMask, only ever evaluated at the finest level (level 0)
+	// -- see decision 4 in the file header comment for why the coarse levels
+	// deliberately stay constant-coefficient, and what that costs.
+	const faceWeights = options.faceWeights;
 
 	const levelShapes = computeLevelShapes( shape, numberOfLevels );
 	const levelSpacings = computeLevelSpacings( gridSpacing, numberOfLevels );
@@ -733,12 +815,13 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 			const b = level === 0 ? input : tsl_array_n.arrayN( 'float', levelShape );
 			const buffer = tsl_array_n.arrayN( 'float', levelShape );
 			const levelMask = level === 0 ? dirichletMask : undefined;
+			const levelFaceWeights = level === 0 ? faceWeights : undefined;
 
 			levels.push( {
 				x, b, buffer,
-				relaxColor0: buildRelaxKernel( levelShape, levelSpacing, sorFactor, 0, x, b, levelMask ),
-				relaxColor1: buildRelaxKernel( levelShape, levelSpacing, sorFactor, 1, x, b, levelMask ),
-				residual: buildResidualKernel( levelShape, levelSpacing, x, b, buffer, levelMask ),
+				relaxColor0: buildRelaxKernel( levelShape, levelSpacing, sorFactor, 0, x, b, levelMask, levelFaceWeights ),
+				relaxColor1: buildRelaxKernel( levelShape, levelSpacing, sorFactor, 1, x, b, levelMask, levelFaceWeights ),
+				residual: buildResidualKernel( levelShape, levelSpacing, x, b, buffer, levelMask, levelFaceWeights ),
 				zeroX: buildZeroKernel( levelShape, x ),
 			} );
 

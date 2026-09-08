@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>fluxflow — two-phase bubble rise</title>
+	<style>
+		body { margin: 0; font-family: system-ui, sans-serif; background: #2b2d33; color: #eee; display: flex; flex-direction: column; align-items: center; gap: 0.75rem; padding: 1.5rem; box-sizing: border-box; }
+		#canvases { display: flex; gap: 1rem; flex-wrap: wrap; justify-content: center; }
+		.canvas-block { display: flex; flex-direction: column; align-items: center; gap: 0.35rem; }
+		canvas { image-rendering: pixelated; width: 384px; height: 384px; border: 2px solid #6b7280; background: #000; }
+		#outParticles { image-rendering: auto; }
+		.canvas-label { font-size: 0.8rem; opacity: 0.7; max-width: 384px; text-align: center; }
+		#status { font-size: 0.9rem; line-height: 1.6; opacity: 0.85; }
+		.err { color: #f87171; }
+		p { max-width: 860px; font-size: 0.85rem; opacity: 0.7; margin: 0; text-align: center; }
+		#perf { font-size: 0.9rem; line-height: 1.6; font-variant-numeric: tabular-nums; background: rgba(20, 21, 24, 0.85); border: 1px solid #3f4148; border-radius: 0.35rem; padding: 0.35rem 0.6rem; }
+		#controls { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; justify-content: center; background: #1f2024; border: 1px solid #3f4148; border-radius: 0.5rem; padding: 0.75rem 1rem; font-size: 0.85rem; }
+		#controls label { display: flex; align-items: center; gap: 0.4rem; white-space: nowrap; }
+		#controls input[type="range"] { width: 120px; }
+		#controls button { background: #3f4148; color: #eee; border: 1px solid #6b7280; border-radius: 0.3rem; padding: 0.3rem 0.7rem; font: inherit; cursor: pointer; }
+		#controls button:hover { background: #4b4d55; }
+	</style>
+</head>
+<body>
+	<div id="canvases">
+		<div class="canvas-block">
+			<canvas id="outParticles" width="1024" height="1024"></canvas>
+			<div class="canvas-label">particles — blue = liquid, pale grey = gas</div>
+		</div>
+		<div class="canvas-block">
+			<canvas id="outDensity" width="64" height="64"></canvas>
+			<div class="canvas-label">cell density (white = liquid, black = gas) — what the projection actually sees</div>
+		</div>
+	</div>
+	<div id="status">initializing…</div>
+	<div id="perf">fps: --</div>
+	<div id="controls">
+		<label>density ratio 1:<span id="densityRatioValue">100</span>
+			<input type="range" id="densityRatio" min="2" max="400" step="1" value="100" /></label>
+		<label>velocity damping <input type="range" id="velocityDamping" min="0" max="0.1" step="0.002" value="0.02" /> <span id="velocityDampingValue">0.020</span></label>
+		<button id="reset">reset scene</button>
+	</div>
+	<p>grid.createGridTwoPhaseFlipSolver2 (packages/fluxflow/src/grid/grid_two_phase_flip_solver2.js) —
+	a two-phase (liquid + gas) FLIP solver. Unlike grid.createGridFlipSolver2, the air here is a
+	simulated phase rather than a Dirichlet <code>p = 0</code> void, so it can push back. Each particle
+	carries a phase tag (Boyd &amp; Bridson's MultiFLIP, ACM TOG 2012); the phases are coupled through a
+	variable-density pressure projection (Kang/Fedkiw/Liu 2000, Hong &amp; Kim 2005), which is new
+	<code>faceWeights</code> support in multigrid.js and grid_pressure_solver2.js.
+	<strong>Nothing in this scene applies a buoyancy force.</strong> Gravity is uniform on every face,
+	for both phases; the bubble rises purely because the projection knows the gas is lighter. The
+	density-ratio slider changes how much lighter — drag it to 2 and the bubble barely moves.
+	Expect the bubble to rise, deform into a cap, and break the surface; the water sloshes and settles.
+	Open the console for a periodic diagnostic readout.</p>
+	<script type="module" src="./main.js"></script>
+</body>
+</html>

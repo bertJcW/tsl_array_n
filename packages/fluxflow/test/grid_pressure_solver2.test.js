@@ -80,4 +80,44 @@ describe( 'createGridPressureSolver2', () => {
 
 	} );
 
+	// options.faceWeights -- the variable-density (two-phase) projection.
+	// Numerical correctness of the stencil and of the beta-weighted
+	// correction step lives in variable_density_projection.test.js (plain JS,
+	// runnable without a GPU); these check the plumbing.
+	it( 'constructs with faceWeights', () => {
+
+		const velocityGrid = createFaceCenteredGrid2( 8, 8, 1, 1, 0, 0 );
+
+		expect( () => createGridPressureSolver2( {
+			resolution: [ 8, 8 ], gridSpacing: [ 1, 1 ],
+			faceWeights: { u: velocityGrid.dataU, v: velocityGrid.dataV }
+		} ) ).not.toThrow();
+
+	} );
+
+	it( 'constructs with faceWeights and a dirichlet function together -- the two-phase configuration', () => {
+
+		const velocityGrid = createFaceCenteredGrid2( 8, 8, 1, 1, 0, 0 );
+		const dirichlet = () => ( { active: float( 0 ), target: float( 0 ) } );
+
+		expect( () => createGridPressureSolver2( {
+			resolution: [ 8, 8 ], gridSpacing: [ 1, 1 ],
+			dirichlet,
+			faceWeights: { u: velocityGrid.dataU, v: velocityGrid.dataV }
+		} ) ).not.toThrow();
+
+	} );
+
+	it( 'builds project() with faceWeights -- the beta-weighted correction kernels', () => {
+
+		const velocityGrid = createFaceCenteredGrid2( 8, 8, 1, 1, 0, 0 );
+		const solver = createGridPressureSolver2( {
+			resolution: [ 8, 8 ], gridSpacing: [ 1, 1 ],
+			faceWeights: { u: velocityGrid.dataU, v: velocityGrid.dataV }
+		} );
+
+		expect( typeof solver.project( velocityGrid, velocityGrid ) ).toBe( 'function' );
+
+	} );
+
 } );

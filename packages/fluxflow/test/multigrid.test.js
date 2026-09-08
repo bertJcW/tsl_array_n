@@ -108,6 +108,29 @@ describe( 'createMultigridPreconditioner', () => {
 
 	} );
 
+	it( 'accepts faceWeights and applies them at the finest level only', () => {
+
+		// Level 0 gets the real per-face coefficients; the coarse levels stay
+		// constant-coefficient by design (multigrid.js decision 4), exactly
+		// as dirichletMask already does. What this pins down is that a
+		// multi-level V-cycle still builds with the option present -- the
+		// coarse level shapes do not match the fine face arrays, so a version
+		// that leaked faceWeights downward would throw here.
+		const betaU = tsl_array_n.arrayN( 'float', [ 9, 8 ] );
+		const betaV = tsl_array_n.arrayN( 'float', [ 8, 9 ] );
+
+		const applyPreconditioner = createMultigridPreconditioner( [ 8, 8 ], [ 1, 1 ], {
+			numberOfLevels: 3,
+			faceWeights: [ betaU, betaV ]
+		} );
+
+		const input = tsl_array_n.arrayN( 'float', [ 8, 8 ] );
+		const output = tsl_array_n.arrayN( 'float', [ 8, 8 ] );
+
+		expect( () => applyPreconditioner( input, output ) ).not.toThrow();
+
+	} );
+
 } );
 
 describe( 'createLaplacianOperator', () => {
@@ -137,6 +160,58 @@ describe( 'createLaplacianOperator', () => {
 
 		const input = tsl_array_n.arrayN( 'float', [ 8, 8 ] );
 		const output = tsl_array_n.arrayN( 'float', [ 8, 8 ] );
+
+		expect( () => applyLaplacian( input, output ) ).not.toThrow();
+
+	} );
+
+	// options.faceWeights (decision 4 in multigrid.js's header comment):
+	// per-face coefficients for the variable-density two-phase projection.
+	// The stencil's own numerical correctness is covered separately in
+	// variable_density_projection.test.js, which reimplements it in plain JS
+	// so it can actually be *run* without a GPU; what's checked here is that
+	// the MAC-shaped face arrays are accepted and the graph builds.
+	it( 'builds without throwing given faceWeights (MAC face arrays)', () => {
+
+		const betaU = tsl_array_n.arrayN( 'float', [ 9, 8 ] ); // [nx+1, ny]
+		const betaV = tsl_array_n.arrayN( 'float', [ 8, 9 ] ); // [nx, ny+1]
+
+		const applyLaplacian = createLaplacianOperator( [ 8, 8 ], [ 1, 1 ], {
+			faceWeights: [ betaU, betaV ]
+		} );
+
+		const input = tsl_array_n.arrayN( 'float', [ 8, 8 ] );
+		const output = tsl_array_n.arrayN( 'float', [ 8, 8 ] );
+
+		expect( () => applyLaplacian( input, output ) ).not.toThrow();
+
+	} );
+
+	it( 'builds without throwing given faceWeights AND a dirichletMask together', () => {
+
+		const mask = tsl_array_n.arrayN( 'float', [ 8, 8 ] );
+		const betaU = tsl_array_n.arrayN( 'float', [ 9, 8 ] );
+		const betaV = tsl_array_n.arrayN( 'float', [ 8, 9 ] );
+
+		const applyLaplacian = createLaplacianOperator( [ 8, 8 ], [ 1, 1 ], {
+			dirichletMask: ( i, j ) => mask( i, j ).greaterThan( 0.5 ),
+			faceWeights: [ betaU, betaV ]
+		} );
+
+		const input = tsl_array_n.arrayN( 'float', [ 8, 8 ] );
+		const output = tsl_array_n.arrayN( 'float', [ 8, 8 ] );
+
+		expect( () => applyLaplacian( input, output ) ).not.toThrow();
+
+	} );
+
+	it( 'builds a 1D faceWeights operator -- the option is dimension-generic too', () => {
+
+		const beta = tsl_array_n.arrayN( 'float', [ 9 ] );
+		const applyLaplacian = createLaplacianOperator( [ 8 ], [ 1 ], { faceWeights: [ beta ] } );
+
+		const input = tsl_array_n.arrayN( 'float', [ 8 ] );
+		const output = tsl_array_n.arrayN( 'float', [ 8 ] );
 
 		expect( () => applyLaplacian( input, output ) ).not.toThrow();
 

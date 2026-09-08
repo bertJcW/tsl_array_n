@@ -943,6 +943,112 @@ the atomic-dot-product machinery `src/linalg/linalg.js` already uses for
 CG (`atomicAdd`), substituting `atomicMax` and dropping the sign-handling
 a dot product's accumulator needs (a magnitude is always non-negative).
 
+## Provenance of `src/grid/grid_two_phase_flip_solver2.js`
+
+Two-phase (liquid + gas) FLIP. Unusually for this port, this file is **not a
+port of any open-source solver**, because after checking both of this
+project's existing C++ references directly, neither has one:
+
+- **mantaflow** does have a ghost-fluid pressure path
+  (`ghostFluidHelper`, `ApplyGhostFluidDiagonal`, `knCorrectVelocityGhostFluid`
+  in `source/plugin/pressure.cpp`), but reading it shows it is the
+  *free-surface* ghost fluid method — liquid versus `isEmpty`, placing
+  `p = 0` at a sub-cell position interpolated from a level set. There is no
+  second phase with its own density anywhere in it. Recorded here explicitly
+  so the check isn't repeated: "mantaflow has GFM" is true, and is not the
+  same thing as "mantaflow has a two-phase solver".
+- **jet/fluid-engine-dev** has `GridSinglePhasePressureSolver2` and
+  `GridFractionalSinglePhasePressureSolver2` — single-phase, as both names
+  say.
+
+So the algorithm comes from published papers rather than from code, and the
+implementation is this port's own. Papers are cited, not licensed: none of
+the works below contributes any copyrighted code to this package, and this
+section is an academic attribution, not a license obligation. The file's own
+header comment carries the same list alongside the derivation.
+
+### Academic references (no code, no license obligation)
+
+- Brackbill, J. U. & Ruppel, H. M. (1986). *FLIP: A method for adaptively
+  zoned, particle-in-cell calculations of fluid flows in two dimensions.*
+  Journal of Computational Physics 65(2), 314–343. — FLIP itself.
+- Zhu, Y. & Bridson, R. (2005). *Animating Sand as a Fluid.* ACM
+  Transactions on Graphics 24(3), 965–972. — FLIP for incompressible flow,
+  and the PIC/FLIP blend that `flipRatio` interpolates between.
+- Kang, M., Fedkiw, R. P. & Liu, X.-D. (2000). *A Boundary Condition
+  Capturing Method for Multiphase Incompressible Flow.* Journal of
+  Scientific Computing 15(3), 323–360. — the variable-density pressure
+  Poisson formulation this solver solves.
+- Hong, J.-M. & Kim, C.-H. (2005). *Discontinuous Fluids.* ACM Transactions
+  on Graphics 24(3), 915–920 (SIGGRAPH 2005). — the first graphics use of
+  that formulation for two-phase liquid/gas with bubbles.
+- Boyd, L. & Bridson, R. (2012). *MultiFLIP for Energetic Two-Phase Fluid
+  Simulation.* ACM Transactions on Graphics 31(2), Article 16. — the
+  closest reference to what this file is: two-phase FLIP with one phase bit
+  per particle. This port implements the phase-tagged-particle design and
+  the shared-velocity-field variable-density coupling; it does **not**
+  implement MultiFLIP's two loosely-coupled per-phase velocity fields, its
+  particle-position anti-mixing adjustment, or its surface tension. See the
+  file's own header comment for that scope statement.
+- Bridson, R. (2015). *Fluid Simulation for Computer Graphics*, 2nd edition,
+  CRC Press — chapter on variable density solves. The discrete
+  face-averaged-density stencil used here (rather than a sub-cell
+  ghost-fluid one) follows this treatment.
+
+### mantaflow (Apache License 2.0) — closed-domain pressure pinning, `src/grid/grid_two_phase_flip_solver2.js`
+
+One piece of this file **is** ported from mantaflow's own code rather than
+from a paper. Read directly from mantaflow's `source/plugin/pressure.cpp`
+(`solvePressureSystem`'s own `zeroPressureFixing` branch, and the
+`fixPressure` helper it calls), fetched and read directly via the GitHub API
+(no local checkout in this repo). Same license as this whole package
+(Apache License 2.0), so no second license-text block is needed:
+
+```
+mantaflow (C++, Apache License 2.0, Tobias Pfaff & Nils Thuerey)
+  -> fluxflow (this package, JS/TSL, Apache-2.0, bert wang)
+```
+
+- **Source:** https://github.com/thunil/mantaflow/blob/master/source/plugin/pressure.cpp (`solvePressureSystem`, `fixPressure`, `CountEmptyCells`)
+- **License:** Apache License 2.0 — full text already reproduced above, under "fluxflow (Python) (Apache License 2.0)"; not repeated a second time.
+
+The problem is specific to two-phase and is why this is needed at all: once
+the air is a simulated phase rather than a Dirichlet `p = 0` void, a closed
+domain has no Dirichlet cell anywhere, and the pressure system becomes pure
+Neumann — singular, with pressure defined only up to an additive constant.
+mantaflow hits exactly this case (`CountEmptyCells(flags) == 0`, literally
+"there is no air region") and pins a single cell's row to the identity with
+`fixPressure(fixPidx, 0, ...)`, preferring the top-centre cell
+`(sizeX/2, sizeY-1)`.
+
+What carries over: the decision to pin exactly one cell rather than enforce
+a compatibility condition, and mantaflow's own preferred pin position, which
+is this port's `pressurePin: 'topCenter'` default. What needed no porting:
+the mechanism itself — this port's pre-existing `dirichlet` option on
+`grid_pressure_solver2.js` already means "identity row at this cell, pinned
+to this target", which *is* `fixPressure`, so the port is a two-line
+`dirichlet` function rather than any new machinery. What's deliberately
+**not** ported: mantaflow's fallback walk down from the preferred cell
+(there is no unusable cell to walk away from here — in two-phase every cell
+is fluid by construction, which is the very reason this branch is taken),
+and its alternative `enforceCompatibility` treatment (subtracting the mean
+divergence from the RHS), which would need a whole-grid reduction per frame
+through this port's fixed-point atomic accumulator and its per-scene-tuned
+scale, for no benefit over pinning one cell.
+
+### `src/linalg/multigrid.js` and `src/grid/grid_pressure_solver2.js` — `faceWeights` (original)
+
+The variable-coefficient (`div(beta grad(p))`) support both files gained for
+the above is **original to this port**, not taken from either upstream. It
+is closest in spirit to jet's own variable-coefficient MGPCG (whose
+per-cell, per-level stored stencil coefficients `src/linalg/multigrid.js`'s
+own header comment, decision 1, records as a deliberate scope cut), but does
+not follow its design: jet stores an explicit matrix per level, whereas this
+applies per-face coefficients at the finest level only and leaves the coarse
+levels constant-coefficient, exactly as the pre-existing `dirichletMask`
+already does. That tradeoff, and what it costs, is documented in that file's
+own decision 4.
+
 ## Design inspiration (not a code dependency)
 
 ### Taichi Lang

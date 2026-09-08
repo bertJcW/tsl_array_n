@@ -58,6 +58,28 @@
 // operator's sign) -- only the fluid-cell RHS and the correction step
 // depend on which sign convention `A` uses, and both are handled above.
 //
+// *** options.faceWeights -- variable-density (two-phase) projection ***
+//
+// Added for grid_two_phase_flip_solver2.js; every pre-existing caller
+// passes none and gets exactly the code path above, unchanged. With it,
+// this file solves `div(beta grad(p)) = div(u*)` and corrects with
+// `u = u* - beta grad(p)`, where `beta = rho_liquid/rho_face` is supplied
+// as a pair of MAC face arrays `{ u, v }` (accessor functions, so the
+// caller keeps ownership and can rebuild them every frame -- which a
+// two-phase solver must, since its interface moves). beta = 1 everywhere
+// reduces exactly to the constant-density form, and that is not merely
+// true in the limit: the option genuinely emits no extra nodes when
+// absent, so nothing about the shipped single-phase scenes shifts.
+//
+// The one thing a caller MUST get right is that a closed all-fluid domain
+// (which two-phase always is -- there is no "air" Dirichlet region left
+// once the air is itself simulated) makes this system singular: pure
+// Neumann, pressure defined only up to an additive constant. The fix is
+// the caller's, not this file's, and it needs no new machinery here --
+// pinning a single cell via the existing `dirichlet` option IS mantaflow's
+// own `fixPressure`/`zeroPressureFixing` treatment of exactly this case.
+// See grid_two_phase_flip_solver2.js's own header comment.
+//
 // dt plays no role anywhere in this file, matching jet's own solve()
 // (which marks its own timeIntervalInSeconds parameter UNUSED_VARIABLE):
 // any dt-scaling was already baked into u* by whatever produced it
@@ -177,6 +199,7 @@ const DEFAULT_MAX_PLAUSIBLE_PRESSURE = 1e6;
 export function createGridPressureSolver2( {
 	resolution, gridSpacing, origin = [ 0, 0 ],
 	dirichlet,
+	faceWeights,
 	multigrid = {},
 	tolerance = 1e-5,
 	maxIterations = 100,
@@ -213,8 +236,15 @@ export function createGridPressureSolver2( {
 
 	}
 
-	const applyLaplacian = createLaplacianOperator( shape, gridSpacing, { dirichletMask } );
-	const applyPreconditioner = createMultigridPreconditioner( shape, gridSpacing, { ...multigrid, dirichletMask } );
+	// options.faceWeights: { u, v } -- per-face inverse-density coefficients
+	// for a variable-density (two-phase) projection, see this file's own
+	// header comment. Passed straight through to multigrid.js's own
+	// dimension-generic [axis] form: the u array's own (i,j) IS the lower-x
+	// face of cell (i,j), the v array's own (i,j) IS the lower-y face, which
+	// is exactly what that parameter is defined to mean.
+	const faceWeightAccessors = faceWeights ? [ faceWeights.u, faceWeights.v ] : undefined;
+	const applyLaplacian = createLaplacianOperator( shape, gridSpacing, { dirichletMask, faceWeights: faceWeightAccessors } );
+	const applyPreconditioner = createMultigridPreconditioner( shape, gridSpacing, { ...multigrid, dirichletMask, faceWeights: faceWeightAccessors } );
 	const cg = createPreconditionedConjugateGradientSolver( applyLaplacian, applyPreconditioner, b, pressureGrid.data, { atomicScale } );
 
 	// Updated after every project()-dispatch below, for diagnostics -- cg.solve()
@@ -339,8 +369,16 @@ export function createGridPressureSolver2( {
 
 			If( k.greaterThan( 0 ).and( k.lessThan( resolutionX ) ), () => {
 
+				// u = u* - beta grad(p), not u = u* - grad(p): the SAME beta
+				// this face contributed to the operator above. Correcting
+				// with an unweighted gradient after solving a weighted
+				// system leaves the result not divergence-free at all --
+				// the two halves are one derivation, `div(beta grad(p)) =
+				// div(u*)` is only the right equation to solve *because*
+				// the correction that follows it is `beta grad(p)`.
 				const gradient = pressureGrid.data( k, j ).sub( pressureGrid.data( k.sub( 1 ), j ) ).div( pressureGrid.gridSpacing.x );
-				output.dataU( k, j ).assign( input.dataU( k, j ).sub( gradient ) );
+				const weighted = faceWeights ? gradient.mul( faceWeights.u( k, j ) ) : gradient;
+				output.dataU( k, j ).assign( input.dataU( k, j ).sub( weighted ) );
 
 			} );
 
@@ -351,7 +389,8 @@ export function createGridPressureSolver2( {
 			If( k.greaterThan( 0 ).and( k.lessThan( resolutionY ) ), () => {
 
 				const gradient = pressureGrid.data( i, k ).sub( pressureGrid.data( i, k.sub( 1 ) ) ).div( pressureGrid.gridSpacing.y );
-				output.dataV( i, k ).assign( input.dataV( i, k ).sub( gradient ) );
+				const weighted = faceWeights ? gradient.mul( faceWeights.v( i, k ) ) : gradient;
+				output.dataV( i, k ).assign( input.dataV( i, k ).sub( weighted ) );
 
 			} );
 
