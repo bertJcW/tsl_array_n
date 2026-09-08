@@ -32,6 +32,7 @@ import { grid } from 'fluxflow';
 | `vorticity_confinement2.js` | (no counterpart -- original code, concept from mantaflow, see below) | `createVorticityConfinement2` -- compensates for semi-Lagrangian advection's own numerical dissipation by pushing fluid toward already-concentrated vorticity |
 | `grid_fire_solver2.js` | (no counterpart -- ported from mantaflow instead, see below) | `createGridFireSolver2` -- a real fuel/combustion solver (fuel burns down, drives density/temperature), decoupled from any specific velocity solver -- composes into whichever one the caller is already using via a plain `force(pos)` |
 | `velocity_damping2.js` | (no counterpart -- original code, see below) | `createVelocityDamping2` -- a uniform per-frame velocity decay, pluggable into `createGridSolver2`'s own `computeViscosity` stage hook with zero changes to that file |
+| `grid_flip_solver2.js` | (no counterpart -- ported from mantaflow instead, see below) | `createGridFlipSolver2` -- a 2D FLIP (fluid-implicit-particle) liquid solver: fixed particle count, GPU-atomic particle-to-grid scatter, FLIP/PIC blended velocity update, `options.collider` (irregular/multiple/moving obstacles, via the pre-existing SDF-collider stack plus a new particle-side push-out) -- the first particle-based solver in this port; `computeFlipBoxSeed` -- seeds a rectangular box of particles |
 
 ### `advection_solver2.js` -- semi-Lagrangian advection, monotonic cubic interpolation
 
@@ -391,6 +392,139 @@ straight, symmetric, thick rising column with natural small-scale turbulent deta
 single dominant vortex consuming the canvas -- the actual "thicker but not chaotic" result the user
 asked for.
 
+### `grid_flip_solver2.js` -- a 2D FLIP liquid solver, this port's first particle-based solver
+
+Every other solver in this port evolves fields defined *on* the grid; FLIP (fluid-implicit-particle)
+is a fundamentally different, hybrid particle+grid method -- the standard technique for liquid
+simulation (splashing/pooling free-surface flows) -- built at the user's own direct request,
+referencing mantaflow the way every other ported feature in this project has (see
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for the full attribution and what carries over versus
+what's this port's own adaptation).
+
+Scope for this first version deliberately matches mantaflow's own simplest reference scene,
+`scenes/flip01_simple.py` ("very simple flip without level set and without any particle resampling"):
+a fixed particle count, seeded once via `computeFlipBoxSeed`, for the solver instance's whole lifetime
+(no spawn/kill primitive exists -- `tsl_array_n`'s own arrays have no resize mechanism); no free-surface
+level set (fluid/empty classification is purely live particle occupancy). Density resampling *within*
+that fixed budget was added later -- see `options.resample` below -- once real-hardware use surfaced a
+compaction problem the v1 scope didn't cover. `createGridFlipSolver2` therefore owns velocity and
+pressure directly (building `createGridBlockedBoundaryConditionSolver2`/`createGridPressureSolver2`
+itself, the same primitives `createGridSolver2` builds on) rather than composing into a caller-supplied
+solver the way `grid_fire_solver2.js`/`velocity_damping2.js` do -- FLIP rewrites velocity outright
+every frame (particle-to-grid scatter, "P2G"), it doesn't just contribute a force/decay term to an
+otherwise-normal self-advecting solver.
+
+Per frame: particles advect forward through the current velocity field (reusing
+`advection_solver2.js`'s own existing back-trace machinery, already real-hardware-validated via
+MacCormack's own forward-tracing step -- no new integrator needed); each particle scatters its own
+velocity onto its nearby grid faces via a real **GPU atomic scatter** (one atomic accumulator per
+face, since multiple particles can target the same face at once -- the first genuinely scatter-shaped
+kernel in this whole port, distinct from every earlier one-thread-one-output-cell kernel); a snapshot
+of the just-rebuilt velocity is kept; cells containing at least one particle are marked fluid, feeding
+this port's own pre-existing general Dirichlet pressure mechanism (the same one
+`sdf_inflow_outflow2.js`'s own outflow treatment already established) with a mask recomputed fresh
+every frame instead of a static SDF; gravity and pressure projection run as usual; then each particle
+reads back the grid's own velocity *change* from this whole step (the actual "FLIP" part -- keeps each
+particle's own accumulated momentum/noise) blended with a little of the grid's own new velocity
+directly (PIC, for stability) -- mantaflow's own 97%/3% default blend, exposed as `flipRatio`.
+
+Demonstrated in `examples/20-flip-dam-break/`: a box of particles in one bottom corner of a closed box,
+released under gravity -- the classic dam-break starting condition, matching `flip01_simple.py`'s own
+first commented-out scene option. `p2gAtomicScale` (the P2G scatter's own fixed-point atomic-encoding
+scale) is a per-instance option, not a shared global default, following this same port's own hard
+lesson from `grid_pressure_solver2.js`'s own `maxPlausiblePressure` regression -- a "safe" atomic-
+reduction magnitude tuned against one scene does not reliably transfer to a differently-scaled one.
+
+**Collider/obstacle interaction** (`options.collider`, added after the initial v1 above) turned out to
+need far less new machinery than it might look like: the grid-side treatment (velocity blocking,
+no-flux + friction projection, pressure's own indirect dependence on already-collider-consistent
+velocity faces) is entirely the pre-existing `createGridBlockedBoundaryConditionSolver2`/
+`grid_pressure_solver2.js` machinery every other solver in this port already uses, just never
+threaded through FLIP's own constructor before now; particle advection's own tunneling-prevention
+clamp reuses `advection_solver2.js`'s existing `collider` option the same way. The one genuinely new
+piece is a particle-side push-out kernel, ported from mantaflow's own `pushOutofObs`/`knPushOutofObs`
+(see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)) -- nothing previously corrected a *particle's*
+own position against a collider, only grid velocity was protected. `sdf_collider2.js` also gained a
+small `invert` option on `addPolygon`/`addPolygons`, needed to model an irregularly-shaped *container*
+(fluid inside, solid outside) rather than a floating obstacle (fluid outside, solid inside), since the
+domain's own `closedDomainBoundaryFlag` only supports a rectangular outer boundary. A genuinely moving
+collider (`createSDFRigidBodyCollider2`) needs one extra per-frame call the caller makes directly --
+`collider.update(dt)` then `boundarySolver.setCollider(collider, ...)` -- since that collider's own
+`velocityAt()` bakes its position into the built kernel graph at construction time; `setCollider()`'s
+existing rebuild-on-every-call mechanism (pre-existing, previously only exercised for occasional
+swaps) is reused as the workaround, verified here for the first time under continuous every-frame
+motion. Demonstrated in three separately-isolated examples, each real-hardware-verified on its own:
+`examples/21-flip-irregular-container/` (a hand-authored wavy-basin polygon, inverted), `examples/
+22-flip-multiple-colliders/` (two fixed pillars unioned into one collider via the pre-existing
+`addPolygons([...])`, no new code needed for this scenario at all), and `examples/23-flip-moving-
+collider/` (a translating + rotating paddle sweeping through a resting pool).
+
+**Density resampling** (`options.resample`, added after the above) closes a gap the v1 scope left open
+on purpose, found not by design review but by watching a real scene run long enough: `examples/20-flip-
+dam-break/`'s own settled puddle visibly lost footprint over time, root-caused (via an isolated from-
+rest control scene showing zero drift, versus the dam-break scene's own occupied-cell count falling
+~17% over 700 frames and still worsening) to particle motion alone gradually clumping into denser and
+denser cells with nothing to push back. mantaflow's own reference solves this with `adjustNumber`
+(kill excess bulk-region particles, reseed under-min cells from the level set, called every frame in its
+own fuller scenes -- see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)); this port has no spawn/kill
+primitive and no level set to reseed from, so it ports the *effect*, not the mechanism: an over-full
+cell's excess particle is **relocated** directly into an under-full cell's own center (picking up the
+local velocity there via the same `faceCenteredValueAtPosition2` helper G2P already uses) instead of
+being destroyed and replaced. The relocation itself is a small atomic-list dance -- one pass counts
+particles per cell, a second pushes every over-threshold particle's own index into a shared donor pool
+(`atomicAdd`'s *return value* used as a claimed slot, the one genuinely new GPU primitive in this whole
+port, isolated-tested on real hardware before being trusted here), a third lets each under-full cell
+claim donors off that pool via the existing `Loop()`/`Break()` bounded-loop idiom already proven in
+`advection_solver2.js`'s own `backTrace`. A recipient cell also needs at least 2 of its 4 orthogonal
+neighbors already at/above `minParticlesPerCell` before it's eligible -- found necessary by testing,
+not designed in up front: without it, isolated single-particle specks far from the fluid body got
+reinforced every frame too, causing the fluid's own apparent footprint to runaway-*grow* instead of
+shrink, the opposite failure. Defaults (`minParticlesPerCell: 4`, `maxParticlesPerCell: 8`) match
+mantaflow's own `minParticles = 2^dim`/`maxParticles = 2x` convention for this port's existing
+`particlesPerCellAxis=2` seeding density; `enabled: true` by default, since every existing FLIP example
+gets this fix automatically through the shared solver. See `grid_flip_solver2.js`'s own header comment
+("Particle resampling") for the full story including what's accepted as out of scope (no jitter on
+relocation; a starved donor pool under-filling a recipient is expected, matching mantaflow's own
+best-effort behavior).
+
+**Velocity damping** (`options.velocityDamping`, added after the above) answers a real user report that
+the simulation itself looked too energetic (described as looking like tumbling lava, not water), not just
+a rendering complaint. Checked mantaflow's own `flip.cpp` directly rather than guessing at a fix: it has no
+velocity-viscosity mechanism at all (its only smoothing kernels post-process a level-set surface this
+port doesn't have), and both of its own reference scenes use `flipRatio=0.97` -- identical to this port's
+own already-matching default -- so the energetic behavior isn't a mismatch against mantaflow's own
+reference, it's inherent to FLIP at a high flip ratio in general (each particle carries its own velocity
+forward with very little per-step numerical dissipation). Confirmed quantitatively before fixing anything:
+a real-hardware run of `examples/20-flip-dam-break/` showed average particle speed oscillating between
+~5-10 units/sec (peaks repeatedly spiking to 27-46) across a full 11-second window with no decay trend at
+all. With no mantaflow mechanism to port, this reuses the *idea* already proven in `velocity_damping2.js`
+(a uniform per-frame decay -- damps every length scale equally, unlike a real Laplacian viscosity which
+spares the largest-scale mode, and needs no stencil or CFL-like constraint) but not that file's own
+implementation, since it decays a grid's own `dataU`/`dataV` and the noise here is carried by particles
+instead -- implemented as one extra multiply inside the existing G2P kernel, right after the `flipRatio`
+blend. `velocityDamping: 0.02` (the same magnitude already validated for an analogous problem in
+`grid_fire_solver2.js`, not picked arbitrarily) was confirmed on real hardware to settle the same
+dam-break scene cleanly and monotonically to near-rest by roughly 8 seconds, instead of oscillating
+indefinitely -- verified across all four FLIP examples, including the continuously-forced moving-collider
+scene, with no new non-finite values or pressure-solve rejections introduced.
+
+The user's own next, direct follow-up question -- confirming this is an artificial, not physically
+derived, mechanism, and asking for it to be safely user-adjustable -- led to two further additions.
+First, a **hard safety clamp inside the solver itself**: `velocityDamping` is unconditionally clamped to
+`[0,1]` right where it's read in the G2P kernel, regardless of what any caller passes in. This isn't
+cosmetic -- a negative value would *amplify* velocity every frame instead of damping it, a genuine
+divergence risk, so the clamp is enforced in the kernel graph itself, not left to caller discipline.
+Confirmed for real on real hardware, not just by inspection: deliberately feeding `-1` in for 90 frames
+produced completely ordinary, bounded behavior (equivalent to the clamp flooring it to 0), and feeding
+`10` in produced a clean, stable all-zero velocity field (equivalent to the clamp ceiling it to 1, "reset
+every frame") -- neither diverged or went non-finite. Second, `options.velocityDamping` already accepted
+a live node in place of a plain number (this port's own "number or node" convention, same as `dt`) --
+`examples/20-flip-dam-break/` now exercises this for real with an actual `<input type="range">` control
+(0 to 0.1, a *useful* exploration window, well inside the solver's own hard `[0,1]` bound) bound to a live
+`array0('float')`, verified on real hardware to change the running simulation's own decay rate immediately
+on interaction, no reload or kernel rebuild needed -- the same already-established live-uniform pattern
+`interaction/pointer.js`/`keyboard.js` and `examples/16-karman-vortex-street/`'s own force controls use.
+
 ## Current state: `noise`
 
 ```js
@@ -440,6 +574,10 @@ Added while root-causing a real-hardware failure in `examples/14-stable-fluids/`
 Fixed by `isDegenerateDot(value, scale)` (exported from `linalg.js` for direct unit-testing, since it's a pure function of two numbers, no GPU needed): a denominator whose magnitude is under half the atomic accumulator's own quantization step (`0.5/scale` -- the smallest gap between two representable readback values) is indistinguishable from an exact 0 no matter what produced it, and dividing by it risks `Infinity`/`NaN` with no way to recover. Both `solve()` functions now check every division site (`alpha`'s `pAp`, `beta`'s `oldRTr`/`oldRZ`) against this floor and break out cleanly -- keeping whatever `x` already holds -- instead of dividing by (near-)zero. This changes nothing for a well-conditioned, non-singular system with O(1)-magnitude values (examples 04/05/07's own confirmed-correct runs stay well above this floor throughout), only guards the genuinely degenerate case.
 
 `grid_pressure_solver2.js` now also exposes `diagnostics.converged` (updated after every `project()` dispatch) and an `atomicScale` pass-through option, specifically because a divergence field's natural magnitude (`examples/14-stable-fluids/` measured `[-0.0245, 0.0485]`) is meaningfully smaller than the O(1) values `DEFAULT_ATOMIC_DOT_SCALE` was tuned against -- a caller can tell a `false` (stopped early, whether via this guard or hitting `maxIterations`) apart from a genuine bug, and retune `atomicScale` for their own problem's actual value range if early stops turn out to be frequent.
+
+### `MAX_PAP_GROWTH_FACTOR` -- a real gap in the per-step guards, found via `examples/23-flip-moving-collider/`
+
+`MAX_BETA_MAGNITUDE`/`MAX_ALPHA_MAGNITUDE` each bound a single iteration's own ratio; neither bounds how far `p` (and therefore `x`) has drifted from a *solve's own* starting scale across several iterations. Found by directly instrumenting `createPreconditionedConjugateGradientSolver`'s own loop (temporarily, removed after use) while root-causing real pressure-solve rejections in that example: rejected frames traced back to `pAp` swinging over the course of a single 100-iteration solve between ordinary magnitudes and values in the tens of millions -- including going *negative*, mathematically impossible for a genuinely SPD operator, and the actual signature of the atomic accumulator's own int32 encoding overflowing (`pAp * atomicScale` crossing +-2.1 billion) partway through the solve, well past where any single-iteration guard would have caught it. Fixed two ways: `MAX_PAP_GROWTH_FACTOR` (1e8) is a new, deliberately generous *ratio* check -- `pAp` compared against `initRTr`, this solve's own starting energy scale, not a shared absolute constant (this project has hit the "one global magnitude constant doesn't transfer across scenes" mistake enough times now, see `maxPlausiblePressure`'s own story below, that a scale-invariant check was worth the extra design step) -- confirmed via an explicit real-hardware A/B comparison on `examples/20-flip-dam-break/` to be safe alongside every existing scene, not just harmless in theory (45/300 rejected frames with the guard active vs. 54/300 with it disabled, on otherwise-identical code). The example's own real fix was tuning `pressure.atomicScale` down to 1 for that scene specifically (see that example's own header comment for the full investigation) -- this guard is a genuine, if smaller, additional safety margin on top, for every scene, not a substitute for correct per-scene tuning.
 
 ### `createMultigridPreconditioner` -- geometric multigrid V-cycle
 

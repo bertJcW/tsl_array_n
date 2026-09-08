@@ -594,6 +594,97 @@ port's own fuel input is a first-class SDF-based scene object (`createSDFFuelSou
 `src/grid/sdf_inflow_outflow2.js`) mirroring `createSDFInflow2`'s own set/add mode semantics -- the
 user's own explicit request, not something mantaflow's source itself dictated.
 
+### mantaflow (Apache License 2.0) — FLIP liquid solver, `src/grid/grid_flip_solver2.js`
+
+Built at the user's own explicit request for FLIP, referencing mantaflow the same way as every other
+ported feature in this project. Read directly from
+mantaflow's `flip.cpp` (`mapPartsToMAC`, `markFluidCells`, `flipVelocityUpdate`,
+`sampleFlagsWithParticles`/`sampleShapeWithParticles`, `extrapolateMACFromWeight`/
+`extrapolateMACSimple`, `pushOutofObs`/`knPushOutofObs`) and its own simplest reference scene,
+`scenes/flip01_simple.py`, both fetched and read directly via the GitHub API (no local checkout in
+this repo; `pushOutofObs` fetched and read a second time, separately, when collider support was added
+after the initial FLIP version -- see below). Same license as this whole
+package (Apache License 2.0), so no second license-text block is needed:
+
+```
+mantaflow (C++, Apache License 2.0, Tobias Pfaff & Nils Thuerey)
+  -> fluxflow (this package, JS/TSL, Apache-2.0, bert wang)
+```
+
+- **Source:** https://github.com/thunil/mantaflow/blob/master/source/plugin/flip.cpp (`mapPartsToMAC`, `markFluidCells`, `flipVelocityUpdate`, `sampleShapeWithParticles`, `extrapolateMACFromWeight`, `extrapolateMACSimple`, `pushOutofObs`/`knPushOutofObs`) and https://github.com/thunil/mantaflow/blob/master/scenes/flip01_simple.py (per-frame stage order)
+- **License:** Apache License 2.0 — full text already reproduced above, under "fluxflow (Python) (Apache License 2.0)"; not repeated a second time.
+
+What carries over directly: the particle-to-grid weighted-scatter concept (each particle contributes to
+its own nearby grid faces, bilinearly weighted, then divided by accumulated weight); the FLIP/PIC blend
+formula itself (`pvel = flipRatio*(pvel+delta) + (1-flipRatio)*newVel`, `delta` = this step's own
+grid-velocity change sampled at the particle's position, `flipRatio` defaulting to mantaflow's own
+0.97); the two-pass extrapolation split (once from P2G's own weight validity before pressure, once from
+live fluid occupancy after); and the overall per-frame stage order from `flip01_simple.py` itself
+(advect particles -> P2G -> snapshot old velocity -> extrapolate -> mark fluid cells -> gravity ->
+pressure -> extrapolate -> FLIP update). What's this port's own adaptation, not a literal port:
+mantaflow's own CPU-side `setInterpolated` scatter becomes a real GPU atomic scatter here (one atomic
+accumulator per grid face, not mantaflow's single-threaded per-particle write) -- the first particle-
+based, and first genuinely scatter-shaped, kernel in this whole port, verified in isolation on real
+WebGPU hardware before being relied on inside the full solver (see `grid_flip_solver2.js`'s own header
+comment for a real gotcha found this way: reading an atomic-marked value back inside a later, same-
+frame kernel needs `atomicLoad()` explicitly, not an ordinary node read, which compiles without error
+but silently reads back 0). Particle advection reuses this port's own existing `advection_solver2.js`
+back-trace machinery (already real-hardware-validated via MacCormack's own forward-tracing step) rather
+than mantaflow's own literal RK4 integrator. `markFluidCells` feeds this port's own pre-existing
+general Dirichlet pressure mechanism (`sdf_inflow_outflow2.js`'s own outflow treatment) instead of a
+liquid-specific pressure code path, since that mechanism already reproduces mantaflow's own "empty
+cell -> neighbor sees pressure 0" ghost boundary exactly.
+
+**Collider interaction**, added in a later round after the initial FLIP version above (irregular
+container/multiple-obstacle/moving-collider scenarios, requested directly by the user): grid-side
+treatment reuses this port's own pre-existing `createGridBlockedBoundaryConditionSolver2`/
+`advection_solver2.js` collider machinery unchanged (already attributed above, under
+`grid_blocked_boundary_condition_solver2.js`/`advection_solver2.js`'s own sections), simply threaded
+through FLIP's own constructor for the first time -- no new port of any mantaflow code for that part.
+`pushOutofObs`/`knPushOutofObs` **is** ported now, though: a particle-side position correction (push a
+particle back out along the collider SDF's own gradient if it's found inside/too close), the one piece
+nothing in this port previously had, since every earlier collider treatment only ever protected grid
+velocity. Same formula, same default `thresh`/`shift` (`0`/`0`) as mantaflow's own Python wrapper, same
+single first-order linear correction per frame (no iteration/re-check, matching upstream exactly, not
+strengthened beyond it). Multiple colliders needed no new port at all --
+`sdf_collider2.js`'s own pre-existing `addPolygons([...])` pointwise-min SDF union (attributed above,
+under "Zero new dependencies for the SDF collider's polygon/SVG rasterization") already covers it.
+Irregular containers needed a small, original (not ported from mantaflow) addition instead: an
+`invert` option on `addPolygon`/`addPolygons`, flipping which side of a rasterized polygon counts as
+solid -- mantaflow's own liquid scenes model containers via level-set/flag-grid domain setup, a
+subsystem this port doesn't have (see the level-set scope cut below); a plain SDF-sign flip was the
+smallest addition that reuses the *existing* collider stack to get the same practical result (fluid
+contained inside an irregular wall) without porting that subsystem.
+
+**Density resampling**, added in a later round after the collider round above, found necessary by the
+user's own real-hardware testing rather than built speculatively: a settled puddle's own visible
+footprint was found to shrink over time in `examples/20-flip-dam-break/`, root-caused (isolated via an
+from-rest control scene showing zero drift) to particle motion alone gradually clumping into denser
+cells with nothing to push back. mantaflow's own `adjustNumber` (`source/plugin/flip.cpp`) and its call
+site in `scenes/flip02_surface.py` (`adjustNumber(minParticles=1*minParticles,
+maxParticles=2*minParticles, phi=phi, radiusFactor=radiusFactor)`, `minParticles = 2^dim`, called every
+frame right after `markFluidCells`) were fetched and read directly to confirm this is exactly the
+mechanism mantaflow's own simplest scene (referenced above) omits and its fuller scenes rely on. Not a
+literal port, though: `adjustNumber` kills excess bulk-region particles and reseeds under-min cells from
+the level set, and this port has neither a spawn/kill primitive (`tsl_array_n`'s own arrays have no
+resize mechanism) nor a level set to reseed from. What's ported instead is the *effect*: an over-full
+cell's excess particle is relocated directly into an under-full cell's own center rather than being
+destroyed and recreated, keeping the same fixed particle budget `adjustNumber` itself would otherwise
+need to grow/shrink. The donor/recipient bookkeeping (an atomic-list "claim a unique slot" pattern) and
+the neighbor-connectivity eligibility gate on recipient cells (added after testing showed indiscriminate
+reinforcement of isolated stray particles) are both this port's own original design, not derived from
+mantaflow's own level-set-based bulk/surface distinction, which this port doesn't have. See
+`src/grid/grid_flip_solver2.js`'s own header comment ("Particle resampling") for the full mechanism.
+
+- **Source:** https://github.com/thunil/mantaflow/blob/master/source/plugin/flip.cpp (`adjustNumber`) and https://github.com/thunil/mantaflow/blob/master/scenes/flip02_surface.py (per-frame call site and parameters)
+- **License:** Apache License 2.0 — full text already reproduced above, under "fluxflow (Python) (Apache License 2.0)"; not repeated a second time.
+
+Scope cuts still standing, stated plainly rather than silently: no free-surface level set (mantaflow's
+own `unionParticleLevelset`/`averagedParticleLevelset` are not ported -- fluid/empty classification
+here is purely live particle occupancy, matching `flip01_simple.py`'s own "very simple flip without
+level set" scope exactly, even now that density resampling above has closed the specific compaction gap
+`adjustNumber` also addresses upstream).
+
 ## Provenance of `src/noise/`
 
 `src/noise/noise.js` is a JavaScript/TSL port of `noise/noise.py` from the

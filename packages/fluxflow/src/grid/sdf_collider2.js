@@ -66,8 +66,19 @@ export function createSDFStaticCollider2( resolutionX, resolutionY, gridSpacingX
 	// Rasterizes a set of polygons ([[x,y],...] vertex arrays) into an SDF
 	// and writes it into grid.data -- corresponds to the source's
 	// addShapelyGeometry computing the distance per-cell on the CPU side and
-	// uploading it in one batch via from_numpy
-	function addPolygons( polygons ) {
+	// uploading it in one batch via from_numpy.
+	// options.invert: default false (every existing caller's behavior,
+	// unchanged) -- a polygon's own interior is normally solid (matching
+	// isInside's own `< 0` convention below). Pass true to flip that: solid
+	// *outside* the polygon(s), fluid-permitted inside -- the way to model
+	// an irregularly-shaped container/basin wall, since the domain's own
+	// closedDomainBoundaryFlag only supports a rectangular outer boundary.
+	// Purely a sign flip of the same rasterized values -- sample/gradient/
+	// isInside and every collider-consuming kernel in
+	// grid_blocked_boundary_condition_solver2.js only ever read whatever
+	// sign grid.data already holds, so none of them need to know this
+	// happened.
+	function addPolygons( polygons, { invert = false } = {} ) {
 
 		const [ nx, ny ] = grid.resolution;
 		const hostSdf = new Float32Array( nx * ny );
@@ -79,7 +90,8 @@ export function createSDFStaticCollider2( resolutionX, resolutionY, gridSpacingX
 			for ( let i = 0; i < nx; i ++ ) {
 
 				const x = originXCpu + i * gridSpacingX;
-				hostSdf[ i + j * nx ] = polygonsSignedDistance( x, y, polygons );
+				const d = polygonsSignedDistance( x, y, polygons );
+				hostSdf[ i + j * nx ] = invert ? - d : d;
 
 			}
 
@@ -89,15 +101,20 @@ export function createSDFStaticCollider2( resolutionX, resolutionY, gridSpacingX
 
 	}
 
-	function addPolygon( points ) {
+	function addPolygon( points, options ) {
 
-		addPolygons( [ points ] );
+		addPolygons( [ points ], options );
 
 	}
 
+	// Shares one options object with both calls below -- parseSvgToPolygons
+	// only destructures samples/scale/offsetX/offsetY, addPolygons only
+	// destructures invert, so passing the same object to both is safe (each
+	// ignores the keys meant for the other). Same invert support as
+	// addPolygon/addPolygons above, e.g. addSvg(svg, { invert: true }).
 	function addSvg( svgString, options ) {
 
-		addPolygons( parseSvgToPolygons( svgString, options ) );
+		addPolygons( parseSvgToPolygons( svgString, options ), options );
 
 	}
 
