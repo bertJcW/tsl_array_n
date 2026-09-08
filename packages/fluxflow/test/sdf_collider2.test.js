@@ -59,6 +59,15 @@ describe( 'SDFStaticCollider2', () => {
 
 	} );
 
+	it( 'addPolygon/addPolygons accept an invert option without throwing', () => {
+
+		const collider = createSDFStaticCollider2( 8, 8, 1, 1, -4, -4 );
+
+		expect( () => collider.addPolygon( square, { invert: true } ) ).not.toThrow();
+		expect( () => collider.addPolygons( [ square ], { invert: true } ) ).not.toThrow();
+
+	} );
+
 } );
 
 describe( 'SDFRigidBodyCollider2', () => {

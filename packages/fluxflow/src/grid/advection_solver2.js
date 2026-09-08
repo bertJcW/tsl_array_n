@@ -191,7 +191,12 @@ export function createSemiLagrangianAdvectionSolver2( { velocityGrid, collider, 
 	// direction: see backTrace's own header comment -- default 1 (trace
 	// backward, this file's original and only behavior for order 1).
 	// MacCormack's own second step passes -1 (trace forward, the same
-	// duration) to estimate the first step's own error.
+	// duration) to estimate the first step's own error -- already exercised
+	// on real hardware via that path. grid_flip_solver2.js's own particle
+	// advection reuses this same direction=-1 call directly (a particle's
+	// own arbitrary position is just another startPos, no different from a
+	// grid cell's), which is why this is returned below alongside the two
+	// field-advection functions, not left as a construction-only detail.
 	function trace( startPos, direction = 1 ) {
 
 		return backTrace( sampleVelocity, sampleBoundary, startPos, dtNode, h, maxSubsteps, direction );
@@ -525,6 +530,6 @@ export function createSemiLagrangianAdvectionSolver2( { velocityGrid, collider, 
 
 	}
 
-	return { advectFaceCentered2, advectScalar2 };
+	return { advectFaceCentered2, advectScalar2, trace };
 
 }

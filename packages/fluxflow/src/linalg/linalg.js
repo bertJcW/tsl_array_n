@@ -151,6 +151,46 @@ const MAX_BETA_MAGNITUDE = 10;
 // own comment) rather than rely on this bound being loose enough.
 const MAX_ALPHA_MAGNITUDE = 1e6;
 
+// *** A real gap in the two guards above, found via real-hardware
+// investigation of examples/23-flip-moving-collider/'s own opening-window
+// pressure rejections (a paddle's first-contact impact on a resting pool --
+// a genuinely harder linear system for this port's own approximate
+// multigrid preconditioner than any previously-tuned scene) ***
+//
+// MAX_BETA_MAGNITUDE and MAX_ALPHA_MAGNITUDE each bound a single
+// iteration's own ratio -- neither bounds how far p (and therefore x) has
+// drifted from this *solve's own* starting scale across *several*
+// iterations. Confirmed directly, with grid_pressure_solver2.js's own
+// temporary diagnostic instrumentation reading pressure.data before the
+// caller-level circuit breaker's restorePressure() ever runs: real
+// rejected frames came back with |pressure| in the tens of billions to
+// several *trillion* -- not a value merely over maxPlausiblePressure, a
+// value with no physical meaning at all -- while every single beta and
+// alpha along the way stayed individually under its own guard (neither
+// guard ever fired, confirmed by also logging converged/rejected together
+// with those astronomical magnitudes). The mechanism: several consecutive
+// betas each moderately above 1 (but each individually well under
+// MAX_BETA_MAGNITUDE's own 10x margin) compound *geometrically* across
+// iterations -- p grows each step, so pAp (already computed every
+// iteration, needed for alpha) grows right along with it, and a
+// individually-reasonable alpha applied to an already-enormous p still
+// corrupts x by an enormous amount. Fixed the same way this file's own
+// existing guards are already framed -- not a new absolute-magnitude
+// constant (this project has hit that exact mistake repeatedly, see
+// grid_pressure_solver2.js's own maxPlausiblePressure header comment; a
+// hardcoded absolute bound would need re-tuning per scene the same way),
+// but a *ratio* relative to this solve's own starting energy scale
+// (initRTr, already computed before the loop starts) -- scale-invariant by
+// construction, the same reason MAX_BETA_MAGNITUDE itself needs no
+// per-scene tuning. MAX_PAP_GROWTH_FACTOR is deliberately generous (pAp
+// legitimately fluctuates within a converging solve, it does not need to
+// shrink monotonically) -- chosen so many orders of magnitude of headroom
+// remain below it for any legitimately converging solve, while still
+// catching runaway growth (observed: many orders of magnitude within just
+// a handful of iterations) long before it reaches the astronomical values
+// actually observed.
+const MAX_PAP_GROWTH_FACTOR = 1e8;
+
 function shapesEqual( a, b ) {
 
 	return a.length === b.length && a.every( ( v, i ) => v === b[ i ] );
@@ -589,6 +629,13 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 		updateP(); // p0 = z0 (p was 0)
 
+		// This solve's own starting energy scale -- see MAX_PAP_GROWTH_FACTOR's
+		// own comment. The tiny floor is purely defensive (this line only runs
+		// when initRTr already passed the tol check below, so it's never
+		// actually near 0 in practice) -- avoids a literal 0 baseline making
+		// the very first legitimate nonzero pAp look like infinite growth.
+		const pApBaseline = Math.max( Math.abs( initRTr ), 1e-12 );
+
 		let forceResidualRecompute = false;
 
 		if ( Math.sqrt( Math.abs( initRTr ) ) >= tol ) {
@@ -610,6 +657,16 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 				// it, Ap collapses toward 0 everywhere -- exactly the
 				// condition this check catches.
 				if ( isDegenerateDot( pAp, atomicScale ) ) break;
+
+				// p has drifted implausibly far from this solve's own starting
+				// scale across the iterations so far -- see MAX_PAP_GROWTH_
+				// FACTOR's own comment for the real, confirmed-on-real-hardware
+				// failure this catches (several individually-reasonable betas
+				// compounding p geometrically over several iterations, each
+				// one individually passing every other guard here). Same
+				// "break, don't corrupt x further" response as every other
+				// guard in this loop.
+				if ( Math.abs( pAp ) > pApBaseline * MAX_PAP_GROWTH_FACTOR ) break;
 
 				const alphaValue = oldRZ / pAp;
 
