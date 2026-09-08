@@ -557,6 +557,43 @@ discrete flag lookup -- the same substitution `grid_outflow_solver2.js`'s own bu
 already established. `bilinearCoordsAndWeights2` (`grid_math.js`, already exported, already used
 internally elsewhere) is reused directly for the clamp step's own 4-neighbor gather, not reimplemented.
 
+### mantaflow (Apache License 2.0) — fuel/combustion, `src/grid/grid_fire_solver2.js`
+
+Found while comparing this port's own smoke/fire solver against mantaflow's, same as vorticity
+confinement/MacCormack above (`grid_smoke_solver2.js`'s own header comment had already noted no
+fire/combustion reference existed anywhere in this port's jet/mantaflow sources -- this closes that
+gap, at the user's own explicit later request for a real fuel-burning solver). Read directly from
+mantaflow's `fire.cpp` (`KnProcessBurn`/`processBurn`, `KnUpdateFlame`/`updateFlame`), fetched and read
+directly via the GitHub API (no local checkout in this repo). Same license as this whole package
+(Apache License 2.0), so no second license-text block is needed:
+
+```
+mantaflow (C++, Apache License 2.0, Tobias Pfaff & Nils Thuerey)
+  -> fluxflow (this package, JS/TSL, Apache-2.0, bert wang)
+```
+
+- **Source:** https://github.com/thunil/mantaflow/blob/master/source/plugin/fire.cpp (`KnProcessBurn`, `processBurn`, `KnUpdateFlame`, `updateFlame`)
+- **License:** Apache License 2.0 — full text already reproduced above, under "fluxflow (Python) (Apache License 2.0)"; not repeated a second time.
+
+`createGridFireSolver2`'s own burn step is a direct port of `KnProcessBurn`'s per-cell math: fuel burns
+down at a constant `burningRate` (clamped to >=0); `react` (this batch of fuel's own remaining reaction
+potential) scales down in exact proportion to how much of the fuel present that step is now consumed,
+and `flame = sqrt(react)`; how much fuel was just consumed drives both smoke emission (added to
+density, more so as the fuel supply nears exhaustion) and, wherever `flame>0`, this cell's own
+temperature is set to a lerp between `ignitionTemp` and `maxTemp` by `flame` -- left untouched (not
+reset) wherever no reaction is happening this step, exactly matching fire.cpp's own `if (heat && flame)`
+guard. `burningRate`/`flameSmoke`/`ignitionTemp`/`maxTemp` default to mantaflow's own literal defaults
+(0.75, 1.0, 1.25, 1.75). What's this port's own adaptation, not a literal port: mantaflow's optional
+colored-smoke mixing (`red`/`green`/`blue` grids) is not carried over -- no colored-smoke concept exists
+anywhere else in this port, so adding one just for this file would be new, unrequested scope; `flame`
+is likewise not maintained as its own ping-ponged GPU field the way `KnUpdateFlame` treats it as a
+separate grid, since it's a pure function of `react` only ever needed for visualization, cheaper
+recomputed once at render time from an already-read-back `react` array. Also unlike fire.cpp itself
+(which assumes a caller-managed `FlagGrid`/scene script for where fuel and react get seeded), this
+port's own fuel input is a first-class SDF-based scene object (`createSDFFuelSource2`,
+`src/grid/sdf_inflow_outflow2.js`) mirroring `createSDFInflow2`'s own set/add mode semantics -- the
+user's own explicit request, not something mantaflow's source itself dictated.
+
 ## Provenance of `src/noise/`
 
 `src/noise/noise.js` is a JavaScript/TSL port of `noise/noise.py` from the

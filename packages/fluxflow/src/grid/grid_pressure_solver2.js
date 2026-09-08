@@ -75,10 +75,10 @@ import { createPreconditionedConjugateGradientSolver } from '../linalg/linalg.js
 
 // Last-resort bound on a single pressure cell's own magnitude -- see
 // dispatch()'s own use, below, for the full circuit-breaker this backs.
-// Astronomically larger than any physically meaningful pressure this port
-// ever produces (every healthy scene tested stayed under ~1) -- generous
-// on purpose, this only needs to catch a cell that's actually run away,
-// not to bound normal physical variation.
+// Default (1e6) is astronomically larger than any physically meaningful
+// pressure this port has produced in every scene checked so far --
+// generous on purpose, this only needs to catch a cell that's actually
+// run away, not bound normal physical variation.
 //
 // *** This check was tried first against cg.state.residualSquared (a
 // scalar already computed inside solve() via linalg.js's own atomic-int
@@ -97,7 +97,35 @@ import { createPreconditionedConjugateGradientSolver } from '../linalg/linalg.js
 // notEqual-self NaN test, the standard WGSL idiom since core WGSL has no
 // isnan()/isinf(), plus this magnitude bound for Infinity and any
 // still-finite runaway) on the actual field is reliable. ***
-const MAX_PLAUSIBLE_PRESSURE = 1e6;
+//
+// *** Made a per-instance option, NOT tightened as a shared global
+// default, after a real near-miss found via real-hardware regression
+// testing -- worth recording so this isn't retried ***
+//
+// A real cascade found in examples/19-fuel-fire/ (see that file's own
+// header comment for the full story) prompted trying a much tighter
+// hardcoded default (50) here, reasoning that "every healthy scene tested
+// stayed under ~1" (this comment's own original wording) meant 50 was
+// still generous. That reasoning was directly falsified by testing
+// examples/16-karman-vortex-street/ with the tightened value: its own
+// pressure legitimately reaches 500+ (a much stronger whole-domain
+// continuous force than example 19's own gentler buoyancy), so it got
+// rejected on literally every single frame, silently reverting pressure
+// to its initial zero snapshot forever and leaving velocity essentially
+// frozen -- a real, self-inflicted regression, not a false alarm. This
+// mirrors linalg.js's own MAX_ALPHA_MAGNITUDE comment exactly (alpha's
+// own healthy magnitude "genuinely depends on a caller's specific problem
+// scale... there's no single universal healthy range") -- pressure turns
+// out to share that same property, unlike velocity (see
+// grid_blocked_boundary_condition_solver2.js's own MAX_VELOCITY_COMPONENT,
+// confirmed empirically to stay consistent, ~28 peak, across every scene
+// checked so far, so tightening *that* one globally was safe). The actual
+// fix: this bound is now `options.maxPlausiblePressure` on
+// createGridPressureSolver2, defaulting back to the original safe 1e6 for
+// every scene that doesn't explicitly opt into something tighter --
+// examples/19-fuel-fire/ passes its own real, verified-tight value (50)
+// explicitly; every other scene keeps the safe default unchanged.
+const DEFAULT_MAX_PLAUSIBLE_PRESSURE = 1e6;
 
 // options.resolution/gridSpacing/origin: plain-number arrays, matching
 // multigrid.js's own convention -- NOT grid_data2.js's node-based
@@ -137,16 +165,23 @@ const MAX_PLAUSIBLE_PRESSURE = 1e6;
 // `false` here can mean (not necessarily a bug on its own; see
 // linalg.js's isDegenerateDot). diagnostics.rejected: boolean, true
 // whenever this project() call's own circuit breaker discarded a
-// pressure update that looked implausible (see dispatch()'s own
-// MAX_PLAUSIBLE_PRESSURE comment) -- pressure keeps its last known-good
-// value on such a frame instead.
+// pressure update that looked implausible (see dispatch()'s own use of
+// maxPlausiblePressure) -- pressure keeps its last known-good value on
+// such a frame instead.
+// options.maxPlausiblePressure: see DEFAULT_MAX_PLAUSIBLE_PRESSURE's own
+// comment for why this is a per-instance option, not a shared constant --
+// a scene with an unusually strong force (or otherwise a genuinely larger
+// natural pressure scale) should pass its own real, verified value here
+// rather than rely on the generous default being tight enough to catch a
+// runaway early.
 export function createGridPressureSolver2( {
 	resolution, gridSpacing, origin = [ 0, 0 ],
 	dirichlet,
 	multigrid = {},
 	tolerance = 1e-5,
 	maxIterations = 100,
-	atomicScale
+	atomicScale,
+	maxPlausiblePressure = DEFAULT_MAX_PLAUSIBLE_PRESSURE
 } = {} ) {
 
 	const [ resolutionX, resolutionY ] = resolution;
@@ -193,7 +228,7 @@ export function createGridPressureSolver2( {
 	// operator's null space, or the atomic dot product's fixed-point
 	// quantization rounded a denominator down to 0 -- both stop the iteration
 	// safely rather than risk Infinity/NaN, but neither is "true" convergence).
-	// rejected: see dispatch()'s own use of MAX_PLAUSIBLE_PRESSURE below --
+	// rejected: see dispatch()'s own use of maxPlausiblePressure below --
 	// true whenever this project() call's own solve() looked bad enough
 	// that its pressure update was discarded rather than trusted.
 	const diagnostics = { converged: null, rejected: false };
@@ -210,11 +245,11 @@ export function createGridPressureSolver2( {
 	const snapshotPressure = createCopyKernel2( pressureGrid.data, pressureSnapshot, shape );
 	const restorePressure = createCopyKernel2( pressureSnapshot, pressureGrid.data, shape );
 
-	// Reliable (see MAX_PLAUSIBLE_PRESSURE's own comment on why a scalar
+	// Reliable (see maxPlausiblePressure's own comment on why a scalar
 	// derived from linalg.js's atomic-int reduction isn't) bad-cell
 	// detector: atomically counts cells that are either NaN (the standard
 	// `x != x` WGSL idiom, since core WGSL dropped isnan()/isinf()) or
-	// past MAX_PLAUSIBLE_PRESSURE in magnitude (catches +/-Infinity too,
+	// past maxPlausiblePressure in magnitude (catches +/-Infinity too,
 	// since Infinity compares greater than any finite bound). A plain
 	// atomicAdd of 0/1 flags, not a value-weighted reduction like
 	// linalg.js's own dot product -- there's no float-to-fixed-point
@@ -226,7 +261,7 @@ export function createGridPressureSolver2( {
 	const countBadPressureCells = tsl_array_n.kernel( shape, ( i, j ) => {
 
 		const value = pressureGrid.data( i, j );
-		const isBad = value.notEqual( value ).or( abs( value ).greaterThan( MAX_PLAUSIBLE_PRESSURE ) );
+		const isBad = value.notEqual( value ).or( abs( value ).greaterThan( maxPlausiblePressure ) );
 
 		atomicAdd( badCountAccum(), isBad.select( int( 1 ), int( 0 ) ) );
 

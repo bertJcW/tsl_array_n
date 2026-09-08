@@ -54,6 +54,14 @@
 // at/overlapping the actual domain boundary (there's no cells beyond the
 // array for fluid to go to otherwise) -- but can now be an arbitrary-
 // shaped *portion* of a wall, not "the whole wall or nothing".
+//
+// createSDFFuelSource2 (below) is a third sibling in this same family,
+// added later for grid_fire_solver2.js's own fuel input -- same SDF
+// machinery and set/add mode semantics as createSDFInflow2, just injecting
+// a scalar (fuel amount) instead of a vector (velocity). Kept in this file
+// rather than a new one: it shares essentially all of its structure with
+// createSDFInflow2, and the user's own request specifically suggested
+// reusing the inflow mechanism for this.
 
 import { vec2, float } from 'three/tsl';
 import { createSDFStaticCollider2 } from './sdf_collider2.js';
@@ -110,6 +118,28 @@ export function createSDFInflow2( resolutionX, resolutionY, gridSpacingX, gridSp
 export function createSDFOutflow2( resolutionX, resolutionY, gridSpacingX, gridSpacingY, originX, originY ) {
 
 	return createSDFStaticCollider2( resolutionX, resolutionY, gridSpacingX, gridSpacingY, originX, originY );
+
+}
+
+// A third sibling in this file's own SDF-scene-object family, added at the
+// user's own explicit request for grid_fire_solver2.js's fuel input: same
+// SDF machinery as createSDFInflow2 above, just injecting a *scalar* fuel
+// amount instead of a velocity *vector*. options.fuel: a plain number or a
+// live node (same "number or node" convention as velocity elsewhere in
+// this port) -- default 1, matching mantaflow's own scene-level convention
+// of injecting fuel at full strength. options.mode: 'set' (hard override,
+// default) or 'add' (superimpose onto whatever fuel is already there),
+// exactly mirroring createSDFInflow2's own mode semantics. Both `fuel` and
+// `mode` are plain mutable properties (same spirit as inflow's own
+// velocity/mode) -- see createSDFInflow2's own comment above for the
+// "baked in at kernel-build time" caveat this shares.
+export function createSDFFuelSource2( resolutionX, resolutionY, gridSpacingX, gridSpacingY, originX, originY, options = {} ) {
+
+	const sdf = createSDFStaticCollider2( resolutionX, resolutionY, gridSpacingX, gridSpacingY, originX, originY );
+	const { fuel = 1, mode = 'set' } = options;
+	const fuelNode = typeof fuel === 'number' ? float( fuel ) : fuel;
+
+	return { ...sdf, fuel: fuelNode, mode };
 
 }
 
