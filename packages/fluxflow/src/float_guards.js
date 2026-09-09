@@ -44,8 +44,12 @@
 //
 // *** What this was costing ***
 //
-// grid_pressure_solver2.js snapshots pressure before every solve and reverts
-// if the result looks implausible. With the NaN half of that check inert,
+// grid_pressure_solver2.js keeps a snapshot of the last pressure field that
+// passed its own bad-cell check and reverts to it when a solve's result
+// looks implausible. (At the time of this bug the snapshot was taken
+// *before* each solve instead, which turned out to be its own separate
+// defect -- see that file's own pressureSnapshot comment.) With the NaN
+// half of that check inert,
 // a solve that returned NaN across the whole fluid region was accepted as
 // good, the velocity correction multiplied it through the grid, the
 // boundary clamp turned the NaN into its own bound (clamp(NaN, -100, 100)

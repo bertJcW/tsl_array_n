@@ -450,7 +450,16 @@ try {
 
 	}
 
+	// Set by the test hook at the bottom of this file. Checked here rather
+	// than by cancelling the animation frame because the loop is async: a
+	// step already in flight has to be allowed to finish, and the next one
+	// simply never starts. See the hook's own comment for why an automated
+	// run has to be able to stop this loop.
+	let driverPaused = false;
+
 	async function animate() {
+
+		if ( driverPaused ) return;
 
 		updatePerf();
 		await flip.onAdvanceTimeStep();
@@ -532,9 +541,34 @@ try {
 	// throttles it to one frame every several seconds, so a several-hundred-
 	// frame stability check is impossible to script that way. Stepping the
 	// solver from a plain `await` loop is not throttled at all, and skipping
-	// the draw makes it faster still. Read-only from the page's point of
-	// view -- nothing here changes what the scene does on its own.
-	window.__fluxflowProbe = { flip, stats, seedScene, velocityGrid };
+	// the draw makes it faster still.
+	//
+	// `pause()` is not optional for such a run, and getting this wrong
+	// invalidated a whole session's measurements once: the animation loop
+	// above keeps running while a driver loop steps the solver, so both call
+	// onAdvanceTimeStep() concurrently, their GPU dispatches interleave, and
+	// the "instability" being measured is partly the harness. Await the
+	// promise it returns before driving anything -- it resolves once any
+	// step already in flight has finished.
+	window.__fluxflowProbe = {
+		flip, stats, seedScene, velocityGrid,
+		pause: async () => {
+
+			driverPaused = true;
+			// One frame's grace for an in-flight async step to settle. The
+			// step itself is awaited inside animate(), so once a frame's
+			// worth of time has passed with the flag set, nothing else is
+			// touching the solver.
+			await new Promise( ( resolve ) => setTimeout( resolve, 100 ) );
+
+		},
+		resume: () => {
+
+			driverPaused = false;
+			requestAnimationFrame( animate );
+
+		}
+	};
 
 	requestAnimationFrame( animate );
 
