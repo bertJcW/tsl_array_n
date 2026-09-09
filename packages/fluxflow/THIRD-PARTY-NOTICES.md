@@ -1049,6 +1049,61 @@ levels constant-coefficient, exactly as the pre-existing `dirichletMask`
 already does. That tradeoff, and what it costs, is documented in that file's
 own decision 4.
 
+## Design and architecture references (not a code dependency)
+
+Sources consulted for **architectural information only** — which stages a solver has,
+in what order, what they are called, and which of several published approaches industry
+actually chose. None of the code in this package is derived from them, and nothing is
+quoted from them verbatim.
+
+The distinction matters and is applied deliberately: copyright protects expression, not
+ideas, so an algorithm or a pipeline structure is free to reimplement, while source code
+and documentation *text* are not. Where a source is proprietary, the rule followed here
+is stricter than the legal minimum — architectural facts are used and restated in this
+project's own words, and nothing else is taken.
+
+### SideFX Houdini (proprietary — architecture only, no code, no quoted text)
+
+- **Homepage:** https://www.sidefx.com/
+- **Relationship:** not a dependency of any kind. Not bundled, not linked, not required
+  to build or run this package. Consulted as published documentation.
+- **License:** proprietary. Houdini's node documentation and its HDA internals are
+  SideFX's copyrighted work, and being able to read or inspect them confers no licence
+  to copy them.
+
+What was taken, and where it shows up:
+
+1. **Bubbles are done as a constraint, not as a simulated phase.** Houdini's FLIP
+   Solver has an *Enforce Air Incompressibility* option whose documented behaviour —
+   it does not solve velocity in the air, it only stops the liquid compressing or
+   expanding an enclosed air *region* — identifies it as the Constraint Bubbles method
+   (Goldade & Batty) rather than a MultiFLIP-style two-phase solve. This redirected a
+   whole line of investigation; it is recorded in
+   `docs/two-phase-bubbles-research.md`, and is not implemented.
+2. **Dye and multi-fluid colour are a per-particle attribute, not a solver.** Houdini
+   carries colour as a `Cd` attribute on the FLIP particles. This confirmed the design
+   used in `src/grid/grid_two_phase_flip_solver2.js`, where the phase/concentration
+   travels on the particle rather than being advected as a grid field — particles
+   transport a carried quantity with no numerical diffusion, which is exactly what a
+   sharp dye filament needs.
+3. **Particle reseeding washes a carried attribute out.** A recurring, practical
+   finding in SideFX's own user documentation and forums is that particle narrow-band
+   and reseeding dilute a carried colour attribute into uniform mush under shearing,
+   and that users disable them to keep a sharp boundary. This is a direct warning about
+   this port's own particle resampling, which relocates particles and would smear a
+   carried concentration the same way; it is called out in
+   `grid_two_phase_flip_solver2.js`'s own comments where the resample pass is defined.
+4. **The projection is variational.** The existence of a
+   `gasprojectnondivergentvariational` microsolver alongside the plain and multigrid
+   variants indicates the variational/fraction-weighted formulation (Batty et al. 2007)
+   is the production-standard choice, which corroborates the direction
+   `src/linalg/multigrid.js`'s `faceWeights` support took. No parameter, formula, or
+   code was taken from it.
+
+Explicitly NOT used, anywhere: HDK source or headers; any verbatim text from SideFX
+documentation (all of the above is paraphrased for this reason); any node network
+transliterated node-by-node into code; and anything obtained by decompilation.
+
 ## Design inspiration (not a code dependency)
 
 ### Taichi Lang
