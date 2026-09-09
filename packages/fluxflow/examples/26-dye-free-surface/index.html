@@ -24,6 +24,7 @@
 	<div id="status">initializing…</div>
 	<div id="perf">fps: --</div>
 	<div id="controls">
+		<label>amber density <input type="range" id="densityRatio" min="0.80" max="1.40" step="0.01" value="1.00" /> <span class="val" id="densityRatioValue">1.00</span></label>
 		<label>mixing <input type="range" id="mixing" min="0" max="0.08" step="0.001" value="0" /> <span class="val" id="mixingValue">0.000</span></label>
 		<label>fade <input type="range" id="fade" min="0" max="0.02" step="0.0005" value="0" /> <span class="val" id="fadeValue">0.000</span></label>
 		<button id="reset">reset</button>
@@ -36,7 +37,10 @@
 	a dye blob into filaments. Two dyed columns collapse into each other; the dye is carried on the
 	particles with <strong>no numerical diffusion at all</strong>, so it only blends as much as
 	<strong>mixing</strong> asks it to. <strong>fade</strong> makes it disappear instead. Both start at
-	zero, so what you see first is pure transport.</p>
+	zero, so what you see first is pure transport. <strong>amber density</strong> is a real physical dial:
+	at 1.00 both liquids weigh the same and the projection reduces exactly to the constant-density one
+	(the control case); move it away and the heavier liquid works its way underneath the lighter one —
+	stratification driven purely by the variable-density projection, with no buoyancy force anywhere.</p>
 	<script type="module" src="./main.js"></script>
 </body>
 </html>

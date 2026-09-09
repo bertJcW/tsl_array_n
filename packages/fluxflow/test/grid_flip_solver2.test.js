@@ -255,3 +255,96 @@ describe( 'createGridFlipSolver2 -- carried concentration (dye)', () => {
 	} );
 
 } );
+
+describe( 'createGridFlipSolver2 -- variable-density coupling', () => {
+
+	const makeGrid = ( nx = 8, ny = 8 ) => createFaceCenteredGrid2( nx, ny, 1, 1, 0, 0 );
+
+	it( 'is off unless BOTH densities are named, and then exposes a density field', () => {
+
+		const passive = createGridFlipSolver2( {
+			velocityGrid: makeGrid(), maxParticles: 16, carryConcentration: true
+		} );
+		expect( passive.cellDensity ).toBe( null );
+
+		const coupled = createGridFlipSolver2( {
+			velocityGrid: makeGrid( 5, 7 ), maxParticles: 16, carryConcentration: true,
+			ambientDensity: 1, componentDensity: 1.2
+		} );
+		expect( coupled.cellDensity.shape ).toEqual( [ 5, 7 ] );
+
+	} );
+
+	it( 'naming only one density leaves the coupling off rather than half-configured', () => {
+
+		for ( const partial of [ { ambientDensity: 1 }, { componentDensity: 1.2 } ] ) {
+
+			const flip = createGridFlipSolver2( {
+				velocityGrid: makeGrid(), maxParticles: 16, carryConcentration: true, ...partial
+			} );
+			expect( flip.cellDensity, JSON.stringify( partial ) ).toBe( null );
+
+		}
+
+	} );
+
+	it( 'requires carryConcentration -- there is no concentration to build a density from otherwise', () => {
+
+		expect( () => createGridFlipSolver2( {
+			velocityGrid: makeGrid(), maxParticles: 16,
+			ambientDensity: 1, componentDensity: 1.2
+		} ) ).toThrow( /carryConcentration/ );
+
+	} );
+
+	it( 'rejects a non-positive numeric density on either side', () => {
+
+		expect( () => createGridFlipSolver2( {
+			velocityGrid: makeGrid(), maxParticles: 16, carryConcentration: true,
+			ambientDensity: 0, componentDensity: 1
+		} ) ).toThrow( /ambientDensity/ );
+
+		expect( () => createGridFlipSolver2( {
+			velocityGrid: makeGrid(), maxParticles: 16, carryConcentration: true,
+			ambientDensity: 1, componentDensity: - 1
+		} ) ).toThrow( /componentDensity/ );
+
+	} );
+
+	it( 'imposes no ordering -- the carried component may be lighter or heavier', () => {
+
+		for ( const componentDensity of [ 0.8, 1, 1.4 ] ) {
+
+			expect( () => createGridFlipSolver2( {
+				velocityGrid: makeGrid(), maxParticles: 16, carryConcentration: true,
+				ambientDensity: 1, componentDensity
+			} ), `componentDensity=${ componentDensity }` ).not.toThrow();
+
+		}
+
+	} );
+
+	it( 'accepts a live node for either density', () => {
+
+		const componentDensity = tsl_array_n.array0( 'float' );
+		componentDensity.fromArray( new Float32Array( [ 1.1 ] ) );
+
+		expect( () => createGridFlipSolver2( {
+			velocityGrid: makeGrid(), maxParticles: 16, carryConcentration: true,
+			ambientDensity: 1, componentDensity: componentDensity()
+		} ) ).not.toThrow();
+
+	} );
+
+	it( 'builds the weighted operator on a non-square grid', () => {
+
+		// Indirect check that beta uses MAC face layout: a mismatched shape would
+		// make createGridPressureSolver2 throw while building the operator.
+		expect( () => createGridFlipSolver2( {
+			velocityGrid: makeGrid( 6, 10 ), maxParticles: 16, carryConcentration: true,
+			ambientDensity: 1, componentDensity: 1.2
+		} ) ).not.toThrow();
+
+	} );
+
+} );

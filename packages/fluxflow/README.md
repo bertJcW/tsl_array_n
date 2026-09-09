@@ -554,10 +554,27 @@ completely full of incompressible liquid can only circulate -- there is no free 
 A dye scene built there is stable, correct, and visually almost inert, which was demonstrated rather than
 assumed (`examples/25-dye-injection/` is kept precisely as that honest comparison, and its header records
 the measurements and two wrong turns). A free surface removes the constraint: liquid that can slosh,
-break and fold is what stretches a dye blob into filaments. The trade is that this solver has no
-variable-density coupling, so the dye is a passive tracer -- carried and drawn, but exerting nothing. Dye
-whose weight drives the flow is the two-phase solver's job. The two scenes together are the honest
-statement of that trade-off rather than either being "the" answer.
+break and fold is what stretches a dye blob into filaments. It also takes an optional
+`ambientDensity`/`componentDensity` pair, so the carried concentration can drive a variable-density
+projection here exactly as it does in the two-phase solver -- a heavier dye sinks, a lighter one rises,
+with no buoyancy force anywhere. Off unless both are named, and when off `faceWeights` is not passed at
+all, so the pressure solver emits the kernel graph it always did.
+
+The one thing that genuinely differs from the two-phase solver, and the reason this needed new code
+rather than a copy: **air has no mass.** That solver is all-fluid, so a face density is just the average
+of its two neighbours. Here a cell with no particles is air held at `p = 0` with no density at all, so
+the face density is one-sided at the surface -- both neighbours fluid averages them, exactly one fluid
+uses that one alone. Averaging in an empty cell's nominal density would weight the free surface by a
+fluid that isn't there.
+
+Verified by A/B on real WebGPU rather than by inspection, using a Rayleigh-Taylor layout
+(`?layout=layered`): identical scene, identical interface perturbation, only the density differing. At
+equal densities the mean-height gap between the two liquids is flat over 300 frames (22.42 → 22.40); at a
+1.35 ratio it falls monotonically and *accelerating* (22.42 → 22.19, deltas 0.00, -0.03, -0.04, -0.07,
+-0.09), which is the exponential growth Rayleigh-Taylor is supposed to show. Two false starts are
+recorded in that example's header, both the same mistake -- a test that could not fail for the reason
+being tested: the default side-by-side layout is symmetric and shows nothing, and a perfectly flat
+interface is an unstable *equilibrium* that sits still regardless of which liquid is heavier.
 
 One non-obvious interaction, taken from Houdini's users rather than discovered here: particle resampling
 relocates particles, and a relocated particle carries its concentration to its new home. SideFX's own

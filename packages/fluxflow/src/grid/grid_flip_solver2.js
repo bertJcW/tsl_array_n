@@ -394,6 +394,12 @@ const MAX_PARTICLE_VELOCITY = 500;
 // of int32. Matches grid_two_phase_flip_solver2.js's own value.
 const DEFAULT_CONCENTRATION_ATOMIC_SCALE = 4096;
 
+// Absolute floor on either component's density, so a zero or negative value
+// reaching the kernel cannot produce an infinite or sign-flipped beta. Densities
+// in this port's scenes are O(1), so it never binds in practice. Matches
+// grid_two_phase_flip_solver2.js.
+const MIN_DENSITY = 1e-4;
+
 function numberOrNode( value ) {
 
 	return typeof value === 'number' ? float( value ) : value;
@@ -564,7 +570,13 @@ export function createGridFlipSolver2( {
 	carryConcentration = false,
 	mixing = 0,
 	fade = 0,
-	concentrationAtomicScale = DEFAULT_CONCENTRATION_ATOMIC_SCALE
+	concentrationAtomicScale = DEFAULT_CONCENTRATION_ATOMIC_SCALE,
+	// Optional variable-density coupling: the density at concentration 0 and at
+	// concentration 1. Give neither and the carried concentration is a purely
+	// passive tracer (the default, and free). Give both and the dye's own weight
+	// drives the flow. See "Variable-density coupling" below.
+	ambientDensity,
+	componentDensity
 } = {} ) {
 
 	if ( ! velocityGrid ) {
@@ -662,8 +674,125 @@ export function createGridFlipSolver2( {
 
 	}
 
+	// ---------------------------------------------------------------- variable density
+	//
+	// Optional, and off unless a caller names both densities. When off, no field
+	// is allocated, no kernel is built, and `faceWeights` is not passed at all --
+	// so the pressure solver emits exactly the kernel graph it always did and
+	// every pre-existing scene is bit-identical.
+	//
+	// The formulation is the same one grid_two_phase_flip_solver2.js documents at
+	// length: solve `div(beta grad(p)) = div(u*)` and correct with
+	// `u = u* - beta grad(p)`, with `beta = referenceDensity / rho` stored per
+	// FACE (which is what keeps the operator symmetric, since two adjacent cells
+	// then read one shared value rather than each computing its own average).
+	// The reference is the heavier of the two components, so beta <= 1 everywhere
+	// and equals 1 through the heavy bulk -- which is what the still
+	// constant-coefficient multigrid preconditioner implicitly assumes.
+	//
+	// *** The one thing that is genuinely different here: air has no mass. ***
+	//
+	// The two-phase solver is all-fluid, so every cell has a real density and a
+	// face density is just the average of its two neighbours. This solver has a
+	// free surface: a cell with no particles is air, held at p = 0, and it has no
+	// density at all. Averaging a fluid cell's density with an empty cell's
+	// nominal one would quietly weight the free surface by a fluid that is not
+	// there, which is wrong in the one place a liquid solver most needs to be
+	// right.
+	//
+	// So the face density is one-sided at the surface: both neighbours fluid ->
+	// average them; exactly one fluid -> use that one's density alone; neither ->
+	// the value is unused (both rows are Dirichlet identity rows) and is filled
+	// with the reference so it stays finite. `fluidMask` already carries the
+	// occupancy this needs, rebuilt every frame.
+	const densityCouplingEnabled = ambientDensity !== undefined && componentDensity !== undefined;
+
+	if ( densityCouplingEnabled && ! carryConcentration ) {
+
+		throw new Error( 'createGridFlipSolver2: ambientDensity/componentDensity require carryConcentration: true -- there is no concentration field to build a density from otherwise.' );
+
+	}
+
+	if ( densityCouplingEnabled ) {
+
+		for ( const [ name, value ] of [ [ 'ambientDensity', ambientDensity ], [ 'componentDensity', componentDensity ] ] ) {
+
+			if ( typeof value === 'number' && ! ( value > 0 ) ) {
+
+				throw new Error( `createGridFlipSolver2: ${ name } must be > 0, got ${ value }.` );
+
+			}
+
+		}
+
+	}
+
+	let cellDensity = null;
+	let betaU = null;
+	let betaV = null;
+	let computeBetaU = null;
+	let computeBetaV = null;
+	let densityAtZeroNode = null;
+	let densityAtOneNode = null;
+	let referenceDensityNode = null;
+
+	if ( densityCouplingEnabled ) {
+
+		const minDensityNode = float( MIN_DENSITY );
+		densityAtZeroNode = max( numberOrNode( ambientDensity ), minDensityNode );
+		densityAtOneNode = max( numberOrNode( componentDensity ), minDensityNode );
+		referenceDensityNode = max( densityAtZeroNode, densityAtOneNode );
+
+		cellDensity = tsl_array_n.arrayN( 'float', cellShape );
+		cellDensity.fromArray( new Float32Array( cellCount ) );
+
+		betaU = tsl_array_n.arrayN( 'float', dataSizeU );
+		betaV = tsl_array_n.arrayN( 'float', dataSizeV );
+		betaU.fromArray( new Float32Array( uCount ).fill( 1 ) );
+		betaV.fromArray( new Float32Array( vCount ).fill( 1 ) );
+
+		const clampI = ( i ) => max( 0, min( i, resolutionX - 1 ) );
+		const clampJ = ( j ) => max( 0, min( j, resolutionY - 1 ) );
+
+		// The one-sided face density described above, written once and used for
+		// both axes so the two cannot drift apart.
+		function faceDensity( iA, jA, iB, jB ) {
+
+			const rhoA = cellDensity( iA, jA );
+			const rhoB = cellDensity( iB, jB );
+			const aFluid = fluidMask( iA, jA ).greaterThan( 0.5 );
+			const bFluid = fluidMask( iB, jB ).greaterThan( 0.5 );
+
+			const bothFluid = rhoA.add( rhoB ).mul( 0.5 );
+			const oneFluid = aFluid.select( rhoA, rhoB );
+
+			return aFluid.and( bFluid ).select(
+				bothFluid,
+				aFluid.or( bFluid ).select( oneFluid, referenceDensityNode )
+			);
+
+		}
+
+		computeBetaU = tsl_array_n.kernel( dataSizeU, ( i, j ) => {
+
+			const rhoFace = faceDensity( clampI( i.sub( 1 ) ), j, clampI( i ), j );
+			betaU( i, j ).assign( referenceDensityNode.div( max( rhoFace, minDensityNode ) ) );
+
+		} );
+
+		computeBetaV = tsl_array_n.kernel( dataSizeV, ( i, j ) => {
+
+			const rhoFace = faceDensity( i, clampJ( j.sub( 1 ) ), i, clampJ( j ) );
+			betaV( i, j ).assign( referenceDensityNode.div( max( rhoFace, minDensityNode ) ) );
+
+		} );
+
+	}
+
 	const pressureSolver = createGridPressureSolver2( {
-		resolution: [ resolutionX, resolutionY ], gridSpacing, origin, dirichlet, ...pressure
+		resolution: [ resolutionX, resolutionY ], gridSpacing, origin, dirichlet,
+		...( densityCouplingEnabled ? { faceWeights: { u: betaU, v: betaV } } : {} ),
+		...pressure
 	} );
 	const projectDispatch = pressureSolver.project( velocityGrid, velocityGrid );
 
@@ -1161,7 +1290,8 @@ export function createGridFlipSolver2( {
 	// interaction between two features that look unrelated.
 	let concentration = null;
 	let cellConcentration = null;
-	let concentrationPass = null;
+	let concentrationGridPass = null;
+	let concentrationParticlePass = null;
 
 	if ( carryConcentration ) {
 
@@ -1196,7 +1326,16 @@ export function createGridFlipSolver2( {
 			const sum = atomicLoad( concentrationAccum( i, j ) ).toFloat().div( concentrationScaleNode );
 			const mean = sum.div( max( total, float( 1 ) ) );
 
-			cellConcentration( i, j ).assign( total.greaterThan( 0.5 ).select( clamp( mean, float( 0 ), float( 1 ) ), float( 0 ) ) );
+			// Clamped because the fixed-point round trip can land a hair outside
+			// [0,1], and the density lerp below assumes it is inside.
+			const c = total.greaterThan( 0.5 ).select( clamp( mean, float( 0 ), float( 1 ) ), float( 0 ) );
+			cellConcentration( i, j ).assign( c );
+
+			if ( densityCouplingEnabled ) {
+
+				cellDensity( i, j ).assign( densityAtZeroNode.add( densityAtOneNode.sub( densityAtZeroNode ).mul( c ) ) );
+
+			}
 
 		} );
 
@@ -1213,15 +1352,35 @@ export function createGridFlipSolver2( {
 
 		} );
 
-		concentrationPass = function concentrationPassNow() {
+		// *** Deliberately split in two, and the order matters. ***
+		//
+		// The grid half has to run BEFORE the pressure solve, because that is
+		// what builds the density and therefore beta that the projection uses.
+		// The particle half (mixing and fading) has to run AFTER g2p, because it
+		// is a change to what the particles carry rather than to the flow, and
+		// running it first would feed this frame's projection a concentration
+		// field the particles do not actually have yet.
+		//
+		// Both read the same positions -- nothing moves particles between them --
+		// so `mixAndFade` is free to reuse the cell means the grid half computed
+		// rather than recomputing them.
+		concentrationGridPass = function concentrationGridPassNow() {
 
 			concentrationAccum.fromArray( zeroConcentrationCells );
 			concentrationCount.fromArray( zeroConcentrationCells );
 			accumulateConcentration();
 			resolveCellConcentration();
-			mixAndFade();
+
+			if ( densityCouplingEnabled ) {
+
+				computeBetaU();
+				computeBetaV();
+
+			}
 
 		};
+
+		concentrationParticlePass = mixAndFade;
 
 	}
 
@@ -1250,6 +1409,10 @@ export function createGridFlipSolver2( {
 
 		if ( resamplePass ) resamplePass();
 
+		// After resampling (which can move particles) and before the projection,
+		// because this is what builds the density field beta is derived from.
+		if ( concentrationGridPass ) concentrationGridPass();
+
 		applyGravityU();
 		applyGravityV();
 		boundarySolver.constrainVelocity();
@@ -1262,16 +1425,15 @@ export function createGridFlipSolver2( {
 
 		g2pUpdate();
 
-		// After g2p and after resampling, so the cell means are built from the
-		// positions the particles will actually keep this frame.
-		if ( concentrationPass ) concentrationPass();
+		// After g2p: this changes what the particles carry, not how they move.
+		if ( concentrationParticlePass ) concentrationParticlePass();
 
 	}
 
 	return {
 		onAdvanceTimeStep,
 		positions, velocities, fluidMask,
-		concentration, cellConcentration,
+		concentration, cellConcentration, cellDensity,
 		pressure: pressureSolver.pressure,
 		boundarySolver, pressureSolver
 	};
