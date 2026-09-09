@@ -88,7 +88,7 @@
 // with the other stages -- it just never forwards it here.
 
 import * as tsl_array_n from 'tsl_array_n';
-import { float, int, atomicAdd, If } from 'three/tsl';
+import { float, int, max, min, atomicAdd, If } from 'three/tsl';
 import { createCellCenteredScalarGrid2 } from './grid_data2.js';
 import { faceCenteredDivergenceAtCenter2 } from './grid_math.js';
 import { createCopyKernel2 } from './array_utils.js';
@@ -363,6 +363,58 @@ export function createGridPressureSolver2( {
 
 		}
 
+		// Sum of `beta_face * target_neighbour / h^2` over this cell's own
+		// Dirichlet neighbours -- the term the elimination in
+		// multigrid.js's laplacianAt leaves behind. See its use below for
+		// the full derivation. Returns exactly 0 when no neighbour is
+		// masked, and when every target is 0, so no shipped scene's own
+		// kernel graph changes value.
+		function neighbourDirichletContribution( i, j ) {
+
+			if ( ! dirichletMask ) return float( 0 );
+
+			const invHx2 = 1 / ( gridSpacing[ 0 ] * gridSpacing[ 0 ] );
+			const invHy2 = 1 / ( gridSpacing[ 1 ] * gridSpacing[ 1 ] );
+
+			// Index clamping keeps the read in bounds; the `inBounds` flag is
+			// what actually decides whether the term counts, so a clamped
+			// out-of-domain read can never contribute. A missing neighbour is
+			// a wall (Neumann), not a Dirichlet value.
+			const term = ( ni, nj, inBounds, weight, invH2 ) => {
+
+				const isDir = dirichletMaskField( ni, nj ).greaterThan( 0.5 );
+				const contribution = weight.mul( dirichletTargetField( ni, nj ) ).mul( invH2 );
+
+				return inBounds.and( isDir ).select( contribution, float( 0 ) );
+
+			};
+
+			const one = float( 1 );
+			const lo = ( n ) => max( 0, n );
+			const hiI = ( n ) => min( n, resolutionX - 1 );
+			const hiJ = ( n ) => min( n, resolutionY - 1 );
+
+			const wLower = ( axisU ) => {
+
+				if ( ! faceWeights ) return one;
+				return axisU ? faceWeights.u( i, j ) : faceWeights.v( i, j );
+
+			};
+
+			const wUpper = ( axisU ) => {
+
+				if ( ! faceWeights ) return one;
+				return axisU ? faceWeights.u( i.add( 1 ), j ) : faceWeights.v( i, j.add( 1 ) );
+
+			};
+
+			return term( lo( i.sub( 1 ) ), j, i.greaterThan( 0 ), wLower( true ), invHx2 )
+				.add( term( hiI( i.add( 1 ) ), j, i.lessThan( resolutionX - 1 ), wUpper( true ), invHx2 ) )
+				.add( term( i, lo( j.sub( 1 ) ), j.greaterThan( 0 ), wLower( false ), invHy2 ) )
+				.add( term( i, hiJ( j.add( 1 ) ), j.lessThan( resolutionY - 1 ), wUpper( false ), invHy2 ) );
+
+		}
+
 		const dispatchBuildSystem = tsl_array_n.kernel( shape, ( i, j ) => {
 
 			const divergence = faceCenteredDivergenceAtCenter2( input.dataU, input.dataV, pressureGrid.gridSpacing, i, j );
@@ -372,13 +424,41 @@ export function createGridPressureSolver2( {
 				const isDirichlet = dirichletMask( i, j );
 				const target = dirichletTargetField( i, j );
 
+				// *** A Dirichlet neighbour's known value has to be moved to
+				// this row's RHS. It never was, and nothing noticed for as
+				// long as every target in this port happened to be 0. ***
+				//
+				// multigrid.js's laplacianAt eliminates a masked neighbour by
+				// substituting exactly 0 for its value (see that function's
+				// own comment -- it does this to keep A symmetric, which PCG
+				// requires, and that part is right). Eliminating a *known*
+				// value from the left-hand side is only half of the standard
+				// reduction though: the value has to reappear on the right.
+				// For a fluid row, the true stencil contributes
+				// `beta_face * p_neighbour / h^2` for each neighbour, so with
+				// the neighbour eliminated the row solves the wrong equation
+				// unless `beta_face * target / h^2` is subtracted from b.
+				//
+				// With target == 0 the correction is identically 0, which is
+				// why every scene shipped so far was unaffected and why this
+				// stayed hidden: the free surface pins air to 0, and the one
+				// scene with a nonzero target (examples/13-interactive-
+				// pressure/) only ever checked the pinned cell's own value,
+				// never a neighbour's. It surfaced the moment
+				// grid_flip_solver2.js started solving for the reduced
+				// pressure, whose air targets are `-dt (g.x)` and therefore
+				// vary with height: interior divergence stayed at exactly 0
+				// while the free-surface cells came back with divergence up
+				// to 10, i.e. precisely the rows with a Dirichlet neighbour.
+				const dirichletNeighbourRhs = neighbourDirichletContribution( i, j );
+
 				// -target, not target: multigrid.js's own masked row is
 				// `-1 * p(I)` (laplacianAt/laplacianDiagonalAt, negated to
 				// match this operator's own overall sign convention -- see
 				// laplacianDiagonalAt's header comment for the real bug this
 				// fixes), so this row's own b must be negated to match:
 				// `-p(I) = -target` solves to the same `p(I) = target`.
-				b( i, j ).assign( isDirichlet.select( target.negate(), divergence ) );
+				b( i, j ).assign( isDirichlet.select( target.negate(), divergence.sub( dirichletNeighbourRhs ) ) );
 
 				// seed x at newly-Dirichlet cells to their target *before*
 				// solving -- essential for a live/moving region: without this,

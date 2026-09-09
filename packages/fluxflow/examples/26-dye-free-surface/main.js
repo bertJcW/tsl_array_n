@@ -212,7 +212,7 @@ try {
 	// Pressure-solve knobs, overridable per run -- see the `pressure:` option
 	// below for why these two in particular are worth A/B'ing.
 	const densityCouplingOff = new URLSearchParams( location.search ).get( 'nodensity' ) === '1';
-	const maxPressureParam = Number( new URLSearchParams( location.search ).get( 'maxPressure' ) ?? 100 );
+	const maxPressureOverride = new URLSearchParams( location.search ).get( 'maxPressure' );
 	const maxIterParam = Number( new URLSearchParams( location.search ).get( 'maxIter' ) ?? 100 );
 	const toleranceParam = Number( new URLSearchParams( location.search ).get( 'tol' ) ?? 1e-5 );
 	const densityRatioUniform = tsl_array_n.array0( 'float' );
@@ -274,7 +274,9 @@ try {
 		// A/B'd across seeds without an edit. There is deliberately no
 		// atomicScale here any more -- see linalg.js's createDotReducer.
 		pressure: {
-			maxPlausiblePressure: maxPressureParam,
+			// No maxPlausiblePressure by default: the solver derives one from
+			// dt, gravity and the domain size. `?maxPressure=` still overrides.
+			...( maxPressureOverride !== null ? { maxPlausiblePressure: Number( maxPressureOverride ) } : {} ),
 			maxIterations: maxIterParam,
 			tolerance: toleranceParam
 		}

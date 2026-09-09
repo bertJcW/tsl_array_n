@@ -386,6 +386,11 @@ import { isNonFinite, isNonFinite2 } from '../float_guards.js';
 // otherwise pass through that clamp at all). Not tuned against any
 // specific scene yet -- generous on purpose, same "catch a genuine
 // runaway, don't bound normal physical variation" spirit.
+// Headroom on the derived pressure plausibility bound -- see its own use
+// below. Generous on purpose: the bound exists to catch a cell that has
+// run away, not to bound normal physical variation.
+const PRESSURE_BOUND_HEADROOM = 8;
+
 const MAX_PARTICLE_VELOCITY = 500;
 
 // Fixed-point scale for accumulating a continuous per-particle concentration
@@ -555,6 +560,7 @@ export function createGridFlipSolver2( {
 	maxParticles,
 	dt,
 	gravity = [ 0, -9.81 ],
+	reducedPressure = true,
 	flipRatio = 0.97,
 	velocityDamping = 0.02,
 	p2gAtomicScale = DEFAULT_ATOMIC_DOT_SCALE,
@@ -605,6 +611,11 @@ export function createGridFlipSolver2( {
 	const gridSpacingNode = vec2( gridSpacingX, gridSpacingY );
 	const originNode = vec2( originX, originY );
 	const cellCenterOrigin = originNode.add( gridSpacingNode.mul( 0.5 ) );
+
+	// Defined here rather than beside the gravity kernels below because
+	// dirichlet() needs both (see the reduced-pressure comment there).
+	const dtNode = numberOrNode( dt );
+	const gravityNode = vec2( gravity[ 0 ], gravity[ 1 ] );
 	const cellShape = [ resolutionX, resolutionY ];
 	const cellCount = resolutionX * resolutionY;
 
@@ -668,10 +679,63 @@ export function createGridFlipSolver2( {
 
 	} );
 
+	// ---- reduced pressure: solve for the pressure with the hydrostatic part
+	// taken out analytically, rather than making the solver rediscover it
+	// every frame.
+	//
+	// This is the classical free-surface substitution (Rusche, *Computational
+	// Fluid Dynamics of Dispersed Two-Phase Flows at High Phase Fractions*,
+	// Imperial College, 2002), derived below for THIS port's own staggered
+	// discretisation rather than transcribed from anyone's implementation --
+	// see ../../docs/openfoam-two-phase-flow.md for why that distinction is
+	// load-bearing here.
+	//
+	// The derivation, in this file's own variables. A frame's velocity update
+	// is `u_new = u_pre + dt*g - (dt/rho) grad(P)`, and the code writes the
+	// last term as `beta grad(p)` with `beta = rho_ref/rho`, so
+	// `p = (dt/rho_ref) P`. Substituting `P = Q + rho (g.x)`:
+	//
+	//     (dt/rho) grad(P) = (dt/rho) grad(Q) + dt*g + (dt/rho)(g.x) grad(rho)
+	//
+	// The `dt*g` that appears is exactly the gravity increment the force
+	// stage adds, so the two cancel and gravity leaves the velocity path
+	// entirely:
+	//
+	//     u_new = u_pre - beta grad(q) - beta (dt/rho_ref) (g.x) grad(rho)
+	//
+	// with `q = (dt/rho_ref) Q`. Two consequences, and they are the point:
+	//
+	//   * **The air's Dirichlet value carries the gravity.** An air cell has
+	//     P = 0, so Q = -rho (g.x) and its target becomes `-dt (g.x)` instead
+	//     of 0. Gravity is not gone, it moved into the boundary condition --
+	//     and it is still exactly right where it matters. A body in free fall
+	//     has air above and below, targets differing by `dt*g` per cell of
+	//     height, so grad(q) = dt*g through it and the correction accelerates
+	//     it at exactly g. A column at rest has q *constant* (the old p was a
+	//     linear ramp of depth), so grad(q) = 0 and nothing moves.
+	//   * **A liquid at rest is a constant field, not a ramp.** That is the
+	//     numerical win: the solver no longer spends every frame rebuilding a
+	//     large smooth mode that is known in closed form, and the residual it
+	//     works on is the genuinely dynamic part.
+	//
+	// The `grad(rho)` term is the variable-density half, assembled per face
+	// below (see applyReducedGravityU/V). It vanishes identically at uniform
+	// density, which is why the whole thing costs nothing in a single-density
+	// scene.
+	//
+	// The air target uses rho_ref for the surface liquid's own density. That
+	// is exact whenever the liquid has one density (every scene here except a
+	// density-stratified free surface), and an approximation at a surface
+	// where the two components' densities differ -- the error is confined to
+	// the one-cell-thick surface layer, and is documented rather than hidden.
+	const reducedPressureEnabled = reducedPressure !== false;
+
 	function dirichlet( pos ) {
 
 		const mask = collocatedValueAtPosition2( fluidMask, gridSpacingNode, cellCenterOrigin, pos, [ resolutionX, resolutionY ] );
-		return { active: mask.lessThan( 0.5 ), target: float( 0 ) };
+		const target = reducedPressureEnabled ? gravityNode.dot( pos ).mul( dtNode ).negate() : float( 0 );
+
+		return { active: mask.lessThan( 0.5 ), target };
 
 	}
 
@@ -790,9 +854,39 @@ export function createGridFlipSolver2( {
 
 	}
 
+	// ---- a plausibility bound derived from the scene, not guessed per scene.
+	//
+	// grid_pressure_solver2.js's circuit breaker needs a magnitude past which
+	// a pressure cell is certainly broken. Its library default (1e6) is far
+	// too loose to catch anything useful, and until now every FLIP scene here
+	// carried its own hand-picked number instead -- which is exactly the kind
+	// of per-scene constant this port has been removing.
+	//
+	// Under the reduced-pressure formulation the bound is no longer a matter
+	// of taste: the field's own scale is set by the air cells' Dirichlet
+	// targets, `-dt (g.x)`, so its magnitude cannot exceed `dt |g| L` over a
+	// domain of extent L, plus whatever the dynamic part contributes. That is
+	// computable from values this factory already has. The headroom factor is
+	// deliberately generous -- this catches a cell that has genuinely run
+	// away, it is not meant to bound normal variation -- and measured peaks
+	// sit six to seven times under it (23.9 against 167 in
+	// examples/20-flip-dam-break/, 13.4 against 84 in
+	// examples/26-dye-free-surface/).
+	//
+	// Only when `dt` is a plain number: a live dt node has no value to read
+	// at construction time, and inventing one would be worse than leaving the
+	// library default in place.
+	const domainExtent = resolutionX * gridSpacingX + resolutionY * gridSpacingY;
+	const gravityMagnitude = Math.hypot( gravity[ 0 ], gravity[ 1 ] );
+	const derivedMaxPlausiblePressure = ( typeof dt === 'number' && reducedPressureEnabled )
+		? PRESSURE_BOUND_HEADROOM * dt * gravityMagnitude * domainExtent
+		: undefined;
+
 	const pressureSolver = createGridPressureSolver2( {
 		resolution: [ resolutionX, resolutionY ], gridSpacing, origin, dirichlet,
 		...( densityCouplingEnabled ? { faceWeights: { u: betaU, v: betaV } } : {} ),
+		// Derived default first, so an explicit caller value still wins.
+		...( derivedMaxPlausiblePressure !== undefined ? { maxPlausiblePressure: derivedMaxPlausiblePressure } : {} ),
 		...pressure
 	} );
 	const projectDispatch = pressureSolver.project( velocityGrid, velocityGrid );
@@ -1104,8 +1198,6 @@ export function createGridFlipSolver2( {
 	// force-application shape (a plain self-touch addAssign, matching
 	// external_force_solver2.js's own applyExternalForces). ----
 
-	const dtNode = numberOrNode( dt );
-	const gravityNode = vec2( gravity[ 0 ], gravity[ 1 ] );
 
 	const applyGravityU = tsl_array_n.kernel( dataSizeU, ( i, j ) => {
 
@@ -1118,6 +1210,55 @@ export function createGridFlipSolver2( {
 		velocityGrid.dataV( i, j ).addAssign( gravityNode.y.mul( dtNode ) );
 
 	} );
+
+	// ---- reduced-pressure replacement for the two kernels above.
+	//
+	// Under the substitution documented at dirichlet() above, the plain
+	// `dt*g` increment cancels against the hydrostatic part of the pressure
+	// gradient and is not applied at all. What remains is the density-
+	// gradient term, and it exists only where the density actually varies:
+	//
+	//     delta_u_face = - beta_face * (dt/rho_ref) * (g.x)_face * dn(rho)
+	//
+	// At uniform density `dn(rho)` is identically zero, so a single-density
+	// scene applies nothing here and the whole gravity stage becomes a no-op
+	// -- all of it is carried by the air cells' own Dirichlet targets.
+	//
+	// Assembled on FACES, using the same one-sided face density the pressure
+	// operator's own beta already uses, so the discrete rest state is exact
+	// rather than exact-in-the-limit: at hydrostatic equilibrium this term
+	// and the pressure gradient cancel face by face, not merely on average.
+	// That is what stops a density jump from generating spurious velocity at
+	// the interface.
+	let applyReducedGravityU = null;
+	let applyReducedGravityV = null;
+
+	if ( reducedPressureEnabled && densityCouplingEnabled ) {
+
+		const clampI2 = ( i ) => max( 0, min( i, resolutionX - 1 ) );
+		const clampJ2 = ( j ) => max( 0, min( j, resolutionY - 1 ) );
+
+		applyReducedGravityU = tsl_array_n.kernel( dataSizeU, ( i, j ) => {
+
+			const pos = originNode.add( vec2( float( i ).mul( gridSpacingNode.x ), float( j ).add( 0.5 ).mul( gridSpacingNode.y ) ) );
+			const dRho = cellDensity( clampI2( i ), j ).sub( cellDensity( clampI2( i.sub( 1 ) ), j ) ).div( gridSpacingNode.x );
+			const term = betaU( i, j ).mul( dtNode ).div( referenceDensityNode ).mul( gravityNode.dot( pos ) ).mul( dRho );
+
+			velocityGrid.dataU( i, j ).subAssign( term );
+
+		} );
+
+		applyReducedGravityV = tsl_array_n.kernel( dataSizeV, ( i, j ) => {
+
+			const pos = originNode.add( vec2( float( i ).add( 0.5 ).mul( gridSpacingNode.x ), float( j ).mul( gridSpacingNode.y ) ) );
+			const dRho = cellDensity( i, clampJ2( j ) ).sub( cellDensity( i, clampJ2( j.sub( 1 ) ) ) ).div( gridSpacingNode.y );
+			const term = betaV( i, j ).mul( dtNode ).div( referenceDensityNode ).mul( gravityNode.dot( pos ) ).mul( dRho );
+
+			velocityGrid.dataV( i, j ).subAssign( term );
+
+		} );
+
+	}
 
 	// ---- velOld snapshot + G2P (FLIP/PIC blend): mantaflow's own
 	// mapPartsToMAC copies velOld right after P2G (before extrapolation/
@@ -1467,8 +1608,20 @@ export function createGridFlipSolver2( {
 		// because this is what builds the density field beta is derived from.
 		if ( concentrationGridPass ) concentrationGridPass();
 
-		applyGravityU();
-		applyGravityV();
+		if ( reducedPressureEnabled ) {
+
+			// Gravity itself is carried by the pressure system's own boundary
+			// condition -- see dirichlet() -- so nothing is added here unless
+			// the density varies.
+			if ( applyReducedGravityU ) applyReducedGravityU();
+			if ( applyReducedGravityV ) applyReducedGravityV();
+
+		} else {
+
+			applyGravityU();
+			applyGravityV();
+
+		}
 		boundarySolver.constrainVelocity();
 
 		await projectDispatch();

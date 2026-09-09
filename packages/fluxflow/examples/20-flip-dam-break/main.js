@@ -107,7 +107,10 @@ try {
 		maxParticles: seed.count,
 		dt,
 		velocityDamping: velocityDampingUniform(),
-		pressure: { maxPlausiblePressure: 100 }
+		// No maxPlausiblePressure here on purpose: the solver derives its own
+		// from dt, gravity and the domain size -- see grid_flip_solver2.js's
+		// derivedMaxPlausiblePressure.
+		pressure: {}
 	} );
 
 	// Explicit seed -- grid_flip_solver2.js's own header comment on why
@@ -314,7 +317,16 @@ try {
 
 	}
 
+	// See examples/26-dye-free-surface/'s own hook for why an automated
+	// stability run has to be able to stop this loop: a backgrounded Chrome
+	// tab throttles requestAnimationFrame to one frame every several
+	// seconds, and a driver loop stepping the solver at the same time as
+	// this one interleaves GPU dispatches with it.
+	let driverPaused = false;
+
 	async function animate() {
+
+		if ( driverPaused ) return;
 
 		updatePerf();
 
@@ -353,6 +365,22 @@ try {
 		velocityDampingValueEl.textContent = v.toFixed( 3 );
 
 	} );
+
+	window.__fluxflowProbe = {
+		flip, velocityGrid,
+		pause: async () => {
+
+			driverPaused = true;
+			await new Promise( ( resolve ) => setTimeout( resolve, 100 ) );
+
+		},
+		resume: () => {
+
+			driverPaused = false;
+			requestAnimationFrame( animate );
+
+		}
+	};
 
 	requestAnimationFrame( animate );
 

@@ -83,7 +83,10 @@ try {
 		dt,
 		collider,
 		velocityDamping: velocityDampingUniform(),
-		pressure: { maxPlausiblePressure: 100 }
+		// No maxPlausiblePressure here on purpose: the solver derives its own
+		// from dt, gravity and the domain size -- see grid_flip_solver2.js's
+		// derivedMaxPlausiblePressure.
+		pressure: {}
 	} );
 
 	flip.positions.fromArray( seed.positionsArray );
