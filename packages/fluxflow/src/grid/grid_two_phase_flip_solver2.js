@@ -268,6 +268,13 @@
 //   The interface is known only as accurately as the particles sample it.
 //   Surface tension in Hong & Kim / mantaflow both need an interface
 //   curvature this port has no way to compute yet.
+//   This one has a visible consequence worth naming, because it looks like
+//   a bug and is not: a cell that advection has emptied has no particles to
+//   sample, so it reads as gas density (see computeDensityKernel) and draws
+//   in the gas colour. In examples/24-two-phase-bubble-rise/ those are the
+//   dark speckles left behind in the water, and they accumulate -- measured
+//   at ~8% of cells by frame 420 -- because nothing but the resampling pass
+//   ever refills an emptied cell. A narrow-band level set is what fixes it.
 // * **No particle separation at the interface.** MultiFLIP explicitly
 //   adjusts particle positions to stop the phases inter-penetrating.
 //   Per-phase resampling (below) helps, but it is not the same mechanism.
@@ -309,6 +316,7 @@ import { createSemiLagrangianAdvectionSolver2 } from './advection_solver2.js';
 import { createCopyKernel2, createExtrapolateToRegion2 } from './array_utils.js';
 import { bilinearCoordsAndWeights2, collocatedValueAtPosition2, faceCenteredValueAtPosition2 } from './grid_math.js';
 import { DEFAULT_ATOMIC_DOT_SCALE } from '../linalg/linalg.js';
+import { isNonFinite, isNonFinite2 } from '../float_guards.js';
 
 // Same last-resort particle speed bound as the single-phase solver. It
 // matters more here: a gas face's own pressure correction is scaled by
@@ -680,11 +688,26 @@ export function createGridTwoPhaseFlipSolver2( {
 		const concentrationSum = atomicLoad( concentrationAccum( i, j ) ).toFloat().div( concentrationScaleNode );
 
 		// A cell with no particles at all is treated as pure gas rather than
-		// as "whatever it was last frame". With the whole domain seeded this
-		// is rare and transient, but it does happen, and gas is the right
-		// reading of a momentarily empty cell: an empty pocket should be
-		// something the liquid can collapse into, not a heavy region that
-		// shoves it away.
+		// as "whatever it was last frame". Gas is the right reading of a
+		// momentarily empty cell: an empty pocket should be something the
+		// liquid can collapse into, not a heavy region that shoves it away.
+		//
+		// This comment used to claim such cells were "rare and transient with
+		// the whole domain seeded". That was an assumption, and measuring it
+		// falsified it. Instrumenting examples/24-two-phase-bubble-rise (64x64,
+		// whole domain seeded) showed empty cells accumulating rather than
+		// healing: a handful early, then around 8% of the 4096 cells by frame
+		// 420, and still climbing. FLIP advection alone does not redistribute
+		// particles, so once a cell empties nothing in this solver refills it;
+		// only the resampling pass does, and it only fires where it finds a
+		// donor. So empty cells are a real, growing population here, and
+		// reading them as gas is a deliberate choice about which failure is
+		// preferable -- not a statement that the case barely arises.
+		//
+		// It is also visible: an empty cell inside the liquid renders with the
+		// gas colour, which is what the black speckles left behind in that
+		// scene's wake are. Fixing that properly needs a narrow-band or
+		// level-set surface representation, which this port does not have.
 		// Clamped because the fixed-point round trip can land a hair outside
 		// [0,1], and everything downstream (the density lerp, then beta, then
 		// the operator's coefficients) assumes it is inside.
@@ -917,10 +940,11 @@ export function createGridTwoPhaseFlipSolver2( {
 	const gasFlipRatioNode = clamp( numberOrNode( gasFlipRatio ), float( 0 ), float( 1 ) );
 	const velocityDampingNode = clamp( numberOrNode( velocityDamping ), float( 0 ), float( 1 ) );
 
+	// float_guards.js's bit test, not `v != v` -- see that file's header for
+	// why the latter is a no-op on the backends this was measured on.
 	function clampParticleVelocity( v ) {
 
-		const isNaN = v.notEqual( v );
-		return isNaN.select( vec2( 0 ), clamp( v, vec2( - MAX_PARTICLE_VELOCITY ), vec2( MAX_PARTICLE_VELOCITY ) ) );
+		return isNonFinite2( v ).select( vec2( 0 ), clamp( v, vec2( - MAX_PARTICLE_VELOCITY ), vec2( MAX_PARTICLE_VELOCITY ) ) );
 
 	}
 
@@ -1015,8 +1039,19 @@ export function createGridTwoPhaseFlipSolver2( {
 
 	const mixConcentration = tsl_array_n.kernel( maxParticles, ( p ) => {
 
-		const local = collocatedValueAtPosition2( liquidFraction, gridSpacingNode, cellCenterOrigin, positions( p ), cellShape );
-		const blended = concentrationOf( p ).add( local.sub( concentrationOf( p ) ).mul( mixingNode ) );
+		const sampled = collocatedValueAtPosition2( liquidFraction, gridSpacingNode, cellCenterOrigin, positions( p ), cellShape );
+		const c = concentrationOf( p );
+
+		// A zero mixing factor is NOT a no-op on its own: `c + (local - c) * 0`
+		// is NaN when local is NaN, because IEEE says NaN * 0 is NaN. One bad
+		// cell would therefore destroy the carried concentration everywhere on
+		// the next step, even with mixing switched off. Observed for real in
+		// grid_flip_solver2.js's own copy of this line -- see the long comment
+		// there. Substituting the particle's own value makes mixing = 0 a true
+		// identity under all inputs. Detection is float_guards.js's bit test,
+		// not `sampled != sampled`, which is inert here.
+		const local = isNonFinite( sampled ).select( c, sampled );
+		const blended = c.add( local.sub( c ).mul( mixingNode ) );
 		const faded = blended.mul( float( 1 ).sub( fadeNode ) );
 
 		phase( p ).assign( clamp( faded, float( 0 ), float( 1 ) ) );
@@ -1035,10 +1070,22 @@ export function createGridTwoPhaseFlipSolver2( {
 	const minPos = originNode.add( vec2( CLAMP_EPSILON ) );
 	const maxPos = originNode.add( vec2( resolutionX * gridSpacingX, resolutionY * gridSpacingY ) ).sub( vec2( CLAMP_EPSILON ) );
 
+	// The non-finite check is not redundant with the clamp -- it is there
+	// *because* of the clamp. clamp() does not reject a NaN, it converts one
+	// into a bound, so a NaN trace silently becomes minPos: a perfectly
+	// finite, perfectly plausible position in the domain corner. Every
+	// particle in the sim arriving at the same corner on the same frame is
+	// exactly what a collapse looks like, and nothing downstream can tell it
+	// apart from particles that genuinely went there. Holding the previous
+	// position instead keeps a bad frame local and recoverable: one stuck
+	// particle, not a teleported fluid. (float_guards.js explains why the
+	// detection is a bit test and not `x != x`.)
 	const advectParticles = tsl_array_n.kernel( maxParticles, ( p ) => {
 
-		const traced = advectionSolver.trace( positions( p ), - 1 );
-		positions( p ).assign( clamp( traced, minPos, maxPos ) );
+		const previous = positions( p );
+		const traced = advectionSolver.trace( previous, - 1 );
+		const safe = isNonFinite2( traced ).select( previous, traced );
+		positions( p ).assign( clamp( safe, minPos, maxPos ) );
 
 	} );
 

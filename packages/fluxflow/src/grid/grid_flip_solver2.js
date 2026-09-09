@@ -378,6 +378,7 @@ import { createSemiLagrangianAdvectionSolver2 } from './advection_solver2.js';
 import { createCopyKernel2, createExtrapolateToRegion2 } from './array_utils.js';
 import { bilinearCoordsAndWeights2, collocatedValueAtPosition2, faceCenteredValueAtPosition2 } from './grid_math.js';
 import { DEFAULT_ATOMIC_DOT_SCALE } from '../linalg/linalg.js';
+import { isNonFinite, isNonFinite2 } from '../float_guards.js';
 
 // Last-resort circuit breaker on a *particle's* own velocity, mirroring
 // grid_blocked_boundary_condition_solver2.js's own MAX_VELOCITY_COMPONENT
@@ -1147,10 +1148,11 @@ export function createGridFlipSolver2( {
 	// option, see examples/20-flip-dam-break/'s own control panel) passes in.
 	const velocityDampingNode = clamp( numberOrNode( velocityDamping ), float( 0 ), float( 1 ) );
 
+	// float_guards.js's bit test, not `v != v` -- see that file's header for
+	// why the latter is a no-op on the backends this was measured on.
 	function clampParticleVelocity( v ) {
 
-		const isNaN = v.notEqual( v );
-		return isNaN.select( vec2( 0 ), clamp( v, vec2( - MAX_PARTICLE_VELOCITY ), vec2( MAX_PARTICLE_VELOCITY ) ) );
+		return isNonFinite2( v ).select( vec2( 0 ), clamp( v, vec2( - MAX_PARTICLE_VELOCITY ), vec2( MAX_PARTICLE_VELOCITY ) ) );
 
 	}
 
@@ -1183,10 +1185,22 @@ export function createGridFlipSolver2( {
 	const minPos = originNode.add( vec2( CLAMP_EPSILON ) );
 	const maxPos = originNode.add( vec2( resolutionX * gridSpacingX, resolutionY * gridSpacingY ) ).sub( vec2( CLAMP_EPSILON ) );
 
+	// The non-finite check is not redundant with the clamp -- it is there
+	// *because* of the clamp. clamp() does not reject a NaN, it converts one
+	// into a bound, so a NaN trace silently becomes minPos: a perfectly
+	// finite, perfectly plausible position in the domain corner. Every
+	// particle in the sim arriving at the same corner on the same frame is
+	// exactly what a collapse looks like, and nothing downstream can tell it
+	// apart from particles that genuinely went there. Holding the previous
+	// position instead keeps a bad frame local and recoverable: one stuck
+	// particle, not a teleported fluid. (float_guards.js explains why the
+	// detection is a bit test and not `x != x`.)
 	const advectParticles = tsl_array_n.kernel( maxParticles, ( p ) => {
 
-		const traced = advectionSolver.trace( positions( p ), -1 );
-		positions( p ).assign( clamp( traced, minPos, maxPos ) );
+		const previous = positions( p );
+		const traced = advectionSolver.trace( previous, -1 );
+		const safe = isNonFinite2( traced ).select( previous, traced );
+		positions( p ).assign( clamp( safe, minPos, maxPos ) );
 
 	} );
 
@@ -1285,9 +1299,21 @@ export function createGridFlipSolver2( {
 	// shearing, and that users turn reseeding off when they need a sharp
 	// boundary. This solver's `resample` pass relocates particles and a relocated
 	// particle carries its concentration to its new home, so the same coupling
-	// applies: a scene chasing crisp filaments should expect to set
-	// `resample: { enabled: false }`. Recorded because it is a real, non-obvious
-	// interaction between two features that look unrelated.
+	// is real here too. Recorded because it is a non-obvious interaction
+	// between two features that look unrelated.
+	//
+	// One thing worth knowing before you reach for the switch, recorded
+	// because getting it wrong cost a day: when a scene using this solver
+	// collapses, resampling is a tempting culprit and was, here, the wrong
+	// one. `resample` IS the only mechanism that refills a cell advection
+	// has emptied, which makes "I turned it off and the liquid caved in"
+	// an easy and plausible story to tell. It was not the story. The
+	// collapse examples/26-dye-free-surface/ suffered happened with
+	// resampling on and off alike, and so did the same collapse in
+	// examples/20-flip-dam-break/, which carries no concentration at all
+	// and predates this feature entirely. The cause was a non-finite
+	// pressure field passing an inert safety check -- see float_guards.js.
+	// Measure before attributing a collapse to a quality knob.
 	let concentration = null;
 	let cellConcentration = null;
 	let concentrationGridPass = null;
@@ -1344,8 +1370,36 @@ export function createGridFlipSolver2( {
 		// and would sit exactly on the guaranteed per-stage limit of eight.
 		const mixAndFade = tsl_array_n.kernel( maxParticles, ( p ) => {
 
-			const local = collocatedValueAtPosition2( cellConcentration, gridSpacingNode, cellCenterOrigin, positions( p ), cellShape );
+			const sampled = collocatedValueAtPosition2( cellConcentration, gridSpacingNode, cellCenterOrigin, positions( p ), cellShape );
 			const c = concentrationOf( p );
+
+			// *** A zero mixing factor does NOT make this a no-op on its own. ***
+			//
+			// `c + (local - c) * 0` looks like an identity, and it is -- unless
+			// `local` is NaN, because IEEE says NaN * 0 is NaN, not 0. So a
+			// single non-finite value anywhere in the concentration field
+			// propagates into EVERY particle on the next step even with mixing
+			// switched off, and the carried quantity is silently destroyed
+			// domain-wide.
+			//
+			// This is not hypothetical: it was observed on real hardware as
+			// total dye falling steadily (3055 -> 3044 -> 3020 -> 1292) in a
+			// scene running with mixing = 0, where the value is supposed to be
+			// exactly conserved. The upstream cause was a rejected pressure
+			// solve leaving a corrupt velocity field, but the reason it spread
+			// from a few cells to everything was this line.
+			//
+			// Substituting the particle's own value for a non-finite sample
+			// makes mixing = 0 a true identity under all inputs, and degrades
+			// gracefully rather than catastrophically when the grid does go
+			// bad.
+			//
+			// The detection is float_guards.js's bit test. This guard was
+			// first written with `sampled != sampled`, the documented WGSL
+			// NaN idiom, which measurement later showed compiles to a
+			// constant false here -- so the first version of this fix did
+			// nothing at all. See float_guards.js's header.
+			const local = isNonFinite( sampled ).select( c, sampled );
 			const blended = c.add( local.sub( c ).mul( mixingNode ) );
 
 			concentration( p ).assign( clamp( blended.mul( float( 1 ).sub( fadeNode ) ), float( 0 ), float( 1 ) ) );

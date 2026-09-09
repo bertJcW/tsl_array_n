@@ -25,6 +25,7 @@ import * as tsl_array_n from 'tsl_array_n';
 import * as ls from './level_set_utils.js';
 import { createCopyKernel2, createExtrapolateToRegion2 } from './array_utils.js';
 import { DIRECTION_LEFT, DIRECTION_RIGHT, DIRECTION_DOWN, DIRECTION_UP, DIRECTION_ALL } from './constant.js';
+import { isNonFinite } from '../float_guards.js';
 
 // Last-resort bound on a single velocity component, applied every frame at
 // the very end of constrainVelocity() -- see that function's own use of
@@ -113,14 +114,16 @@ export function createGridBlockedBoundaryConditionSolver2(
 	const blockMarker = tsl_array_n.arrayN( 'int', [ nx, ny ] );
 
 	// Last-resort circuit breaker -- see MAX_VELOCITY_COMPONENT's own
-	// comment above. NaN is set to exactly 0 (not clamped -- a NaN
-	// compared against anything is always false, so a plain clamp() would
-	// leave it untouched), anything else is bounded to
-	// +/-MAX_VELOCITY_COMPONENT.
+	// comment above. A non-finite component is set to exactly 0 rather than
+	// clamped, because clamp() does not remove one: a NaN compares false
+	// against everything, so min/max pass it straight through on some
+	// backends and return the *bound* on others (which is worse -- it looks
+	// like a finite value). The detection is float_guards.js's bit test
+	// rather than the usual `x != x`, which this project measured as a
+	// no-op on real hardware; see that file's header for the table.
 	function clampComponent( value ) {
 
-		const isNaN = value.notEqual( value );
-		return isNaN.select( float( 0 ), clamp( value, - MAX_VELOCITY_COMPONENT, MAX_VELOCITY_COMPONENT ) );
+		return isNonFinite( value ).select( float( 0 ), clamp( value, - MAX_VELOCITY_COMPONENT, MAX_VELOCITY_COMPONENT ) );
 
 	}
 

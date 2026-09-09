@@ -88,12 +88,13 @@
 // with the other stages -- it just never forwards it here.
 
 import * as tsl_array_n from 'tsl_array_n';
-import { float, int, abs, atomicAdd, If } from 'three/tsl';
+import { float, int, atomicAdd, If } from 'three/tsl';
 import { createCellCenteredScalarGrid2 } from './grid_data2.js';
 import { faceCenteredDivergenceAtCenter2 } from './grid_math.js';
 import { createCopyKernel2 } from './array_utils.js';
 import { createLaplacianOperator, createMultigridPreconditioner } from '../linalg/multigrid.js';
 import { createPreconditionedConjugateGradientSolver } from '../linalg/linalg.js';
+import { isNonFiniteOrAbove } from '../float_guards.js';
 
 // Last-resort bound on a single pressure cell's own magnitude -- see
 // dispatch()'s own use, below, for the full circuit-breaker this backs.
@@ -277,21 +278,34 @@ export function createGridPressureSolver2( {
 
 	// Reliable (see maxPlausiblePressure's own comment on why a scalar
 	// derived from linalg.js's atomic-int reduction isn't) bad-cell
-	// detector: atomically counts cells that are either NaN (the standard
-	// `x != x` WGSL idiom, since core WGSL dropped isnan()/isinf()) or
-	// past maxPlausiblePressure in magnitude (catches +/-Infinity too,
-	// since Infinity compares greater than any finite bound). A plain
-	// atomicAdd of 0/1 flags, not a value-weighted reduction like
-	// linalg.js's own dot product -- there's no float-to-fixed-point
-	// quantization step here for a non-finite input to be silently
-	// laundered through.
+	// detector: atomically counts cells that are non-finite or past
+	// maxPlausiblePressure in magnitude. A plain atomicAdd of 0/1 flags,
+	// not a value-weighted reduction like linalg.js's own dot product --
+	// there's no float-to-fixed-point quantization step here for a
+	// non-finite input to be silently laundered through.
+	//
+	// *** This check was inert for NaN, and that was this library's worst
+	// bug. ***
+	//
+	// It was written as `x != x || abs(x) > limit`, the documented WGSL
+	// replacement for the isnan()/isinf() that core WGSL dropped. Measured
+	// on real hardware, BOTH halves return false for a NaN (float_guards.js
+	// has the full table), so a solve that came back NaN counted as zero bad
+	// cells, was declared good, and had its NaN pressure multiplied straight
+	// into the velocity field by the correction step below. What the user
+	// saw was a liquid simulating correctly for a couple of hundred frames
+	// and then collapsing to a point between one frame and the next, with
+	// converged/rejected both reporting healthy. isNonFiniteOrAbove is the
+	// same intent expressed two ways that survive a NaN: a bit-pattern
+	// exponent test, and a bound written as a negated "within range" rather
+	// than an asserted "out of range".
 	const badCountAccum = tsl_array_n.array0( 'int' );
 	badCountAccum.node.toAtomic();
 
 	const countBadPressureCells = tsl_array_n.kernel( shape, ( i, j ) => {
 
 		const value = pressureGrid.data( i, j );
-		const isBad = value.notEqual( value ).or( abs( value ).greaterThan( maxPlausiblePressure ) );
+		const isBad = isNonFiniteOrAbove( value, maxPlausiblePressure );
 
 		atomicAdd( badCountAccum(), isBad.select( int( 1 ), int( 0 ) ) );
 

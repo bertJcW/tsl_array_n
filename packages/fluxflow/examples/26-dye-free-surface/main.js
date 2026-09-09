@@ -207,6 +207,8 @@ try {
 	// `?density=1.3` deep-links a starting density, which is also how this
 	// scene's two claims get tested non-interactively: density=1 is the control.
 	const initialDensity = Number( new URLSearchParams( location.search ).get( 'density' ) ?? 1 );
+	// `?resample=1` is the A/B control for the resampling trade told below.
+	const resampleEnabled = new URLSearchParams( location.search ).get( 'resample' ) === '1';
 	const densityRatioUniform = tsl_array_n.array0( 'float' );
 	densityRatioUniform.fromArray( new Float32Array( [ initialDensity ] ) );
 	densityRatioInput.value = String( initialDensity );
@@ -231,12 +233,29 @@ try {
 		// the passive-tracer case, which is the control.
 		ambientDensity: 1,
 		componentDensity: densityRatioUniform(),
-		// Resampling relocates particles, and a relocated particle carries its
-		// concentration with it -- which is exactly the mechanism SideFX's own
-		// users disable reseeding to avoid when they need a sharp colour
-		// boundary. This scene is about keeping that boundary crisp, so it is
-		// off. See the solver's own note on the Houdini lesson.
-		resample: { enabled: false },
+		resample: { enabled: resampleEnabled },
+		// Resampling is off, and `?resample=1` is the A/B control that turns
+		// it back on. The reason is the one in the solver's own comment --
+		// a relocated particle carries its concentration to its new home, so
+		// reseeding blurs a colour boundary, which is exactly why SideFX's
+		// own users disable it when they need a sharp one.
+		//
+		// Measured here rather than assumed, over ~850 frames of each: off,
+		// the amber sinks about 5 cells below the teal and stays there
+		// (heightGap ~-5.0); on, the same scene separates by about a third
+		// of a cell (heightGap ~-0.3), because relocation keeps stirring the
+		// two components back together. Both are stable and neither loses
+		// volume, so this is purely a look decision, and off is the setting
+		// that actually shows what the scene exists to show.
+		//
+		// Being explicit about one thing, because a comment sat here
+		// claiming the opposite: turning resampling off did NOT cause the
+		// collapse this scene once suffered. That was a non-finite pressure
+		// field passing a safety check that could not see it, it happened
+		// with resampling on and off alike, and examples/20-flip-dam-break/
+		// -- no dye, no density coupling, resampling on -- collapsed the
+		// same way. See src/float_guards.js.
+		//
 		// examples/20-flip-dam-break/'s values: same solver, same resolution,
 		// same free-surface gravity-driven setup, so the analogy actually holds
 		// here (unlike example 25's sealed column, where it did not).
@@ -325,8 +344,47 @@ try {
 
 		}
 
+		// Occupied-cell count is the collapse detector, and it is here because
+		// the collapse this scene once suffered was invisible to every other
+		// number printed: dye stayed conserved, pressure kept converging, and
+		// the liquid still quietly ate itself. A body of liquid at rest fills a
+		// roughly constant number of cells; a collapsing one fills steadily
+		// fewer as voids open and the surface caves in. Watch this drift down
+		// and you are watching the failure, several hundred frames before it
+		// looks like anything on the canvas.
+		const occupied = new Uint8Array( NX * NY );
+		let filled = 0;
+
+		for ( let p = 0; p < concentrationData.length; p ++ ) {
+
+			const i = Math.min( NX - 1, Math.max( 0, Math.floor( positionsData[ p * 2 ] ) ) );
+			const j = Math.min( NY - 1, Math.max( 0, Math.floor( positionsData[ p * 2 + 1 ] ) ) );
+			const k = i + NX * j;
+			if ( occupied[ k ] === 0 ) { occupied[ k ] = 1; filled ++; }
+
+		}
+
+		// Bounding box, because "the liquid collapsed" has at least two very
+		// different causes that filledCells alone cannot tell apart: a body
+		// that is genuinely losing volume, and a velocity blow-up that flung
+		// every particle into a boundary where the position clamp piles them
+		// into one cell. The second looks identical on the canvas and in
+		// filledCells, but the bbox degenerates to a point at a domain corner.
+		let minX = Infinity, maxX = - Infinity, minY = Infinity, maxY = - Infinity;
+
+		for ( let p = 0; p < concentrationData.length; p ++ ) {
+
+			const x = positionsData[ p * 2 ], y = positionsData[ p * 2 + 1 ];
+			if ( x < minX ) minX = x;
+			if ( x > maxX ) maxX = x;
+			if ( y < minY ) minY = y;
+			if ( y > maxY ) maxY = y;
+
+		}
+
 		return {
-			total, mixed,
+			total, mixed, filled,
+			bbox: `[${ minX.toFixed( 1 ) },${ minY.toFixed( 1 ) }]-[${ maxX.toFixed( 1 ) },${ maxY.toFixed( 1 ) }]`,
 			spread: mixed / concentrationData.length,
 			heightGap: ( amberN ? amberY / amberN : 0 ) - ( tealN ? tealY / tealN : 0 )
 		};
@@ -397,7 +455,8 @@ try {
 						`rejected=${ flip.pressureSolver.diagnostics.rejected } | ` +
 						`totalDye=${ s.total.toFixed( 2 ) } mixedParticles=${ s.mixed } ` +
 						`spread=${ ( s.spread * 100 ).toFixed( 2 ) }% ` +
-						`heightGap=${ s.heightGap.toFixed( 2 ) }`
+						`heightGap=${ s.heightGap.toFixed( 2 ) } ` +
+						`filledCells=${ s.filled } bbox=${ s.bbox }`
 					);
 
 				}

@@ -77,14 +77,20 @@
 //     converging -- and every divergence observed while building this scene
 //     followed a frame where `converged` went false. Measured, not assumed.
 //
-// The promising direction, not yet tried: host the concentration in the
-// FREE-SURFACE solver (grid_flip_solver2.js) instead of this all-fluid one. An
-// open tank with air above it can slosh and circulate freely, which is what the
-// look actually needs, and the concentration machinery is independent of which
-// solver carries it -- it is a per-particle attribute plus a density blend,
-// neither of which cares whether there is a free surface. That is a bigger
-// change than tuning this scene, which is why it is written down here rather
-// than half-done.
+// The way out was to host the concentration in the FREE-SURFACE solver
+// (grid_flip_solver2.js) instead of this all-fluid one: an open tank with air
+// above it can slosh and circulate freely, which is what the look actually
+// needs, and the concentration machinery is independent of which solver carries
+// it -- it is a per-particle attribute plus a density blend, neither of which
+// cares whether there is a free surface.
+//
+// That is now done, and it lives in examples/26-dye-free-surface/. **If you
+// came here wanting ink-in-water and found this scene inert, go there.** This
+// one is kept because it is still the honest demonstration of the sealed,
+// fully-seeded, all-fluid configuration -- the pinned pressure system, the
+// hydrostatic magnitudes, the conservation check -- none of which the
+// free-surface scene exercises. Its lack of drama is a property of a sealed
+// incompressible box, not a defect to be tuned away.
 
 import * as tsl_array_n from 'tsl_array_n';
 import { grid } from 'fluxflow';
