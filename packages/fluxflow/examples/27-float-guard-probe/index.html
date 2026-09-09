@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>fluxflow — non-finite guard device probe</title>
+	<style>
+		body { margin: 0; font-family: system-ui, sans-serif; background: #15161a; color: #eee; display: flex; flex-direction: column; align-items: center; gap: 0.9rem; padding: 1.5rem; box-sizing: border-box; }
+		#status { font-size: 0.9rem; line-height: 1.6; opacity: 0.85; }
+		#perf { font-size: 0.85rem; font-variant-numeric: tabular-nums; opacity: 0.6; }
+		.err { color: #f87171; }
+		p { max-width: 880px; font-size: 0.85rem; opacity: 0.75; margin: 0; }
+		table { border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 0.85rem; background: #1f2024; border: 1px solid #3f4148; border-radius: 0.5rem; overflow: hidden; }
+		th, td { padding: 0.4rem 0.85rem; text-align: center; border-bottom: 1px solid #2b2d33; }
+		th { background: #24262c; font-weight: 600; }
+		td:first-child, th:first-child { text-align: left; font-family: ui-monospace, monospace; }
+		tr:last-child td { border-bottom: none; }
+		.ok { color: #4ade80; }
+		.bad { color: #f87171; font-weight: 700; }
+		#verdict { font-size: 0.95rem; padding: 0.6rem 1rem; border-radius: 0.4rem; border: 1px solid #3f4148; max-width: 860px; line-height: 1.5; }
+		#verdict.good { border-color: #4ade80; }
+		#verdict.warn { border-color: #f87171; }
+		code { background: #24262c; padding: 0.05rem 0.3rem; border-radius: 0.2rem; }
+	</style>
+</head>
+<body>
+	<div id="status">initializing…</div>
+	<div id="perf"></div>
+	<table id="results"></table>
+	<div id="verdict"></div>
+	<p>A device conformance probe rather than a simulation. It runs four candidate non-finite tests over
+	a table of float32 values inside a real compute kernel and reads the answers back, because
+	<code>src/float_guards.js</code> exists entirely on the strength of what this measures. WGSL dropped
+	<code>isnan()</code> and every reference recommends <code>x != x</code> in its place; WGSL also lets an
+	implementation assume non-finite values never occur and fold expressions accordingly, so that test is
+	free to compile to a constant <code>false</code> — and on the device this library was developed against,
+	it does. Every NaN guard in the library was silently inert, which cost a liquid solver that ran
+	correctly for a couple of hundred frames and then collapsed to a point in a single step with every
+	diagnostic reporting healthy. Run this on your own GPU: if the <code>x != x</code> column is red here
+	too, the same trap is waiting in any TSL kernel you write yourself.</p>
+	<script type="module" src="./main.js"></script>
+</body>
+</html>
