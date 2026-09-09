@@ -162,7 +162,7 @@ try {
 		// the safe value scales with the density ratio. If you raise the
 		// ratio slider a long way past its default, this may need to come
 		// down further still.
-		pressure: { atomicScale: 1, maxPlausiblePressure: 100 }
+		pressure: { maxPlausiblePressure: 100 }
 	} );
 
 	function seedScene() {

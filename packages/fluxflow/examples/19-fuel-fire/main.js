@@ -304,7 +304,7 @@ try {
 			boundarySolver.constrainVelocity();
 
 		},
-		pressure: { multigrid: { numberOfLevels: 4 }, tolerance: 1e-4, maxIterations: 60, atomicScale: PRESSURE_ATOMIC_SCALE, maxPlausiblePressure: PRESSURE_MAX_PLAUSIBLE }
+		pressure: { multigrid: { numberOfLevels: 4 }, tolerance: 1e-4, maxIterations: 60, maxPlausiblePressure: PRESSURE_MAX_PLAUSIBLE }
 	} );
 
 	boundarySolver = solver.boundarySolver;

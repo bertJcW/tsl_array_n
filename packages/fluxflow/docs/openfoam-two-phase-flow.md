@@ -208,6 +208,37 @@ recover from NaN at all because the value it reverts to is itself the poisoned o
 
 Ordered by measured value against the example 26 blow-up.
 
+### 0. The actual root cause, found while working this list **[done]**
+
+Not an OpenFOAM item at all, and worth putting first because it turned out to
+be the whole of the blow-up rather than a contributing factor: the CG dot
+product was a fixed-point value accumulated in an int32, scaled by a
+per-scene `atomicScale`, and that encoding's dynamic range was too narrow for
+a real solve. Every division site also had to refuse any denominator below
+`0.5/atomicScale`, which a converging CG produces as a matter of course, so
+the iteration stopped early on about half of all frames. See `linalg.js`'s
+`createDotReducer` for the full account and the numbers.
+
+Replaced with a lane-partitioned float reduction: no scale, no atomics, no
+quantization floor, and deterministic. Measured on this scene, 2000 frames on
+real WebGPU:
+
+| | before | after |
+|---|---|---|
+| frames converged | ~50% | **100%** |
+| pressure solves rejected | 5-17 per 150 frames | **0 in 2000** |
+| max\|div\| after projection | 0.1-0.4 unconverged, 0.01-0.03 converged | **< 0.005 throughout** |
+| occupied cells (1550 = healthy) | collapsed to 340-700 | **1536, flat for 2000 frames** |
+| peak velocity | hit the 100 clamp | 15.1, physical |
+
+Eight examples each carried their own hand-tuned `atomicScale` (1024, 256, 1,
+...) with long comments about how each was found. All of them are now deleted:
+the option is accepted and ignored, and the scenes run without it.
+
+The remaining items are still worth doing -- item 3 in particular, since
+`maxPlausiblePressure` is the last per-scene magic number in this stack -- but
+they are improvements now, not fixes for a broken solve.
+
 ### 1. Never snapshot a bad pressure field **[done]**
 
 Not from OpenFOAM -- this is a straight defect found while measuring. The circuit

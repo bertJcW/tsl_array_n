@@ -169,6 +169,12 @@
 // nothing and solves the same problem.
 //
 // ============================================================
+// *** OBSOLETE as of the scale-free dot product: there is no atomicScale to
+// set any more, and passing one is accepted and ignored. The reduction it
+// used to configure was replaced (linalg.js, createDotReducer) precisely
+// because no single value fits every scene -- the per-scene numbers recorded
+// below are kept as the evidence that led there, not as instructions. ***
+//
 // pressure.atomicScale: the one option you MUST set per scene
 // ============================================================
 //

@@ -6,13 +6,13 @@
 // examples/05-preconditioned-conjugate-gradient/ (preconditioned CG),
 // both against a diagonal operator with a known exact solution.
 //
-// isDegenerateDot is the one exception: a pure function of two plain
-// numbers, no GPU involved at all, so its own threshold math is verified
-// directly below instead of only through solve()'s live behavior.
+// isDegenerateDenominator is the one exception: a pure function of a plain
+// number, no GPU involved at all, so its own logic is verified directly
+// below instead of only through solve()'s live behavior.
 
 import { describe, it, expect } from 'vitest';
 import * as tsl_array_n from 'tsl_array_n';
-import { createConjugateGradientSolver, createPreconditionedConjugateGradientSolver, isDegenerateDot } from '../src/linalg/linalg.js';
+import { createConjugateGradientSolver, createPreconditionedConjugateGradientSolver, isDegenerateDenominator, createDotReducer } from '../src/linalg/linalg.js';
 
 // A no-op stand-in for a real matvec/preconditioner factory -- fine for
 // these tests since none of them call .solve() (the only thing that would
@@ -242,38 +242,73 @@ describe( 'createPreconditionedConjugateGradientSolver', () => {
 
 } );
 
-describe( 'isDegenerateDot', () => {
+describe( 'isDegenerateDenominator', () => {
 
-	it( 'flags exactly 0 as degenerate for any scale', () => {
+	it( 'flags exactly 0', () => {
 
-		expect( isDegenerateDot( 0, 65536 ) ).toBe( true );
-
-	} );
-
-	it( 'flags a value smaller than half the quantization step as degenerate', () => {
-
-		// half-step is 0.5/65536 ~= 7.63e-6 -- anything strictly under that
-		// couldn't have been read back as a nonzero quantized value anyway.
-		expect( isDegenerateDot( 1e-8, 65536 ) ).toBe( true );
-		expect( isDegenerateDot( - 1e-8, 65536 ) ).toBe( true );
+		expect( isDegenerateDenominator( 0 ) ).toBe( true );
+		expect( isDegenerateDenominator( - 0 ) ).toBe( true );
 
 	} );
 
-	it( 'does not flag a value at least half the quantization step', () => {
+	it( 'flags non-finite values', () => {
 
-		expect( isDegenerateDot( 1 / 65536, 65536 ) ).toBe( false );
-		expect( isDegenerateDot( - 1 / 65536, 65536 ) ).toBe( false );
-		expect( isDegenerateDot( 1, 65536 ) ).toBe( false );
+		expect( isDegenerateDenominator( NaN ) ).toBe( true );
+		expect( isDegenerateDenominator( Infinity ) ).toBe( true );
+		expect( isDegenerateDenominator( - Infinity ) ).toBe( true );
 
 	} );
 
-	it( 'scales its threshold with the atomicScale argument', () => {
+	it( 'does NOT flag a merely small value', () => {
 
-		// a coarser (smaller) scale has a wider quantization floor, so the
-		// same value can be degenerate there yet perfectly resolvable once
-		// scale is large enough to shrink the floor below it.
-		expect( isDegenerateDot( 1e-4, 64 ) ).toBe( true );
-		expect( isDegenerateDot( 1e-4, 1e9 ) ).toBe( false );
+		// This is the whole point of the change away from a magnitude
+		// threshold: a converging CG's dot products get small as a matter of
+		// course, and the old scale-based floor could not tell "the operator
+		// is singular" from "the solve is nearly finished". A tiny
+		// denominator is now allowed through and the *quotient* is checked
+		// for plausibility instead (MAX_ALPHA_MAGNITUDE).
+		expect( isDegenerateDenominator( 1e-8 ) ).toBe( false );
+		expect( isDegenerateDenominator( - 1e-8 ) ).toBe( false );
+		expect( isDegenerateDenominator( Number.MIN_VALUE ) ).toBe( false );
+		expect( isDegenerateDenominator( 1 ) ).toBe( false );
+
+	} );
+
+} );
+
+describe( 'createDotReducer', () => {
+
+	it( 'builds without throwing for 1D/2D/3D shapes', () => {
+
+		const a1 = tsl_array_n.arrayN( 'float', 8 );
+		const a2 = tsl_array_n.array2( 'float', 4, 4 );
+		const a3 = tsl_array_n.array3( 'float', 2, 2, 2 );
+
+		expect( () => createDotReducer( [ 8 ], a1, a1 ) ).not.toThrow();
+		expect( () => createDotReducer( [ 4, 4 ], a2, a2 ) ).not.toThrow();
+		expect( () => createDotReducer( [ 2, 2, 2 ], a3, a3 ) ).not.toThrow();
+
+	} );
+
+	it( 'rejects a 4D shape, matching buildElementwiseKernel own limit', () => {
+
+		const a4 = tsl_array_n.arrayN( 'float', [ 2, 2, 2, 2 ] );
+
+		expect( () => createDotReducer( [ 2, 2, 2, 2 ], a4, a4 ) ).toThrow( /1D\/2D\/3D/ );
+
+	} );
+
+	it( 'uses one lane per first-axis index in 2D, and caps lanes in 1D', () => {
+
+		const wide = tsl_array_n.array2( 'float', 6, 9 );
+		const long = tsl_array_n.arrayN( 'float', 4096 );
+		const short = tsl_array_n.arrayN( 'float', 10 );
+
+		expect( createDotReducer( [ 6, 9 ], wide, wide ).lanes ).toBe( 6 );
+		// 1D caps at 64 lanes and lets each stride, rather than reading back
+		// one partial per element.
+		expect( createDotReducer( [ 4096 ], long, long ).lanes ).toBe( 64 );
+		expect( createDotReducer( [ 10 ], short, short ).lanes ).toBe( 10 );
 
 	} );
 

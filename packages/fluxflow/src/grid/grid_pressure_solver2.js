@@ -166,8 +166,11 @@ const DEFAULT_MAX_PLAUSIBLE_PRESSURE = 1e6;
 // options.multigrid: forwarded as-is to createMultigridPreconditioner's
 // own options (e.g. { numberOfLevels: 4 }).
 // options.tolerance/maxIterations: forwarded to the underlying CG solve().
-// options.atomicScale: forwarded to createPreconditionedConjugateGradientSolver
-// as its own options.atomicScale -- the fixed-point scale for the GPU atomic
+// options.atomicScale: accepted and ignored, forwarded only so callers that
+// still pass one keep working. The CG dot product no longer uses a
+// fixed-point encoding at all -- see linalg.js's createDotReducer for why
+// that knob had to go. Historically this was described as the fixed-point
+// scale for the GPU atomic
 // dot product (see linalg.js's DEFAULT_ATOMIC_DOT_SCALE comment). Exposed
 // here because a pressure/divergence field's natural magnitude can be much
 // smaller than the O(1) values that default was tuned against (a real

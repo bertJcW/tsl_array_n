@@ -212,7 +212,6 @@ try {
 	// Pressure-solve knobs, overridable per run -- see the `pressure:` option
 	// below for why these two in particular are worth A/B'ing.
 	const densityCouplingOff = new URLSearchParams( location.search ).get( 'nodensity' ) === '1';
-	const atomicScaleParam = Number( new URLSearchParams( location.search ).get( 'atomicScale' ) ?? 256 );
 	const maxPressureParam = Number( new URLSearchParams( location.search ).get( 'maxPressure' ) ?? 100 );
 	const maxIterParam = Number( new URLSearchParams( location.search ).get( 'maxIter' ) ?? 100 );
 	const toleranceParam = Number( new URLSearchParams( location.search ).get( 'tol' ) ?? 1e-5 );
@@ -271,12 +270,10 @@ try {
 		// examples/20-flip-dam-break/'s values: same solver, same resolution,
 		// same free-surface gravity-driven setup, so the analogy actually holds
 		// here (unlike example 25's sealed column, where it did not).
-		// `?atomicScale=` / `?maxPressure=` override these, so the pair can be
-		// A/B'd across seeds without an edit. They are the two numbers a
-		// blow-up in this scene turns out to hinge on, and neither is
-		// self-evidently right: see the investigation note below.
+		// `?maxPressure=` / `?maxIter=` / `?tol=` override these so they can be
+		// A/B'd across seeds without an edit. There is deliberately no
+		// atomicScale here any more -- see linalg.js's createDotReducer.
 		pressure: {
-			atomicScale: atomicScaleParam,
 			maxPlausiblePressure: maxPressureParam,
 			maxIterations: maxIterParam,
 			tolerance: toleranceParam

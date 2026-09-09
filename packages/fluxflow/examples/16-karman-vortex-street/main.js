@@ -417,7 +417,6 @@ try {
 			multigrid: { numberOfLevels: 4, numberOfSmoothingIterationsDown: 3, numberOfSmoothingIterationsUp: 3, numberOfCoarsestIterations: 30 },
 			tolerance: 1e-3,
 			maxIterations: 40,
-			atomicScale: 256
 		}
 	} );
 

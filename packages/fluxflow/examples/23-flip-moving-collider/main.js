@@ -200,7 +200,7 @@ try {
 		dt,
 		collider: rigidCollider,
 		velocityDamping: velocityDampingUniform(),
-		pressure: { atomicScale: 1, maxPlausiblePressure: 100 }
+		pressure: { maxPlausiblePressure: 100 }
 	} );
 
 	flip.positions.fromArray( seed.positionsArray );

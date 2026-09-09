@@ -9,24 +9,20 @@
 //
 // 1. No native on-device reduction. Taichi's `result += p[I]*q[I]` inside a
 //    `@ti.kernel` for-loop is a genuine parallel reduction the Taichi
-//    compiler handles on-device. tsl_array_n has no reduction primitive of
-//    its own, but three.js TSL exposes real WebGPU atomic operations
-//    (`atomicAdd`, on a storage buffer marked `.toAtomic()`), so the two
-//    dot products this solver needs (`r.r`, `p.Ap`) are computed by having
-//    every thread atomically add its own per-cell product into a single
-//    shared accumulator -- a genuine GPU-side parallel reduction, not a CPU
-//    loop. The catch: WGSL atomics only exist for `atomic<i32>`/
-//    `atomic<u32>`, never float, so each per-cell product is scaled by
-//    `ATOMIC_DOT_SCALE` and rounded to a fixed-point integer before the
-//    atomic add, then divided back after reading the single accumulated
-//    int back to the CPU. This trades exact float precision (and a little
-//    int32 headroom -- see the constant's own comment) for turning an O(N)
-//    CPU-bound reduction + an O(N)-element GPU->CPU transfer into an O(N)
-//    GPU-bound reduction + a single-int transfer. It also means this
-//    solver only supports scalar `'float'` fields for now: extending the
-//    same trick to vector element types would need a per-component
-//    accumulator (or an `atomicAdd` per swizzle component), not attempted
-//    here since nothing in this project needs it yet.
+//    compiler handles on-device; tsl_array_n has no reduction primitive of
+//    its own, so this file builds one. It is a lane-partitioned float
+//    reduction (see createDotReducer): each lane sums a slice of the
+//    product in float32 into one partial, and the host adds the handful of
+//    partials in double precision. One dispatch and one small readback per
+//    dot product.
+//    This *replaced* a WebGPU-atomic version -- every thread atomicAdd-ing
+//    its own fixed-point-encoded product into one shared int32 accumulator,
+//    since WGSL atomics only exist for `atomic<i32>`/`atomic<u32>` and never
+//    for float. That worked, but the fixed-point encoding's dynamic range
+//    turned out to be this solver's worst source of instability, and no
+//    single scale fits every scene. createDotReducer's own comment has the
+//    measurements. The solver still only supports scalar `'float'` fields,
+//    now simply because nothing in this project needs anything else.
 //    Also a real, load-bearing platform gap: WebGPU atomics are exactly
 //    that -- WebGPU-only. TSL's own `AtomicFunctionNode` docs say so
 //    explicitly, and reading the WebGL2 fallback backend's own node
@@ -74,7 +70,7 @@
 //    ../../THIRD-PARTY-NOTICES.md for the attribution.
 
 import * as tsl_array_n from 'tsl_array_n';
-import { atomicAdd, round } from 'three/tsl';
+import { float, Loop, If } from 'three/tsl';
 
 // Fixed-point scale for encoding a float product as an atomically-summable
 // int32 -- see decision 1 above. Too small loses precision (residuals near
@@ -140,15 +136,17 @@ const MAX_BETA_MAGNITUDE = 10;
 // full derivation). Unlike MAX_BETA_MAGNITUDE (tuned against a specific
 // observed healthy range, since beta is a dimensionless ratio of
 // like-scaled quantities), alpha's own "reasonable" magnitude genuinely
-// depends on a caller's specific problem scale (grid spacing, atomicScale,
-// the physical magnitude of b) -- there's no single universal healthy
-// range to tune against the way there is for beta. This is deliberately
-// generous purely as a last-resort backstop against a runaway magnitude
-// the sign check alone wouldn't catch (oldRZ and pAp both negative, so
-// alpha is positive, but pAp is only *just* above isDegenerateDot's own
-// floor while oldRZ is comparatively large) -- callers with an unusually
-// large problem scale should pass a larger atomicScale (see that option's
-// own comment) rather than rely on this bound being loose enough.
+// depends on a caller's specific problem scale (grid spacing, the physical
+// magnitude of b) -- there's no single universal healthy range to tune
+// against the way there is for beta. This is deliberately generous purely
+// as a last-resort backstop against a runaway magnitude the sign check
+// alone wouldn't catch (oldRZ and pAp both negative, so alpha is positive,
+// but pAp is very small while oldRZ is comparatively large). Since the dot
+// product stopped being quantized (see createDotReducer) this is the only
+// guard standing between a legitimately tiny denominator and a corrupting
+// update, which is the right place for it: a quotient is checked for
+// plausibility once it exists, rather than its denominator being refused in
+// advance.
 const MAX_ALPHA_MAGNITUDE = 1e6;
 
 // *** A real gap in the two guards above, found via real-hardware
@@ -216,73 +214,194 @@ export function buildElementwiseKernel( shape, indexedFn ) {
 
 }
 
-// Builds a dispatcher that atomically accumulates sum(fieldA[I] * fieldB[I])
-// into `accum` (a 0-D 'int' field already marked `.toAtomic()`) -- see
-// decision 1 in the file header comment. `accum` is shared across every
-// dot product this solver needs (r.r and p.Ap): they never run
-// concurrently, so one accumulator plus a reset before each dispatch is
-// enough.
-function buildAtomicDotKernel( shape, scale, accum, fieldA, fieldB ) {
-
-	return buildElementwiseKernel( shape, ( I ) => {
-
-		const scaled = round( fieldA( ...I ).mul( fieldB( ...I ) ).mul( scale ) ).toInt();
-		atomicAdd( accum(), scaled );
-
-	} );
-
-}
-
-// Resets the shared accumulator, dispatches one atomic-dot kernel, reads
-// back the single accumulated int, and decodes it -- the only GPU->CPU
-// transfer this reduction needs, versus reading back two full O(N) arrays.
-async function readAtomicDot( accum, scale, dispatch ) {
-
-	accum.fromArray( new Int32Array( [ 0 ] ) );
-	dispatch();
-
-	const [ scaledSum ] = await accum.toArray();
-	return scaledSum / scale;
-
-}
-
-// A dot product read back through the fixed-point atomic accumulator above
-// is quantized in units of `1/scale` (decision 1 in the file header
-// comment): the smallest magnitude it can ever report as nonzero is
-// `1/scale` (a single-count accumulated int), so anything genuinely smaller
-// than half that is indistinguishable from an exact 0 -- it either reads
-// back as literal `0`, or as noise no more meaningful than 0 would be.
-// alpha/beta below both divide by exactly this kind of quantity
-// (p.Ap for alpha, the previous iteration's r.r or r.z for beta); a
-// genuine 0 denominator -- or one quantized down to it -- produces
-// Infinity/NaN with no way to recover, so every division site checks its
-// own denominator against this floor first and bails out (breaking the
-// iteration, keeping whatever x already holds) rather than risk it.
+// *** The dot product used to be a fixed-point atomic accumulation, and
+// that was this solver's single worst source of instability. ***
 //
-// This is NOT a jet-ported check -- jet's own reference `pcg()`
-// (cg-inl.h, see THIRD-PARTY-NOTICES.md) has no equivalent guard, because
-// it runs in plain double-precision CPU arithmetic with no artificial
-// quantization step at all, so an exactly-zero denominator there could
-// only come from a genuinely singular operator (e.g. a fully closed,
+// The old encoding was `round(value * atomicScale)` atomicAdd-ed into an
+// int32, decoded by dividing by the same scale. That squeezes a solve
+// between two hard walls that move independently of each other:
+//
+//   * too large a scale and the accumulator overflows -- `sum * scale` has
+//     to stay under 2^31, and a dot product's magnitude drops by orders of
+//     magnitude as CG converges, so the same scale that is comfortable at
+//     iteration 50 can overflow at iteration 0;
+//   * too small a scale and every value under `0.5 / scale` quantizes to
+//     exactly 0, which is indistinguishable from a genuinely singular
+//     operator, so the iteration has to bail out rather than divide by it.
+//
+// Measured on examples/26-dye-free-surface/ (a 64x64 free-surface FLIP
+// scene): at its `atomicScale: 256` only about half of frames converged,
+// because CG hit the `0.5/256 = 0.002` quantization floor long before the
+// solve was done, and every non-converged frame left real divergence in the
+// velocity field (max|div| 0.1-0.4 against 0.01-0.03 on converged frames)
+// until the liquid collapsed. At 4096 convergence rose to 95%. At 65536 the
+// accumulator overflowed and pressure came back non-finite on frame 2. A
+// working value existed for that scene, at that resolution, in that state --
+// which is not something a caller can be asked to find, and the fact that
+// several examples in this port each carry their own hand-tuned
+// `atomicScale` is the symptom, not the solution.
+//
+// So the reduction below encodes nothing. Each lane sums a slice of the
+// product in ordinary float32, writes one partial sum, and the host adds the
+// (few) partials in double precision. Same cost profile as the atomic
+// version -- one dispatch, one small readback per dot product -- and:
+//
+//   * no scale to choose, at any problem size or magnitude;
+//   * no overflow, and no quantization floor beyond float32's own;
+//   * more accurate, since the final summation happens in doubles rather
+//     than in int32 counts;
+//   * deterministic. No atomics means no run-to-run variation from GPU
+//     scheduling order, which also removes one source of the "same input,
+//     different outcome" noise this port's stability testing kept hitting.
+//
+// The lane count is the first axis's own length (a 2D 64x64 field gives 64
+// lanes of 64 terms each); 1D caps it and lets lanes stride instead.
+const MAX_1D_DOT_LANES = 64;
+
+/**
+ * Builds a reusable dot-product reducer over two same-shaped fields.
+ *
+ * `read()` dispatches the partial-sum kernel and returns
+ * `sum(fieldA[I] * fieldB[I])` as a plain number. Fields are bound at
+ * construction time, matching every other factory in this port: build once,
+ * call the returned `read` per iteration.
+ */
+export function createDotReducer( shape, fieldA, fieldB ) {
+
+	const lanes = shape.length === 1 ? Math.min( shape[ 0 ], MAX_1D_DOT_LANES ) : shape[ 0 ];
+	const partial = tsl_array_n.arrayN( 'float', [ lanes ] );
+
+	let dispatch;
+
+	if ( shape.length === 1 ) {
+
+		const n = shape[ 0 ];
+		const perLane = Math.ceil( n / lanes );
+
+		dispatch = tsl_array_n.kernel( [ lanes ], ( lane ) => {
+
+			const acc = float( 0 ).toVar();
+
+			// Strided rather than blocked, so neighbouring lanes read
+			// neighbouring elements on every step of the loop.
+			Loop( perLane, ( { i: step } ) => {
+
+				const idx = lane.add( step.mul( lanes ) );
+
+				If( idx.lessThan( n ), () => {
+
+					acc.addAssign( fieldA( idx ).mul( fieldB( idx ) ) );
+
+				} );
+
+			} );
+
+			partial( lane ).assign( acc );
+
+		} );
+
+	} else if ( shape.length === 2 ) {
+
+		const ny = shape[ 1 ];
+
+		dispatch = tsl_array_n.kernel( [ lanes ], ( i ) => {
+
+			const acc = float( 0 ).toVar();
+
+			Loop( ny, ( { i: j } ) => {
+
+				acc.addAssign( fieldA( i, j ).mul( fieldB( i, j ) ) );
+
+			} );
+
+			partial( i ).assign( acc );
+
+		} );
+
+	} else if ( shape.length === 3 ) {
+
+		const ny = shape[ 1 ];
+		const nz = shape[ 2 ];
+
+		dispatch = tsl_array_n.kernel( [ lanes ], ( i ) => {
+
+			const acc = float( 0 ).toVar();
+
+			Loop( ny, ( { i: j } ) => {
+
+				Loop( nz, ( { i: k } ) => {
+
+					acc.addAssign( fieldA( i, j, k ).mul( fieldB( i, j, k ) ) );
+
+				} );
+
+			} );
+
+			partial( i ).assign( acc );
+
+		} );
+
+	} else {
+
+		throw new Error( `createDotReducer: only 1D/2D/3D shapes are supported, got ${ shape.length }D.` );
+
+	}
+
+	async function read() {
+
+		dispatch();
+
+		const partials = await partial.toArray();
+		let sum = 0;
+
+		// Plain JS numbers are doubles, so this final pass is strictly more
+		// accurate than the per-lane float32 accumulation that produced it.
+		for ( let i = 0; i < partials.length; i ++ ) sum += partials[ i ];
+
+		return sum;
+
+	}
+
+	return { read, lanes };
+
+}
+
+// alpha and beta below are both quotients whose denominator is a dot
+// product (p.Ap for alpha; the previous iteration's r.r or r.z for beta).
+// A denominator of exactly 0 -- or one that is not finite -- produces
+// Infinity/NaN with no way to recover, so every division site checks its
+// own denominator here first and bails out (breaking the iteration, keeping
+// whatever x already holds) rather than risk corrupting x.
+//
+// This is NOT a jet-ported check -- jet's own reference `pcg()` (cg-inl.h,
+// see THIRD-PARTY-NOTICES.md) has no equivalent guard, because it runs in
+// plain double-precision CPU arithmetic where an exactly-zero denominator
+// could only come from a genuinely singular operator (e.g. a fully closed,
 // all-Neumann pressure domain with no Dirichlet anchor -- see
 // grid_pressure_solver2.js's own header comment) landing the search
-// direction exactly in that operator's null space, an already-rare event
-// in floating point. This port's own GPU-atomic reduction adds a second,
-// independent, and much more easily triggered way to land on an exact
-// zero: quantization simply rounding a small-but-nonzero true value down
-// to the integer 0 before the atomic add ever happens -- a real risk
-// unique to this port's own reduction strategy, confirmed as the likely
-// cause of a real-hardware failure where a closed-domain pressure solve's
-// RHS was finite and well-posed (sum of divergence ~0, as a closed domain
-// requires) yet its pressure came back 100% non-finite from the very
-// first solve() call: exactly what a `pAp` (or `oldRZ`/`oldRTr`) that
-// quantized to 0 partway through the iteration would produce.
-// Exported (like buildElementwiseKernel above) so its threshold math can be
-// unit-tested directly without a GPU -- both solve() functions below use it
-// as an internal guard, not something a caller normally calls itself.
-export function isDegenerateDot( value, scale ) {
+// direction exactly in that operator's null space.
+//
+// *** This check used to be magnitude-based, and that was wrong. ***
+//
+// While the dot product was a fixed-point atomic accumulation, anything
+// below `0.5 / atomicScale` was genuinely indistinguishable from zero, so
+// this guard took the scale as an argument and bailed out on anything under
+// that floor. The trouble is that a converging CG's dot products fall
+// *through* that floor as a matter of course -- the guard could not tell
+// "the operator is singular" from "the solve is nearly finished", and on a
+// scene whose atomicScale was tuned a little too low it stopped the
+// iteration early on roughly half of all frames. See createDotReducer's own
+// comment for the measurement. With the quantization gone, a small
+// denominator is just a small number and the quotient is checked for
+// plausibility after the division (MAX_ALPHA_MAGNITUDE, below) rather than
+// before it, so only a true 0 or a non-finite value bails out here.
+//
+// Exported (like buildElementwiseKernel above) so it can be unit-tested
+// without a GPU -- both solve() functions below use it as an internal
+// guard, not something a caller normally calls itself.
+export function isDegenerateDenominator( value ) {
 
-	return Math.abs( value ) < 0.5 / scale;
+	return ! Number.isFinite( value ) || value === 0;
 
 }
 
@@ -294,9 +413,8 @@ export function isDegenerateDot( value, scale ) {
 // b, x: tsl_array_n fields, same shape and element type, bound for this
 // solver's lifetime. x also serves as the initial guess (matching the
 // source: x is both input and output).
-// options.atomicScale: fixed-point scale for the GPU atomic dot product,
-// see DEFAULT_ATOMIC_DOT_SCALE's own comment -- tune this if your fields'
-// typical value range risks int32 overflow or under-precision.
+// options.atomicScale: accepted and ignored, see the option's own comment
+// in the body -- the dot product has no fixed-point scale any more.
 export function createConjugateGradientSolver( applyOperator, b, x, options = {} ) {
 
 	if ( b.type !== x.type ) {
@@ -319,7 +437,11 @@ export function createConjugateGradientSolver( applyOperator, b, x, options = {}
 
 	const shape = b.shape;
 	const type = b.type;
-	const atomicScale = options.atomicScale ?? DEFAULT_ATOMIC_DOT_SCALE;
+	// options.atomicScale is accepted and ignored: the dot product no longer
+	// uses a fixed-point encoding, so there is no scale to set. Kept as a
+	// silently-tolerated option rather than an error because several scenes
+	// in this port still pass a hand-tuned value, and every one of those is
+	// now better off without it. See createDotReducer's own comment.
 
 	const p  = tsl_array_n.arrayN( type, shape );
 	const r  = tsl_array_n.arrayN( type, shape );
@@ -329,11 +451,8 @@ export function createConjugateGradientSolver( applyOperator, b, x, options = {}
 	const alpha = tsl_array_n.array0( 'float' );
 	const beta  = tsl_array_n.array0( 'float' );
 
-	const dotAccum = tsl_array_n.array0( 'int' );
-	dotAccum.node.toAtomic();
-
-	const dispatchDotRR  = buildAtomicDotKernel( shape, atomicScale, dotAccum, r, r );
-	const dispatchDotPAp = buildAtomicDotKernel( shape, atomicScale, dotAccum, p, Ap );
+	const dotRR  = createDotReducer( shape, r, r );
+	const dotPAp = createDotReducer( shape, p, Ap );
 
 	const applyToX = applyOperator( x, Ax );
 	const applyToP = applyOperator( p, Ap );
@@ -385,7 +504,7 @@ export function createConjugateGradientSolver( applyOperator, b, x, options = {}
 		applyToX(); // Ax = A @ x
 		init(); // r = b - Ax, p = 0, Ap = 0
 
-		const initRTr = await readAtomicDot( dotAccum, atomicScale, dispatchDotRR );
+		const initRTr = await dotRR.read();
 		let oldRTr = initRTr;
 		let newRTr = initRTr;
 
@@ -398,13 +517,13 @@ export function createConjugateGradientSolver( applyOperator, b, x, options = {}
 			for ( let iter = 0; iter < maxiter; iter ++ ) {
 
 				applyToP(); // Ap = A @ p
-				const pAp = await readAtomicDot( dotAccum, atomicScale, dispatchDotPAp );
+				const pAp = await dotPAp.read();
 
 				// p has (numerically) run into A's null space, or the atomic
 				// reduction quantized a tiny-but-nonzero pAp down to 0 -- see
-				// isDegenerateDot's own comment. Either way alpha would be a
+				// isDegenerateDenominator's own comment. Either way alpha would be a
 				// degenerate division; stop here rather than corrupt x.
-				if ( isDegenerateDot( pAp, atomicScale ) ) break;
+				if ( isDegenerateDenominator( pAp ) ) break;
 
 				setScalar( alpha, oldRTr / pAp ); // alpha = rTr / pTAp
 				updateX();
@@ -421,7 +540,7 @@ export function createConjugateGradientSolver( applyOperator, b, x, options = {}
 
 				}
 
-				newRTr = await readAtomicDot( dotAccum, atomicScale, dispatchDotRR );
+				newRTr = await dotRR.read();
 
 				if ( Math.sqrt( Math.abs( newRTr ) ) < tol ) break;
 
@@ -431,10 +550,10 @@ export function createConjugateGradientSolver( applyOperator, b, x, options = {}
 				// RESIDUAL_RECOMPUTE_INTERVAL's comment).
 				if ( newRTr > oldRTr ) forceResidualRecompute = true;
 
-				// Guards the beta division below -- see isDegenerateDot's own
+				// Guards the beta division below -- see isDegenerateDenominator's own
 				// comment. oldRTr is *this* iteration's denominator (not yet
 				// overwritten from newRTr), so check it here, right before use.
-				if ( isDegenerateDot( oldRTr, atomicScale ) ) break;
+				if ( isDegenerateDenominator( oldRTr ) ) break;
 
 				setScalar( beta, newRTr / oldRTr ); // beta = rTr_i+1 / rTr_i
 				updateP();
@@ -537,7 +656,11 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 	const shape = b.shape;
 	const type = b.type;
-	const atomicScale = options.atomicScale ?? DEFAULT_ATOMIC_DOT_SCALE;
+	// options.atomicScale is accepted and ignored: the dot product no longer
+	// uses a fixed-point encoding, so there is no scale to set. Kept as a
+	// silently-tolerated option rather than an error because several scenes
+	// in this port still pass a hand-tuned value, and every one of those is
+	// now better off without it. See createDotReducer's own comment.
 
 	const p  = tsl_array_n.arrayN( type, shape );
 	const r  = tsl_array_n.arrayN( type, shape );
@@ -548,12 +671,9 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	const alpha = tsl_array_n.array0( 'float' );
 	const beta  = tsl_array_n.array0( 'float' );
 
-	const dotAccum = tsl_array_n.array0( 'int' );
-	dotAccum.node.toAtomic();
-
-	const dispatchDotRR  = buildAtomicDotKernel( shape, atomicScale, dotAccum, r, r );
-	const dispatchDotRZ  = buildAtomicDotKernel( shape, atomicScale, dotAccum, r, z );
-	const dispatchDotPAp = buildAtomicDotKernel( shape, atomicScale, dotAccum, p, Ap );
+	const dotRR  = createDotReducer( shape, r, r );
+	const dotRZ  = createDotReducer( shape, r, z );
+	const dotPAp = createDotReducer( shape, p, Ap );
 
 	// Live view of the most recent solve()'s own final r.r -- exposed (not
 	// just returned from solve() as a boolean, which every existing caller
@@ -620,12 +740,12 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		applyToX(); // Ax = A @ x
 		init(); // r = b - Ax, p = 0, Ap = 0
 
-		const initRTr = await readAtomicDot( dotAccum, atomicScale, dispatchDotRR );
+		const initRTr = await dotRR.read();
 		let newRTr = initRTr;
 		let oldRTr = initRTr;
 
 		applyPreconditionerToR(); // z0 = M^-1 @ r0
-		let oldRZ = await readAtomicDot( dotAccum, atomicScale, dispatchDotRZ );
+		let oldRZ = await dotRZ.read();
 
 		updateP(); // p0 = z0 (p was 0)
 
@@ -643,11 +763,11 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 			for ( let iter = 0; iter < maxiter; iter ++ ) {
 
 				applyToP(); // Ap = A @ p
-				const pAp = await readAtomicDot( dotAccum, atomicScale, dispatchDotPAp );
+				const pAp = await dotPAp.read();
 
 				// p has (numerically) run into A's null space, or the atomic
 				// reduction quantized a tiny-but-nonzero pAp down to 0 -- see
-				// isDegenerateDot's own comment. Either way alpha would be a
+				// isDegenerateDenominator's own comment. Either way alpha would be a
 				// degenerate division; stop here rather than corrupt x. This
 				// is exactly the failure mode confirmed on real WebGPU
 				// hardware for a fully closed (all-Neumann, no Dirichlet
@@ -656,7 +776,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 				// it, since A@constant=0 exactly), and once p is dominated by
 				// it, Ap collapses toward 0 everywhere -- exactly the
 				// condition this check catches.
-				if ( isDegenerateDot( pAp, atomicScale ) ) break;
+				if ( isDegenerateDenominator( pAp ) ) break;
 
 				// p has drifted implausibly far from this solve's own starting
 				// scale across the iterations so far -- see MAX_PAP_GROWTH_
@@ -674,7 +794,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 				// header comment for the fuller derivation) -- same class of
 				// concern, one step earlier: an implausibly large alpha,
 				// magnitude-wise, is caught here the same way
-				// isDegenerateDot's own pAp check above stops the solve
+				// isDegenerateDenominator's own pAp check above stops the solve
 				// rather than risk a corrupting update.
 				//
 				// *** A negative-alpha check was tried here too and
@@ -711,7 +831,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 				}
 
-				newRTr = await readAtomicDot( dotAccum, atomicScale, dispatchDotRR );
+				newRTr = await dotRR.read();
 
 				if ( Math.sqrt( Math.abs( newRTr ) ) < tol ) break;
 
@@ -725,16 +845,16 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 				oldRTr = newRTr;
 
 				applyPreconditionerToR(); // z = M^-1 @ r, for the updated r
-				const newRZ = await readAtomicDot( dotAccum, atomicScale, dispatchDotRZ );
+				const newRZ = await dotRZ.read();
 
-				// Guards the beta division below -- see isDegenerateDot's own
+				// Guards the beta division below -- see isDegenerateDenominator's own
 				// comment. oldRZ is *this* iteration's denominator (not yet
 				// overwritten from newRZ), so check it here, right before
 				// use. Unlike oldRTr in the sibling function above, r.z has
 				// no other convergence check anywhere in this loop (only r.r
 				// is compared against tol), so this is the *only* guard
 				// protecting this particular division.
-				if ( isDegenerateDot( oldRZ, atomicScale ) ) break;
+				if ( isDegenerateDenominator( oldRZ ) ) break;
 
 				// *** A real, confirmed-on-real-hardware CG robustness fix,
 				// found via direct real-hardware dot-product logging ***
@@ -751,7 +871,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 				// confirmed on real hardware: newRZ occasionally comes back
 				// with the opposite sign from oldRZ, or simply far larger in
 				// magnitude, with neither denominator ever near zero
-				// (isDegenerateDot's own magnitude check, above, never
+				// (isDegenerateDenominator's own magnitude check, above, never
 				// trips). Either way, beta ends up large enough that
 				// `p = z + beta*p` compounds geometrically -- observed
 				// directly: |p.Ap| roughly tripling every single iteration,

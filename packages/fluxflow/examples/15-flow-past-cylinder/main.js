@@ -236,7 +236,7 @@ try {
 		// report -- switching back to numberOfLevels: 4 alone (no other
 		// change) resolves it, confirmed stable (all-finite, low residual)
 		// over 1000+ real-hardware frames.
-		pressure: { multigrid: { numberOfLevels: 4 }, tolerance: 1e-5, maxIterations: 100, atomicScale: 1024 }
+		pressure: { multigrid: { numberOfLevels: 4 }, tolerance: 1e-5, maxIterations: 100 }
 	} );
 
 	// dye's own advection, bound to the solver's already-projected
