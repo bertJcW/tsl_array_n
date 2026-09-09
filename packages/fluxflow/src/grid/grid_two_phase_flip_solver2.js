@@ -152,6 +152,38 @@
 // nothing and solves the same problem.
 //
 // ============================================================
+// pressure.atomicScale: the one option you MUST set per scene
+// ============================================================
+//
+// Found the hard way on the first real-WebGPU run, and worth reading before
+// filing a bug about this solver exploding.
+//
+// linalg.js accumulates every CG dot product as a fixed-point integer scaled
+// by `atomicScale`; too large a scale for a scene's actual magnitudes
+// overflows the accumulator and corrupts the whole reduction. This port has
+// hit that before (see examples/20-flip-dam-break/'s own header comment),
+// but two-phase makes it structural rather than incidental: `Ap` here
+// carries a factor of beta, and beta IS the density ratio, so the safe scale
+// shrinks roughly in proportion to it. The library default
+// (DEFAULT_ATOMIC_DOT_SCALE, 65536) is wrong here by about that factor.
+//
+// Measured, on real hardware, same 32x32 scene, at a 100:1 ratio:
+//
+//     atomicScale: 256  ->  pressure 1023/1024 cells non-finite by frame 10
+//     atomicScale: 16   ->  non-finite by frame 19
+//     atomicScale: 1    ->  stable, pressure bounded ~3.5, velocities ~4
+//
+// So: start at roughly DEFAULT_ATOMIC_DOT_SCALE divided by the density
+// ratio, and go down from there. This is deliberately NOT baked in as a
+// changed default, following the same reasoning
+// grid_pressure_solver2.js's own header comment records for
+// maxPlausiblePressure: a reduction magnitude tuned against one scene does
+// not reliably transfer to a differently-scaled one, and a wrong shared
+// default is worse than an explicit per-scene one. `numberOfLevels` IS
+// defaulted differently here (see below) because that one has no such
+// scene-dependence -- a deeper V-cycle is simply a better preconditioner.
+//
+// ============================================================
 // What this deliberately does NOT do (first version)
 // ============================================================
 //
@@ -229,6 +261,26 @@ export const PHASE_LIQUID = 1;
 function numberOrNode( value ) {
 
 	return typeof value === 'number' ? float( value ) : value;
+
+}
+
+// Deepest V-cycle this resolution can actually support, capped at 4.
+// multigrid.js's computeLevelShapes throws unless every axis divides evenly
+// by 2^(levels-1), so this walks up only as far as that allows -- a fixed
+// default would make the solver reject ordinary grid sizes outright.
+const MAX_DEFAULT_MULTIGRID_LEVELS = 4;
+
+function defaultMultigridLevels( shape ) {
+
+	let levels = 1;
+
+	while ( levels < MAX_DEFAULT_MULTIGRID_LEVELS && shape.every( ( n ) => n % ( 2 ** levels ) === 0 ) ) {
+
+		levels ++;
+
+	}
+
+	return levels;
 
 }
 
@@ -549,11 +601,32 @@ export function createGridTwoPhaseFlipSolver2( {
 
 	}
 
+	// *** A default that had to change after the first real-WebGPU run ***
+	//
+	// grid_pressure_solver2.js's own multigrid default is `numberOfLevels: 1`
+	// -- which is plain red-black relaxation with no coarse-grid correction
+	// at all, i.e. not really multigrid (this port's README has said as much
+	// since examples/06). Every single-phase scene here gets away with it.
+	// A variable-coefficient system does not: at a 100:1 density ratio,
+	// measured on real hardware, `numberOfLevels: 1` produced a pressure
+	// field that went 1023-cells-out-of-1024 non-finite within ten frames,
+	// while the same scene at `numberOfLevels: 4` stayed bounded (pressure
+	// peaking around 5) for the whole run and produced a cleanly rising
+	// bubble. So this solver picks its own default rather than inheriting
+	// that one.
+	//
+	// Derived from the resolution instead of hardcoded, because
+	// computeLevelShapes throws unless every axis divides by 2^(levels-1) --
+	// a hardcoded 4 would make this solver refuse perfectly ordinary grid
+	// sizes. A caller's own `pressure.multigrid.numberOfLevels` still wins.
+	const multigridOptions = { numberOfLevels: defaultMultigridLevels( cellShape ), ...( pressure.multigrid ?? {} ) };
+
 	const pressureSolver = createGridPressureSolver2( {
 		resolution: cellShape, gridSpacing, origin,
 		dirichlet,
 		faceWeights: { u: betaU, v: betaV },
-		...pressure
+		...pressure,
+		multigrid: multigridOptions
 	} );
 
 	const projectDispatch = pressureSolver.project( velocityGrid, velocityGrid );
@@ -763,67 +836,86 @@ export function createGridTwoPhaseFlipSolver2( {
 
 	if ( resampleEnabled ) {
 
-		// Two donor pools, one per phase, so a claimed donor always matches
-		// the phase the recipient cell is asking for -- see the header
-		// comment for why the single-phase pass could not simply be reused.
-		const donorPoolLiquid = tsl_array_n.arrayN( 'int', maxParticles );
-		const donorPoolGas = tsl_array_n.arrayN( 'int', maxParticles );
-		const donorPushLiquid = tsl_array_n.array0( 'int' );
-		donorPushLiquid.node.toAtomic();
-		const donorPushGas = tsl_array_n.array0( 'int' );
-		donorPushGas.node.toAtomic();
-		const donorPopLiquid = tsl_array_n.array0( 'int' );
-		donorPopLiquid.node.toAtomic();
-		const donorPopGas = tsl_array_n.array0( 'int' );
-		donorPopGas.node.toAtomic();
+		// *** Two real bugs found the first time this ran on actual WebGPU,
+		// both of them in this pass, and both invisible to every structural
+		// test -- worth recording in full, since the shape of each is the
+		// kind a reader would otherwise reintroduce. ***
+		//
+		// 1. **The per-stage storage-buffer limit.** The first version of
+		//    this pass bound twelve separate storage buffers in the
+		//    donor-claiming kernel (two count grids, two donor pools, four
+		//    atomic cursors, positions, velocities, and the two velocity
+		//    components). WebGPU's *guaranteed* limit is eight per shader
+		//    stage (`maxStorageBuffersPerShaderStage`), so this failed
+		//    outright with "The number of storage buffers (12) in the Compute
+		//    stage exceeds the maximum per-stage limit (8)" -- pipeline
+		//    creation rejected, the kernel silently doing nothing every
+		//    frame. Plenty of real hardware raises that limit, which is
+		//    exactly what makes it dangerous: it is a portability bug that a
+		//    good GPU hides. The rewrite below gets the claim kernel down to
+		//    seven bindings and is written to stay there -- if a future
+		//    change needs another field in this kernel, fold it into an
+		//    existing one rather than adding a binding.
+		//
+		//    The three things that bought the headroom: the four separate
+		//    `array0` cursors became one four-element array; the two donor
+		//    pools became one array filled from both ends (liquid upward
+		//    from 0, gas downward from the top); and the eligibility test
+		//    plus the phase choice moved out into their own kernel, which
+		//    writes a single `recipientNeed` field that encodes both.
+		//
+		// 2. **`min()` does not preserve int-ness, and an array index must be
+		//    an int.** Bounding a claimed slot with `min( slot, int( n ) )`
+		//    and using the result as an array index produced two
+		//    "THREE.TSL: Invalid generated code, expected a int" errors --
+		//    one per clamped index. Every bound in this pass is therefore
+		//    written as a `lessThan(...).select(...)` instead, which does
+		//    preserve the type. Note the contrast with `cellIndexOf` above,
+		//    where `max`/`min` around an already-`int()`-wrapped expression
+		//    is fine -- so this is not a blanket "never use min on ints",
+		//    it is specifically that min's *result* is not safe to index
+		//    with.
+		//
+		// `recipientNeed` encodes eligibility and phase in one int: 0 means
+		// "not eligible", a positive n means "needs n more liquid particles",
+		// a negative n means "needs n more gas particles". That packing is
+		// what lets the claim kernel read one field instead of two count
+		// grids, which is what keeps it under the binding limit.
+		const recipientNeed = tsl_array_n.arrayN( 'int', cellShape );
+		recipientNeed.fromArray( new Int32Array( cellCount ) );
 
-		const zeroOne = new Int32Array( [ 0 ] );
+		// One pool, filled from both ends. Each half is capped at
+		// floor(maxParticles/2) so the two ends can never meet, which makes
+		// every pool index provably in range without a runtime check. A
+		// donor beyond that cap is simply dropped -- this pass is
+		// best-effort by design (an under-filled recipient is expected and
+		// accepted, matching grid_flip_solver2.js and mantaflow's own
+		// adjustNumber), so a cap that can only bite in a pathologically
+		// clumped frame costs nothing real.
+		const donorPool = tsl_array_n.arrayN( 'int', maxParticles );
+		const poolHalf = Math.max( 1, Math.floor( maxParticles / 2 ) );
+		const poolHalfNode = int( poolHalf );
+		const poolTopNode = int( maxParticles - 1 );
+
+		// [ pushLiquid, pushGas, popLiquid, popGas ] -- one binding instead
+		// of four array0s. See bug 1 above.
+		const CURSOR_PUSH_LIQUID = 0;
+		const CURSOR_PUSH_GAS = 1;
+		const CURSOR_POP_LIQUID = 2;
+		const CURSOR_POP_GAS = 3;
+		const cursors = tsl_array_n.arrayN( 'int', 4 );
+		cursors.node.toAtomic();
+
+		const zeroCursors = new Int32Array( 4 );
 
 		function resetResampleBuffers() {
 
-			donorPushLiquid.fromArray( zeroOne );
-			donorPushGas.fromArray( zeroOne );
-			donorPopLiquid.fromArray( zeroOne );
-			donorPopGas.fromArray( zeroOne );
+			cursors.fromArray( zeroCursors );
 
 		}
 
 		const maxParticlesPerCellNode = int( maxParticlesPerCell );
 		const minParticlesPerCellNode = int( minParticlesPerCell );
-
-		// Over/under detection is on the TOTAL count (phase-agnostic -- it is
-		// about particle sampling density, which both phases share a grid
-		// for); only the pool a particle lands in depends on its phase.
-		const buildDonorPoolsKernel = tsl_array_n.kernel( maxParticles, ( p ) => {
-
-			const { i, j } = cellIndexOf( positions( p ) );
-			const count = atomicLoad( totalCellCount( i, j ) );
-
-			If( count.greaterThan( maxParticlesPerCellNode ), () => {
-
-				If( isLiquidParticle( p ), () => {
-
-					const slot = atomicAdd( donorPushLiquid(), 1 );
-					If( slot.lessThan( maxParticles ), () => {
-
-						donorPoolLiquid( slot ).assign( p );
-
-					} );
-
-				} ).Else( () => {
-
-					const slot = atomicAdd( donorPushGas(), 1 );
-					If( slot.lessThan( maxParticles ), () => {
-
-						donorPoolGas( slot ).assign( p );
-
-					} );
-
-				} );
-
-			} );
-
-		} );
 
 		function neighborWellPopulatedCount( i, j ) {
 
@@ -839,13 +931,13 @@ export function createGridTwoPhaseFlipSolver2( {
 
 		}
 
-		// Which phase this cell should be topped up WITH: its own majority
-		// if it has any particles to have a majority of, otherwise its four
-		// orthogonal neighbors' majority. Without the neighbor fallback, a
-		// completely empty cell would default to one fixed phase and slowly
-		// seed that phase into voids wherever they open up -- exactly the
+		// Which phase a cell should be topped up WITH: its own majority if it
+		// has any particles to have a majority of, otherwise its four
+		// orthogonal neighbors' majority. Without the neighbor fallback an
+		// entirely empty cell would default to one fixed phase and slowly
+		// seed that phase into every void that opens up -- the same
 		// runaway-growth failure grid_flip_solver2.js's own MIN_FLUID_
-		// NEIGHBORS guard was added for, in a new disguise.
+		// NEIGHBORS guard exists for, wearing a different hat.
 		function recipientWantsLiquid( i, j ) {
 
 			const total = atomicLoad( totalCellCount( i, j ) );
@@ -861,78 +953,159 @@ export function createGridTwoPhaseFlipSolver2( {
 				.add( atomicLoad( liquidCellCount( i, max( 0, j.sub( 1 ) ) ) ) )
 				.add( atomicLoad( liquidCellCount( i, min( resolutionY - 1, j.add( 1 ) ) ) ) );
 
-			const ownMajority = liquid.mul( 2 ).greaterThan( total );
-			const neighborMajority = neighborLiquid.mul( 2 ).greaterThan( neighborTotal );
+			return total.greaterThan( 0 ).select(
+				liquid.mul( 2 ).greaterThan( total ),
+				neighborLiquid.mul( 2 ).greaterThan( neighborTotal )
+			);
 
-			return total.greaterThan( 0 ).select( ownMajority, neighborMajority );
+		}
+
+		// 3 bindings: the two count grids in, recipientNeed out.
+		const computeRecipientNeedKernel = tsl_array_n.kernel( cellShape, ( i, j ) => {
+
+			const count = atomicLoad( totalCellCount( i, j ) );
+			const eligible = count.lessThan( minParticlesPerCellNode )
+				.and( neighborWellPopulatedCount( i, j ).greaterThanEqual( 2 ) );
+			const needed = minParticlesPerCellNode.sub( count );
+			const signed = recipientWantsLiquid( i, j ).select( needed, needed.negate() );
+
+			recipientNeed( i, j ).assign( eligible.select( signed, int( 0 ) ) );
+
+		} );
+
+		// 5 bindings: positions, phase, totalCellCount, donorPool, cursors.
+		// Over/under detection is on the TOTAL count -- that part is about
+		// particle sampling density, which both phases share a grid for --
+		// and only which end of the pool a donor lands in depends on phase.
+		const buildDonorPoolKernel = tsl_array_n.kernel( maxParticles, ( p ) => {
+
+			const { i, j } = cellIndexOf( positions( p ) );
+			const count = atomicLoad( totalCellCount( i, j ) );
+
+			If( count.greaterThan( maxParticlesPerCellNode ), () => {
+
+				If( isLiquidParticle( p ), () => {
+
+					const slot = atomicAdd( cursors( CURSOR_PUSH_LIQUID ), 1 );
+					If( slot.lessThan( poolHalfNode ), () => {
+
+						donorPool( slot ).assign( p );
+
+					} );
+
+				} ).Else( () => {
+
+					const slot = atomicAdd( cursors( CURSOR_PUSH_GAS ), 1 );
+					If( slot.lessThan( poolHalfNode ), () => {
+
+						donorPool( poolTopNode.sub( slot ) ).assign( p );
+
+					} );
+
+				} );
+
+			} );
+
+		} );
+
+		// 7 bindings: recipientNeed, cursors, donorPool, positions,
+		// velocities, dataU, dataV. See bug 1 above before adding an eighth.
+		//
+		// *** Bug 3, and the reason this reads as two near-duplicate branches
+		// instead of one branch-free body: `select()` over an `atomicLoad()`
+		// result generates invalid code. ***
+		//
+		// This was the other half of the "expected a int" errors, and it was
+		// isolated with a standalone probe rather than guessed at, because the
+		// failing construct looks completely ordinary:
+		//
+		//     pick.select( atomicLoad( a( 0 ) ), atomicLoad( a( 1 ) ) )   // 2 errors
+		//     pick.select( atomicLoad( a( 0 ) ).toInt(),
+		//                  atomicLoad( a( 1 ) ).toInt() )                 // clean
+		//
+		// An atomic load's result does not carry a plain `int` type through
+		// `select`, and every value derived from the bad select inherits the
+		// problem -- which is why two such selects produced four errors, not
+		// two. Note how narrow this is: an atomic result used directly in a
+		// *comparison* is fine (grid_flip_solver2.js has always done
+		// `claimSlot.lessThan( donorCount )`), and an `atomicAdd` result used
+		// directly as an index into a *non-atomic* array is fine (that file
+		// indexes its donor pool exactly that way). It is specifically
+		// `select` over the atomic result that breaks.
+		//
+		// `.toInt()` does fix the load case, but the phase choice here is
+		// resolved with a real `If`/`Else` instead, because the same kernel also
+		// needs to select over two `atomicAdd` results -- and bumping both
+		// cursors to then throw one away was always wasteful bookkeeping that
+		// only existed to keep the body branch-free. Branching costs nothing in
+		// bindings (TSL binds every buffer the kernel names either way), so the
+		// loop body is factored into a JS helper and instantiated twice at
+		// graph-build time: same code, two clean branches, no select over any
+		// atomic anywhere.
+		function buildClaimLoop( pushCursor, popCursor, poolIndexOf, needed, claimed, i, j ) {
+
+			// A push cursor keeps counting past the cap it stopped writing at, so
+			// it is an over-count rather than a length -- clamped here (via
+			// select over plain ints, which is fine) so that `claimSlot <
+			// available` is an honest in-range test.
+			const pushed = atomicLoad( cursors( pushCursor ) );
+			const available = pushed.lessThan( poolHalfNode ).select( pushed.toInt(), poolHalfNode );
+
+			Loop( minParticlesPerCell, () => {
+
+				If( claimed.greaterThanEqual( needed ), () => {
+
+					Break();
+
+				} );
+
+				const claimSlot = atomicAdd( cursors( popCursor ), 1 );
+
+				If( claimSlot.lessThan( available ), () => {
+
+					// claimSlot < available <= poolHalf, so the liquid mapping lands
+					// in [0, poolHalf) and the gas mapping in
+					// (maxParticles-1-poolHalf, maxParticles-1] -- disjoint and in
+					// range by construction, so the index needs no clamp of its own.
+					const donorIdx = donorPool( poolIndexOf( claimSlot ) );
+					const newPos = originNode.add( gridSpacingNode.mul( 0.5 ) ).add( vec2( i, j ).mul( gridSpacingNode ) );
+
+					positions( donorIdx ).assign( newPos );
+					velocities( donorIdx ).assign( faceCenteredValueAtPosition2(
+						velocityGrid.dataU, velocityGrid.dataV, velocityGrid.gridSpacing,
+						velocityGrid.dataOriginU, velocityGrid.dataOriginV, newPos, dataSizeU, dataSizeV
+					) );
+
+					claimed.addAssign( 1 );
+
+				} ).Else( () => {
+
+					Break();
+
+				} );
+
+			} );
 
 		}
 
 		const claimDonorsKernel = tsl_array_n.kernel( cellShape, ( i, j ) => {
 
-			const count = atomicLoad( totalCellCount( i, j ) );
+			const need = recipientNeed( i, j );
 
-			If( count.lessThan( minParticlesPerCellNode ).and( neighborWellPopulatedCount( i, j ).greaterThanEqual( 2 ) ), () => {
+			If( need.notEqual( int( 0 ) ), () => {
 
-				const wantsLiquid = recipientWantsLiquid( i, j );
-
-				// Both push cursors keep counting past maxParticles even
-				// though the pool stops accepting writes there, so the raw
-				// cursor is an over-count, not a length. Clamping it here
-				// keeps `claimSlot < donorCount` an honest in-range test
-				// rather than one that can pass for a slot that was never
-				// actually written.
-				const donorCount = min(
-					wantsLiquid.select( atomicLoad( donorPushLiquid() ), atomicLoad( donorPushGas() ) ),
-					int( maxParticles )
-				);
-				const needed = minParticlesPerCellNode.sub( count );
+				const wantsLiquid = need.greaterThan( int( 0 ) );
+				// A select over two plain ints, not over an atomic -- fine.
+				const needed = wantsLiquid.select( need, need.negate() );
 				const claimed = int( 0 ).toVar();
 
-				Loop( minParticlesPerCell, () => {
+				If( wantsLiquid, () => {
 
-					If( claimed.greaterThanEqual( needed ), () => {
+					buildClaimLoop( CURSOR_PUSH_LIQUID, CURSOR_POP_LIQUID, ( slot ) => slot, needed, claimed, i, j );
 
-						Break();
+				} ).Else( () => {
 
-					} );
-
-					// Both cursors are bumped unconditionally and only the
-					// matching one's result is used. A GPU-side branch here
-					// would have to hold the atomic inside a conditional
-					// whose two sides target different buffers; claiming one
-					// slot from each pool and discarding the unused one costs
-					// a slot from a pool that is best-effort anyway (an
-					// under-filled recipient is expected and accepted, same
-					// as the single-phase version), and keeps the atomic
-					// unconditional, which is the part that has to be right.
-					const liquidSlot = atomicAdd( donorPopLiquid(), 1 );
-					const gasSlot = atomicAdd( donorPopGas(), 1 );
-					const claimSlot = wantsLiquid.select( liquidSlot, gasSlot );
-
-					If( claimSlot.lessThan( donorCount ), () => {
-
-						// select() evaluates both sides, so the unused pool is
-						// indexed too -- clamped so that read is always in
-						// range regardless of how far the unused cursor ran.
-						const safeLiquidSlot = min( liquidSlot, int( maxParticles - 1 ) );
-						const safeGasSlot = min( gasSlot, int( maxParticles - 1 ) );
-						const donorIdx = wantsLiquid.select( donorPoolLiquid( safeLiquidSlot ), donorPoolGas( safeGasSlot ) );
-						const newPos = originNode.add( gridSpacingNode.mul( 0.5 ) ).add( vec2( i, j ).mul( gridSpacingNode ) );
-
-						positions( donorIdx ).assign( newPos );
-						velocities( donorIdx ).assign( faceCenteredValueAtPosition2(
-							velocityGrid.dataU, velocityGrid.dataV, velocityGrid.gridSpacing,
-							velocityGrid.dataOriginU, velocityGrid.dataOriginV, newPos, dataSizeU, dataSizeV
-						) );
-
-						claimed.addAssign( 1 );
-
-					} ).Else( () => {
-
-						Break();
-
-					} );
+					buildClaimLoop( CURSOR_PUSH_GAS, CURSOR_POP_GAS, ( slot ) => poolTopNode.sub( slot ), needed, claimed, i, j );
 
 				} );
 
@@ -943,12 +1116,14 @@ export function createGridTwoPhaseFlipSolver2( {
 		resamplePass = function resamplePassNow() {
 
 			resetResampleBuffers();
-			buildDonorPoolsKernel();
+			computeRecipientNeedKernel();
+			buildDonorPoolKernel();
 			claimDonorsKernel();
 
 		};
 
 	}
+
 
 	// ---------------------------------------------------------------- frame
 

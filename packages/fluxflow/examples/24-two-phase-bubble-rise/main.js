@@ -24,27 +24,32 @@
 // projection to act on. If the bubble ever rises at 1:1, something is
 // applying a force that shouldn't be.
 //
-// *** Scene-specific pressure tuning, following this port's own hard rule ***
+// *** Scene-specific pressure tuning -- measured, not guessed ***
 //
-// `atomicScale: 256` and `maxPlausiblePressure: 100` are set here rather
-// than left at library defaults, for exactly the reason
-// examples/20-flip-dam-break/'s own header comment records at length: the CG
-// solve's fixed-point atomic dot-product accumulator overflows when its
-// scale is too large for a scene's actual r.r/p.Ap magnitude, and a "safe"
-// value tuned against one scene does not transfer to a differently-scaled
-// one. This scene starts from the same 64x64 gravity-driven setup that one
-// did, so it starts from that one's values.
+// This scene was first written with examples/20-flip-dam-break/'s own values
+// (`atomicScale: 256`), on the reasoning that it starts from the same 64x64
+// gravity-driven setup. Running it on real WebGPU showed that reasoning was
+// simply wrong, and the failure was not subtle: the CG solve's fixed-point
+// atomic dot-product accumulator overflowed, and pressure went 1023 cells
+// out of 1024 non-finite within ten frames. Two-phase changes the magnitudes
+// structurally, because `Ap` carries a factor of beta and beta IS the density
+// ratio -- so the safe scale shrinks roughly in proportion to it. `1` is the
+// measured-stable value here; see the solver's own header comment
+// ("pressure.atomicScale") for the full sweep.
 //
-// Two-phase does add a new reason to expect larger magnitudes than the
-// single-phase equivalent, worth stating so it isn't mistaken for a bug on a
-// first run: a gas face's own pressure correction is scaled by beta, which
-// IS the density ratio, so the light phase legitimately moves far faster
-// than anything the single-phase solver produced. `converged` going false on
-// some frames is also more likely here than in the single-phase scenes,
-// because the multigrid preconditioner is still constant-coefficient (see
-// multigrid.js decision 4) and so preconditions this system less well the
-// higher the density ratio goes. Watch `rejected` instead: that is the one
-// that means a solve was thrown away.
+// `maxPlausiblePressure: 100` is kept as defence in depth, the same
+// belt-and-braces conclusion examples/19 and 20 both reached: with the scale
+// right, this scene's pressure peaks around 5, so 100 is ~20x generous.
+//
+// One genuine expectation to set, so it isn't mistaken for a bug: a gas
+// face's pressure correction is scaled by beta, so the light phase
+// legitimately moves far faster than anything the single-phase solver
+// produced, and `converged` does go false on many frames -- the multigrid
+// preconditioner is still constant-coefficient (multigrid.js decision 4) and
+// preconditions this system less well the higher the ratio goes. That was
+// true throughout the real-hardware run that confirmed this scene works, and
+// the bubble rose cleanly anyway. Watch `rejected` instead: that is the one
+// that means a solve was actually thrown away.
 
 import * as tsl_array_n from 'tsl_array_n';
 import { grid } from 'fluxflow';
@@ -126,7 +131,15 @@ try {
 		liquidDensity: LIQUID_DENSITY,
 		gasDensity: gasDensityUniform(),
 		velocityDamping: velocityDampingUniform(),
-		pressure: { atomicScale: 256, maxPlausiblePressure: 100 }
+		// atomicScale: 1, NOT the 256 that examples/20-flip-dam-break/ uses
+		// and not the library's own 65536 -- both were measured on real
+		// hardware to make this scene's pressure field go almost entirely
+		// non-finite within ten to twenty frames. See the solver's own header
+		// comment ("pressure.atomicScale") for the measurements and for why
+		// the safe value scales with the density ratio. If you raise the
+		// ratio slider a long way past its default, this may need to come
+		// down further still.
+		pressure: { atomicScale: 1, maxPlausiblePressure: 100 }
 	} );
 
 	function seedScene() {
@@ -186,29 +199,42 @@ try {
 
 	}
 
-	const LIQUID_RADIUS = 2.6;
-	const GAS_RADIUS = 1.6;
+	// Particle spacing is gridSpacing/particlesPerCellAxis = 0.5 world units,
+	// which at this canvas scale is 8px -- so a radius meaningfully under 8
+	// draws the seeding lattice rather than a fluid, complete with a moiré
+	// pattern once the canvas is scaled down to its CSS size. The first
+	// version of this file used 2.6 and looked exactly like that: a dot grid.
+	// Radii here are deliberately larger than the spacing so neighbouring
+	// particles overlap and the liquid reads as one connected body.
+	const PARTICLE_SPACING_PX = particleScale * 0.5;
+	const LIQUID_RADIUS = PARTICLE_SPACING_PX * 0.95;
+	const GAS_RADIUS = PARTICLE_SPACING_PX * 0.75;
 	const MAX_SPEED = 12;
 
-	// Liquid is drawn blue-to-white by speed; gas is drawn as a dim grey haze.
-	// Deliberately NOT the same speed ramp for both: the gas routinely moves
-	// several times faster than the liquid (its beta is the density ratio), so
-	// a shared ramp would saturate the gas to one flat colour and make the
-	// liquid look static by comparison.
+	// Liquid goes deep blue at rest and pale cyan where it moves fast; gas is
+	// a dim warm haze. The two ramps are deliberately different rather than
+	// one shared speed ramp: the gas routinely moves several times faster than
+	// the liquid (its beta is the whole density ratio), so a shared ramp would
+	// peg the gas at one saturated colour and make the liquid look static next
+	// to it.
 	function liquidColor( t ) {
 
 		const u = clamp01( t );
-		return `rgb(${ Math.round( 60 + u * 195 ) },${ Math.round( 140 + u * 100 ) },255)`;
+		return `rgba(${ Math.round( 40 + u * 175 ) },${ Math.round( 110 + u * 130 ) },${ Math.round( 200 + u * 55 ) },0.85)`;
 
 	}
 
 	function drawParticles( positionsData, velocitiesData, phaseData ) {
 
-		particlesCtx.fillStyle = '#0b1a2b';
+		particlesCtx.fillStyle = '#080f1a';
 		particlesCtx.fillRect( 0, 0, PARTICLE_CANVAS_SIZE, PARTICLE_CANVAS_SIZE );
 
-		// Gas first, so the liquid draws over it rather than being hidden by it.
-		particlesCtx.fillStyle = 'rgba(210, 214, 222, 0.5)';
+		// Gas first so the liquid draws over it. `lighter` makes overlapping
+		// gas accumulate into a visible haze instead of flat-shading to a
+		// single grey -- with normal alpha at this radius the air layer was
+		// nearly invisible against the dark ground.
+		particlesCtx.globalCompositeOperation = 'lighter';
+		particlesCtx.fillStyle = 'rgba(70, 62, 52, 1)';
 
 		for ( let p = 0; p < phaseData.length; p ++ ) {
 
@@ -222,6 +248,8 @@ try {
 			particlesCtx.fill();
 
 		}
+
+		particlesCtx.globalCompositeOperation = 'source-over';
 
 		for ( let p = 0; p < phaseData.length; p ++ ) {
 

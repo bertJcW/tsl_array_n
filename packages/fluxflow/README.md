@@ -2,7 +2,7 @@
 
 Browser-side GPU fluid simulation, built on [tsl_array_n](../tsl_array_n), ported from a [Taichi Lang](https://www.taichi-lang.org/) fluid-simulation library (`D:\OneDrive\04_lib_fluxflow`). The end goal is real-time browser fluid visualization and interaction paired with three.js.
 
-> **Status**: the Python source's `grid/` folder (MAC-grid data structures + numeric helpers + SDF colliders + boundary-condition solver), `noise/` folder (Perlin/Simplex/cellular noise), and `linalg/` folder (matrix-free conjugate gradient, preconditioned CG, and -- ported separately from jet/fluid-engine-dev rather than the Python source -- a geometric multigrid preconditioner) have all been ported. The actual fluid solver has now been built stage by stage on top of this foundation: semi-Lagrangian advection, external forces (a pluggable force-*function* mechanism), and pressure projection (Dirichlet-aware MGPCG, original generalization of jet's own hardcoded-zero "air" cells -- see below) are all done and wired together by `grid_solver2.js`, now a concrete orchestrator (external forces -> pressure -> advection every frame) rather than a hooks skeleton. Only viscosity remains unbuilt, explicitly deferred; `examples/14-stable-fluids/` is a fully-closed autonomous stability test, and `examples/15-flow-past-cylinder/` (new -- inflow/outflow + a real collider, see below) is the roadmap's concrete "final demo" scenario. A small `interaction/` module (original code, no Python/jet counterpart) adds pointer/keyboard DOM-event wiring so a hand-written force function (or Dirichlet-pressure function) can react to more than just position -- see below. CG/PCG, multigrid, advection (including a real boundary-crossing edge case found and fixed in its collider handling), external forces, and the `interaction/` module are all confirmed correct on real WebGPU (external forces additionally confirmed even in this dev sandbox's WebGL2 fallback -- see below for why); `examples/14-stable-fluids/` is now also confirmed stable over 1000+ real-hardware frames, after two real bugs were found and fixed: a missing boundary-condition constraint in `grid_solver2.js`, and a genuine CG solver bug (`linalg.js`'s `isDegenerateDot` guard, see below) where a closed/pure-Neumann domain's singular operator combined with this port's own fixed-point atomic reduction could produce a 0/0 division and 100%-non-finite pressure from a perfectly valid input. `sdf_inflow_outflow2.js`/`grid_outflow_solver2.js` (new -- inflow/outflow as reusable, SDF-based scene objects, derived from mantaflow, see below), `examples/15-flow-past-cylinder/`, and `examples/16-karman-vortex-street/` (new -- a longer, more asymmetric domain built to elicit alternating vortex shedding) are built and confirmed stable on real WebGPU hardware. A real long-run instability *was* found while building these (two specific hypotheses directly disproved by real-hardware experiment, an earlier "confirmed stable" claim retracted after it didn't hold up to further testing) -- but it has since been root-caused (an asymmetric red-black relaxation schedule in `createMultigridPreconditioner`, see below) and fixed; both examples were re-confirmed stable over multiple thousand real-hardware frames after the fix, and independently re-confirmed again in a later session (5300+ frames on example 15, 5750+ on example 16, both with the full outflow mechanism -- including velocity extrapolation -- active, no drift or non-finite values). See the inflow/outflow section below and `grid_outflow_solver2.js`'s own header comment for the full history. **Newest addition: `grid_two_phase_flip_solver2.js` (see below), a two-phase liquid+gas FLIP solver in which the air is a simulated phase rather than a `p = 0` void, so bubbles rise and trapped air pushes back -- coupled through a variable-density pressure projection, which needed new `faceWeights` (variable-coefficient) support in `multigrid.js`/`grid_pressure_solver2.js`. It is the one part of this port NOT yet confirmed on real WebGPU (no adapter available where it was built); see "Not yet verified on real WebGPU" below for exactly what was verified instead and what is still open.** Three earlier, real, confirmed-and-fixed bugs remain fixed and are not in question: `numberOfLevels: 1` (plain relaxation, no actual multigrid coarsening) was not an adequate MGPCG preconditioner at this grid size (see `createMultigridPreconditioner`'s own section below); `grid_math.js`'s `bilinearGradientAtPosition2` degenerated to a zero gradient exactly at a grid's own physical edge (fixed generically, benefiting collider normals too); and `grid_outflow_solver2.js`'s own convective-velocity-extrapolation `factor` used the simulation's raw `dt` instead of mantaflow's own `max(1.0, dt*4)` floor.
+> **Status**: the Python source's `grid/` folder (MAC-grid data structures + numeric helpers + SDF colliders + boundary-condition solver), `noise/` folder (Perlin/Simplex/cellular noise), and `linalg/` folder (matrix-free conjugate gradient, preconditioned CG, and -- ported separately from jet/fluid-engine-dev rather than the Python source -- a geometric multigrid preconditioner) have all been ported. The actual fluid solver has now been built stage by stage on top of this foundation: semi-Lagrangian advection, external forces (a pluggable force-*function* mechanism), and pressure projection (Dirichlet-aware MGPCG, original generalization of jet's own hardcoded-zero "air" cells -- see below) are all done and wired together by `grid_solver2.js`, now a concrete orchestrator (external forces -> pressure -> advection every frame) rather than a hooks skeleton. Only viscosity remains unbuilt, explicitly deferred; `examples/14-stable-fluids/` is a fully-closed autonomous stability test, and `examples/15-flow-past-cylinder/` (new -- inflow/outflow + a real collider, see below) is the roadmap's concrete "final demo" scenario. A small `interaction/` module (original code, no Python/jet counterpart) adds pointer/keyboard DOM-event wiring so a hand-written force function (or Dirichlet-pressure function) can react to more than just position -- see below. CG/PCG, multigrid, advection (including a real boundary-crossing edge case found and fixed in its collider handling), external forces, and the `interaction/` module are all confirmed correct on real WebGPU (external forces additionally confirmed even in this dev sandbox's WebGL2 fallback -- see below for why); `examples/14-stable-fluids/` is now also confirmed stable over 1000+ real-hardware frames, after two real bugs were found and fixed: a missing boundary-condition constraint in `grid_solver2.js`, and a genuine CG solver bug (`linalg.js`'s `isDegenerateDot` guard, see below) where a closed/pure-Neumann domain's singular operator combined with this port's own fixed-point atomic reduction could produce a 0/0 division and 100%-non-finite pressure from a perfectly valid input. `sdf_inflow_outflow2.js`/`grid_outflow_solver2.js` (new -- inflow/outflow as reusable, SDF-based scene objects, derived from mantaflow, see below), `examples/15-flow-past-cylinder/`, and `examples/16-karman-vortex-street/` (new -- a longer, more asymmetric domain built to elicit alternating vortex shedding) are built and confirmed stable on real WebGPU hardware. A real long-run instability *was* found while building these (two specific hypotheses directly disproved by real-hardware experiment, an earlier "confirmed stable" claim retracted after it didn't hold up to further testing) -- but it has since been root-caused (an asymmetric red-black relaxation schedule in `createMultigridPreconditioner`, see below) and fixed; both examples were re-confirmed stable over multiple thousand real-hardware frames after the fix, and independently re-confirmed again in a later session (5300+ frames on example 15, 5750+ on example 16, both with the full outflow mechanism -- including velocity extrapolation -- active, no drift or non-finite values). See the inflow/outflow section below and `grid_outflow_solver2.js`'s own header comment for the full history. **Newest addition: `grid_two_phase_flip_solver2.js` (see below), a two-phase liquid+gas FLIP solver in which the air is a simulated phase rather than a `p = 0` void, so bubbles rise and trapped air pushes back -- coupled through a variable-density pressure projection, which needed new `faceWeights` (variable-coefficient) support in `multigrid.js`/`grid_pressure_solver2.js`. Confirmed on real WebGPU over a 780-frame run -- which found three real bugs the (green) tests could not, including a storage-buffer limit only a weaker GPU exposes and a `select()`-over-`atomicLoad()` codegen fault; see "Two-phase: confirmed on real WebGPU" below.** Three earlier, real, confirmed-and-fixed bugs remain fixed and are not in question: `numberOfLevels: 1` (plain relaxation, no actual multigrid coarsening) was not an adequate MGPCG preconditioner at this grid size (see `createMultigridPreconditioner`'s own section below); `grid_math.js`'s `bilinearGradientAtPosition2` degenerated to a zero gradient exactly at a grid's own physical edge (fixed generically, benefiting collider normals too); and `grid_outflow_solver2.js`'s own convective-velocity-extrapolation `factor` used the simulation's raw `dt` instead of mantaflow's own `max(1.0, dt*4)` floor.
 
 ## Current state: `grid`
 
@@ -579,8 +579,9 @@ teleporting mass straight across the interface. So over/under detection stays on
 under-full cell claims a donor of the phase it should be getting -- its own majority, or its neighbors'
 majority if it has no particles to have a majority of.
 
-**Verification.** The GPU path needs real WebGPU (P2G scatter and the per-cell phase counting are both
-atomics) and is not runnable in this dev sandbox, so the discretization is verified a second way instead:
+**Verification.** Verified twice over, and the two passes caught completely different classes of problem
+-- see "Two-phase: confirmed on real WebGPU" below for the real-hardware run and the three bugs it found
+that the tests could not. The discretization itself is verified without a GPU at all:
 `test/variable_density_projection.test.js` reimplements the exact same stencil in plain JS -- same sign
 convention, same Neumann edge treatment, same Dirichlet elimination, same MAC face indexing, same
 `beta grad(p)` correction -- and checks the properties that actually pin it down: the operator is
@@ -590,8 +591,7 @@ negative control showing an unweighted correction leaves it above 0.1), a unifor
 exactly to the constant-coefficient solve, and -- the important one -- a buried gas bubble ends up moving
 **up** under uniform gravity with no buoyancy term anywhere. This is the same plain-JS-reference technique
 `multigrid.js`'s header comment credits for catching its earlier constant-diagonal bug, applied up front
-this time rather than after the fact. Real-hardware confirmation of the full GPU pipeline is still
-outstanding.
+this time rather than after the fact.
 
 Demonstrated in `examples/24-two-phase-bubble-rise/`: a tank of liquid with a gas layer above the water
 line and a gas bubble released at the bottom. The density-ratio slider is a direct test of the "no
@@ -718,34 +718,58 @@ Verified with pure-number vitest coverage (`test/cfl.test.js` -- no GPU needed a
 - **A storage field needs exactly one permanent writer kernel on this project's dev sandbox (WebGL2 fallback)** -- found while building `examples/12-interactive-advection/`, which originally ping-ponged dye between two `ScalarGrid2`s the same way `array_utils.js`'s `createExtrapolateToRegion2` ping-pongs its own `outputField` (two fixed-direction `tsl_array_n.kernel()`s both writing the same field, alternated by parity). That pattern reliably throws `TypeError: dualAttributeData.switchBuffers is not a function` from inside `WebGLBackend.compute()` once *both* writer kernels have each dispatched at least once. Three.js's WebGL2-fallback compute emulation (`WebGLAttributeUtils.js`'s `DualAttributeData`, a transform-feedback ping-pong buffer pair) evidently assumes each storage buffer has a single owning compute pipeline as its write target; a second, independently-built pipeline that also writes it ends up with something other than a `DualAttributeData` in its own `transformBuffers` list. Restructured `examples/12-interactive-advection/` to give every field exactly one permanent writer (four dye fields instead of two: two "freshly advected" scratch fields plus two "current state" fields, each written by a single dedicated kernel) -- no crash across dozens of frames after that change. Whether this is fixable, a real three.js bug, or just a hard rule to design around on this backend is undetermined; `createExtrapolateToRegion2` technically has the same two-writers-one-field shape but has apparently never been driven through a real dispatch loop that would trigger it. Worth checking for if a future ping-pong design on this backend throws the same error.
 - **`frictionCoefficient`/`closedDomainBoundaryFlag` are plain mutable properties** (`collider.frictionCoefficient = x`); the corresponding setter methods in the source (`setFriectionCoefficient`/`setClosedDomainBoundaryFlag`) weren't carried over, which is more natural plain-JS idiom. **One thing to watch for**: everywhere `frictionCoefficient` gets read inside a kernel, its value is baked into the node graph as a constant at kernel **build** time, not re-read on every dispatch -- this matches the source's own Taichi-side behavior (reading a plain Python attribute inside a Taichi `@ti.kernel` is also compile-time-constant-folded, not a new limitation introduced by this port), but if "change the friction coefficient at runtime and have an already-built kernel pick it up immediately" is ever needed, it has to become an `array0`/`uniform` instead. `SDFRigidBodyCollider2.velocityAt()` (which reads `currentPosition`/`linearVelocity`) has the same architectural limitation -- see the detailed comment in `sdf_collider2.js`.
 
-## Not yet verified on real WebGPU
+## Two-phase: confirmed on real WebGPU, and the three bugs that found
 
-`grid_two_phase_flip_solver2.js`, the `faceWeights` support it needed in `multigrid.js` /
-`grid_pressure_solver2.js`, and `examples/24-two-phase-bubble-rise/` were all built in a dev
-environment with **no WebGPU adapter at all**, so unlike every other solver in this port they have not
-been run on real hardware yet. Stated plainly rather than buried, because this port's own history is
-that real hardware is where the interesting bugs live -- the multigrid Dirichlet divergence, the
-`atomicScale` overflow in `examples/20-flip-dam-break/`, the `maxPlausiblePressure` regression in
-`examples/16-karman-vortex-street/` were every one of them found by running something, not by reading it.
+`grid_two_phase_flip_solver2.js` and its `faceWeights` support were written in an environment with no
+WebGPU adapter, then run for real. Recording this in full because the outcome is the whole argument for
+why "the tests pass" is not the same as "it works": **the plain-JS reference tests were all green, and the
+solver was still broken in three separate ways, every one of them invisible to a structural test.**
 
-What *has* been verified, and how, given that constraint:
+1. **12 storage buffers in one compute stage; the guaranteed limit is 8.** The donor-claiming kernel bound
+   two count grids, two donor pools, four atomic cursors, positions, velocities and both velocity
+   components. `maxStorageBuffersPerShaderStage` is 8, so pipeline creation was rejected outright and the
+   kernel silently did nothing. Plenty of real hardware raises that limit, which is exactly what makes it
+   dangerous — it is a portability bug that a good GPU hides. Fixed by folding the four cursors into one
+   array, the two donor pools into one array filled from both ends, and moving the eligibility test and
+   phase choice into their own kernel: 12 bindings down to 7.
+2. **`select()` over an `atomicLoad()` result generates invalid code.** This produced
+   `THREE.TSL: Invalid generated code, expected a "int"`, and it was isolated with a standalone probe
+   rather than guessed at, because the construct looks completely ordinary. `pick.select( atomicLoad( a ),
+   atomicLoad( b ) )` emits errors; the same thing with `.toInt()` on each side is clean. Values derived
+   from a bad select inherit the problem, which is why two such selects produced four errors. The fix
+   resolves the phase choice with a real `If`/`Else` instead, so no `select` touches an atomic at all.
+   Note how narrow this is: an atomic result in a *comparison* is fine, and an `atomicAdd` result used as
+   an index into a *non-atomic* array is fine — both are things `grid_flip_solver2.js` has always done.
+3. **The pressure solve blew up at any real density ratio.** With the two bugs above fixed the solver ran,
+   but `converged` was false every frame and `rejected` true from frame 60 — meaning the projection was
+   being thrown away and the velocity field never actually projected. Bisecting on the density ratio was
+   decisive: at 1:1 (`beta` = 1 everywhere) it converged with sane pressure, at 1:100 pressure went
+   1023-cells-out-of-1024 non-finite within ten frames. Two causes, both configuration rather than
+   formulation:
+   - `pressure.atomicScale`. `Ap` carries a factor of `beta`, and `beta` **is** the density ratio, so the
+     safe fixed-point scale shrinks in proportion to it. Measured on the same scene: 256 → non-finite by
+     frame 10, 16 → non-finite by frame 19, **1 → stable**. Start at roughly the library default divided
+     by the density ratio.
+   - `multigrid.numberOfLevels`. The pressure solver's default of 1 is plain relaxation with no
+     coarse-grid correction, which every single-phase scene here gets away with and a variable-coefficient
+     system does not. The two-phase solver now derives its own default from the resolution (up to 4 levels,
+     backing off so it can never reject an odd grid size) rather than inheriting that one.
 
-- **The discretization**, by an independent plain-JS reimplementation of the identical stencil in
-  `test/variable_density_projection.test.js` -- operator symmetry (with a negative control), the
-  diagonal agreeing with the operator, divergence driven to ~1e-13 (with a negative control), exact
-  reduction to the constant-coefficient solve at uniform density, and buoyancy emerging with no buoyancy
-  term. This is the same technique that caught `multigrid.js`'s earlier constant-diagonal bug.
-- **Graph construction**, by the structural tests, which build every kernel in the new solver including
-  the per-phase resampling pass and the variable-coefficient V-cycle.
-- **Non-regression of everything else**, by `faceWeights` emitting literally no extra nodes when absent,
-  so no shipped scene's kernel graph changes at all.
+After those fixes, `examples/24-two-phase-bubble-rise/` was run for **780 frames** at 64x64 with 16384
+particles: `rejected=false` on every single frame, no non-finite value at any point, velocities bounded
+throughout (peak ~27, settling to ~4-8), and mean gas height climbing 49.8 → 53.7 before flattening — the
+bubble rising, breaking the surface, merging into the air layer, and the tank settling. A separate
+bubble-tracking run measured the bubble particles specifically: mean height 4.34 → 17.32, i.e. from the
+floor to the water line, monotonically. Nothing anywhere applies a buoyancy force.
 
-What that still leaves open, in the order worth checking on real hardware first: whether
-`pressure: { atomicScale: 256 }` is right for this scene's actual magnitudes (the light phase moves much
-faster than anything the single-phase solver produced, so it may need to come down further); how far the
-density ratio can be pushed before the constant-coefficient preconditioner stops converging in
-`maxIterations`; and whether per-phase resampling actually holds the interface over a long run, which is
-the kind of slow drift `examples/20-flip-dam-break/` only revealed after ~700 frames.
+`converged` does read false on most frames and that is expected here rather than a fault: the multigrid
+preconditioner is still constant-coefficient (see `multigrid.js` decision 4), so it preconditions this
+system less well the higher the density ratio goes. `rejected` is the diagnostic that matters, and it
+stayed false throughout.
+
+Still open, and honestly so: this was run on a software adapter (SwiftShader), so it confirms correctness
+and stability but says nothing useful about performance; and the longest run so far is 780 frames, where
+`examples/20-flip-dam-break/`'s own particle-drift problem only became visible after ~700.
 
 ## Verified on real WebGPU
 

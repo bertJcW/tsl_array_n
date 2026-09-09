@@ -304,3 +304,50 @@ describe( 'createGridTwoPhaseFlipSolver2 -- live gasDensity', () => {
 	} );
 
 } );
+
+describe( 'createGridTwoPhaseFlipSolver2 -- multigrid depth default', () => {
+
+	// This solver overrides grid_pressure_solver2.js's own `numberOfLevels: 1`
+	// default, because real-hardware testing showed plain relaxation is not an
+	// adequate preconditioner for a variable-coefficient system (pressure went
+	// 1023/1024 cells non-finite within ten frames at a 100:1 density ratio).
+	// The depth is derived from the resolution rather than hardcoded, because
+	// multigrid's computeLevelShapes throws unless every axis divides evenly by
+	// 2^(levels-1) -- so what these guard is that the default can never itself
+	// make the constructor reject an ordinary grid size.
+	const make = ( nx, ny, extra = {} ) => createGridTwoPhaseFlipSolver2( {
+		velocityGrid: createFaceCenteredGrid2( nx, ny, 1, 1, 0, 0 ),
+		maxParticles: 16, ...extra
+	} );
+
+	it( 'constructs on a resolution divisible by 8 (the deepest default)', () => {
+
+		expect( () => make( 64, 64 ) ).not.toThrow();
+
+	} );
+
+	it( 'constructs on resolutions that do NOT divide evenly, backing the depth off', () => {
+
+		for ( const [ nx, ny ] of [ [ 5, 7 ], [ 6, 10 ], [ 12, 20 ], [ 24, 24 ], [ 3, 3 ] ] ) {
+
+			expect( () => make( nx, ny ), `resolution ${ nx }x${ ny }` ).not.toThrow();
+
+		}
+
+	} );
+
+	it( 'lets a caller override numberOfLevels explicitly', () => {
+
+		expect( () => make( 64, 64, { pressure: { multigrid: { numberOfLevels: 2 } } } ) ).not.toThrow();
+
+	} );
+
+	it( 'keeps the rest of pressure options working alongside the injected multigrid default', () => {
+
+		expect( () => make( 64, 64, {
+			pressure: { atomicScale: 1, maxPlausiblePressure: 100, tolerance: 1e-4, maxIterations: 50 }
+		} ) ).not.toThrow();
+
+	} );
+
+} );
