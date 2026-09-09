@@ -692,22 +692,24 @@ export function createGridTwoPhaseFlipSolver2( {
 		// momentarily empty cell: an empty pocket should be something the
 		// liquid can collapse into, not a heavy region that shoves it away.
 		//
-		// This comment used to claim such cells were "rare and transient with
-		// the whole domain seeded". That was an assumption, and measuring it
-		// falsified it. Instrumenting examples/24-two-phase-bubble-rise (64x64,
-		// whole domain seeded) showed empty cells accumulating rather than
-		// healing: a handful early, then around 8% of the 4096 cells by frame
-		// 420, and still climbing. FLIP advection alone does not redistribute
-		// particles, so once a cell empties nothing in this solver refills it;
-		// only the resampling pass does, and it only fires where it finds a
-		// donor. So empty cells are a real, growing population here, and
-		// reading them as gas is a deliberate choice about which failure is
-		// preferable -- not a statement that the case barely arises.
+		// This comment used to claim such cells were "rare and transient".
+		// Measured on examples/24-two-phase-bubble-rise (64x64, whole domain
+		// seeded, 840 frames): rare holds, transient does not. Empty cells
+		// climb from a handful to about 30 of the 4096 -- under 1% -- and
+		// then plateau there rather than healing. FLIP advection does not
+		// redistribute particles, so nothing refills an emptied cell except
+		// the resampling pass, and that only fires where it finds a donor.
+		// So they persist; there are just never many of them.
 		//
-		// It is also visible: an empty cell inside the liquid renders with the
-		// gas colour, which is what the black speckles left behind in that
-		// scene's wake are. Fixing that properly needs a narrow-band or
-		// level-set surface representation, which this port does not have.
+		// Worth knowing what that percentage is NOT an explanation for. An
+		// empty cell reads as gas and therefore draws in the gas colour, so
+		// it is tempting to blame the dark speckles left in the water on
+		// these. The same run counts ~200 cells that are pure gas *below the
+		// water line* -- an order of magnitude more, and the actual source of
+		// what you see. Those are genuinely trapped gas particles, which is
+		// the documented cost of sharing one velocity field between the
+		// phases (see "What this deliberately does NOT do" above), not an
+		// artifact of how an empty cell is read.
 		// Clamped because the fixed-point round trip can land a hair outside
 		// [0,1], and everything downstream (the density lerp, then beta, then
 		// the operator's coefficients) assumes it is inside.

@@ -54,28 +54,25 @@
 // *** The dark speckles left in the liquid, which are real and are not a
 // rendering bug ***
 //
-// After the bubble has passed, dark dots stay behind in the water. Measuring
-// per-cell occupancy over a 420-frame run showed they are two different
-// things wearing the same colour:
+// After the bubble has passed, dark dots stay behind in the water. Per-cell
+// occupancy over an 840-frame run says what they are, and the measurement is
+// worth quoting because the obvious guess is wrong:
 //
-//   1. Genuinely torn-off gas -- a couple of hundred cells that are pure gas
-//      and below the water line. This is the documented consequence of the
-//      one thing this port leaves out of MultiFLIP (Boyd & Bridson 2012):
-//      both phases share a single velocity field, so a gas particle dragged
-//      into the liquid has no per-phase velocity to separate it back out,
-//      and it just sits there. Those dots are physically wrong but they are
-//      an omission this solver's header already declares, not a defect in
-//      what it does implement.
+//   * ~200 cells are pure gas *below the water line*, holding roughly steady
+//     for the rest of the run. This is what you are looking at. It is the
+//     documented consequence of the one thing this port leaves out of
+//     MultiFLIP (Boyd & Bridson 2012): both phases share a single velocity
+//     field, so a gas particle dragged down into the liquid has no per-phase
+//     velocity to separate it back out, and it stays where it was left.
 //
-//   2. Cells with no particles in them at all -- around 8% of the 4096 cells
-//      by frame 420, and still climbing. An empty cell reads as gas density
-//      (see computeDensityKernel in the solver), so it draws exactly like
-//      case 1 even though nothing is there. Advection alone never refills a
-//      cell it emptied; only resampling does.
+//   * ~30 cells -- under 1% of the 4096 -- hold no particles at all, and an
+//     empty cell reads as gas density (see computeDensityKernel), so it
+//     draws the same colour. This is the guess that looks right and is not:
+//     it is an order of magnitude too small to account for the speckling.
 //
-// Neither is fixable by tuning this scene. Case 1 needs per-phase velocities,
-// case 2 needs a narrow-band or level-set surface. Both are on the solver's
-// "deliberately left out of this version" list.
+// Neither is fixable by tuning this scene. The first needs per-phase
+// velocities, the second a narrow-band or level-set surface, and both are on
+// the solver's "deliberately left out of this version" list.
 
 import * as tsl_array_n from 'tsl_array_n';
 import { grid } from 'fluxflow';
