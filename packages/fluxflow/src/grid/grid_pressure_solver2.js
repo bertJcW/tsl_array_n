@@ -264,15 +264,41 @@ export function createGridPressureSolver2( {
 	// that its pressure update was discarded rather than trusted.
 	const diagnostics = { converged: null, rejected: false };
 
-	// Last-resort circuit breaker: a snapshot of pressure taken right
-	// before every solve(), restored in place of this frame's own result
-	// if that result looks implausible (see dispatch()'s own use, below).
-	// Deliberately a plain copy, not part of the CG solver itself -- this
-	// is a caller-level policy decision (skip *this frame's* pressure
-	// update, keep simulating with the last known-good one, rather than
-	// let a bad solve reach velocity), not a numerical-method concern
-	// linalg.js itself should own.
+	// Last-resort circuit breaker: a snapshot of the last pressure field
+	// that actually *passed* this solver's own bad-cell check, restored in
+	// place of this frame's own result if that result looks implausible
+	// (see dispatch()'s own use, below). Deliberately a plain copy, not
+	// part of the CG solver itself -- this is a caller-level policy
+	// decision (skip *this frame's* pressure update, keep simulating with
+	// the last known-good one, rather than let a bad solve reach
+	// velocity), not a numerical-method concern linalg.js itself should
+	// own.
+	//
+	// *** "Last known-good", not "last frame's": a real, measured defect
+	// this used to get wrong. ***
+	//
+	// The snapshot used to be taken at the *start* of dispatch(), before
+	// the solve. That is one frame too early to be safe: a frame whose
+	// solve returns NaN leaves NaN in pressureGrid, the next frame
+	// snapshots that NaN as its "known-good" baseline, and from then on
+	// every rejection restores NaN. The field is permanently poisoned and
+	// nothing outside this file can clear it -- confirmed on real WebGPU
+	// hardware with examples/26-dye-free-surface/, where a full scene
+	// reset (particles, velocities, dye, velocity grid, and zeroing
+	// pressureGrid itself with a kernel dispatch) still blew up inside ten
+	// frames on 6 of 6 attempts, because this buffer still held the NaN
+	// and the first rejection handed it straight back.
+	//
+	// Snapshotting only *after* the check passes makes the invariant
+	// structural rather than incidental: every value ever written into
+	// this buffer has been through countBadPressureCellsNow() and come
+	// back clean, so restorePressure() cannot reintroduce a non-finite or
+	// implausible value no matter what any individual solve does. The
+	// initial zero fill below is the baseline for the case where no solve
+	// has passed yet -- zero pressure means "no projection this frame",
+	// which is a bounded, recoverable error, unlike a NaN.
 	const pressureSnapshot = tsl_array_n.arrayN( 'float', shape );
+	pressureSnapshot.fromArray( new Float32Array( shape.reduce( ( a, n ) => a * n, 1 ) ) );
 	const snapshotPressure = createCopyKernel2( pressureGrid.data, pressureSnapshot, shape );
 	const restorePressure = createCopyKernel2( pressureSnapshot, pressureGrid.data, shape );
 
@@ -429,15 +455,18 @@ export function createGridPressureSolver2( {
 			// one frame's pressure update is silently skipped (velocity gets
 			// corrected against a one-frame-stale pressure gradient instead)
 			// -- a minor, bounded inaccuracy, never a divergent one.
-			snapshotPressure();
-
 			if ( updateDirichletFields ) updateDirichletFields();
 			dispatchBuildSystem();
 			diagnostics.converged = await cg.solve( tolerance, maxIterations );
 
 			diagnostics.rejected = ( await countBadPressureCellsNow() ) > 0;
 
+			// Restore the last known-good field, or -- this solve having
+			// just been checked and passed -- become the last known-good
+			// field. See pressureSnapshot's own comment for why the
+			// snapshot happens here rather than before the solve.
 			if ( diagnostics.rejected ) restorePressure();
+			else snapshotPressure();
 
 			dispatchCorrectU();
 			dispatchCorrectV();

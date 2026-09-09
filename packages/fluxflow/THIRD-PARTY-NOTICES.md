@@ -1123,6 +1123,90 @@ Explicitly NOT used, anywhere: HDK source or headers; any verbatim text from Sid
 documentation (all of the above is paraphrased for this reason); any node network
 transliterated node-by-node into code; and anything obtained by decompilation.
 
+### OpenFOAM (GPL-3.0 — method reference only, no code, no quoted text)
+
+- **Homepage:** https://openfoam.org/
+- **Repository:** https://github.com/OpenFOAM/OpenFOAM-10
+- **License:** **GNU General Public License version 3** (`COPYING` in that repository;
+  "OpenFOAM is Copyright (C) 2011-2017 OpenFOAM Foundation").
+- **Relationship:** not a dependency of any kind. Not bundled, not linked, not required
+  to build or run this package, and not installed anywhere in this repository. Its
+  published source was read.
+
+**The licence incompatibility is the reason this entry is worded the way it is.**
+OpenFOAM is GPL-3.0; this package is Apache-2.0. GPL-licensed code cannot be copied,
+adapted, or transliterated into an Apache-2.0 package — the combined work would have
+to be GPL. Reading GPL source is not itself restricted, but it raises the bar for what
+counts as independent implementation, so the rule applied here is the stricter one
+already used for SideFX Houdini above, plus one addition specific to having read actual
+source rather than documentation:
+
+- **Methods are used; expression is not.** A discretisation, a change of variable, a
+  stage ordering, or a choice of where to store a coefficient is an idea, and ideas are
+  free to reimplement.
+- **No code is copied and none is transliterated.** No fluxflow file is a line-by-line
+  rendering of an OpenFOAM file, and no OpenFOAM identifier, comment, or expression is
+  carried across.
+- **Nothing is quoted verbatim** — not source, not comments, not documentation text.
+  `docs/openfoam-two-phase-flow.md`, the notes written from this reading, deliberately
+  contains no OpenFOAM source excerpt at all: every mechanism there is restated as
+  mathematics and in this project's own prose, and any implementation is written from
+  that restatement.
+
+**Most of what was taken is not OpenFOAM's to begin with**, which is worth recording
+because it is the citation that actually belongs in the code. The methods below are
+published numerics that predate OpenFOAM by decades; OpenFOAM was read as a
+production-quality *arrangement* of them, not as their origin:
+
+| Mechanism | Original publication |
+|---|---|
+| Reduced pressure `p = p_rgh + rho*(g.x)` for free-surface flow | H. Rusche, *Computational Fluid Dynamics of Dispersed Two-Phase Flows at High Phase Fractions*, PhD thesis, Imperial College London, 2002 |
+| Well-balanced, face-assembled gravity across a density jump | Rusche 2002 |
+| Correcting the face flux and reconstructing the cell velocity | C. M. Rhie & W. L. Chow, *AIAA Journal* 21(11), 1983 |
+| Surface tension as a continuum (volumetric) force | J. U. Brackbill, D. B. Kothe & C. Zemach, *J. Comput. Phys.* 100, 1992 |
+| Bounded advection by a multidimensional flux limiter (what MULES is) | S. T. Zalesak, *J. Comput. Phys.* 31, 1979 |
+| SIMPLE / PISO pressure-velocity coupling (PIMPLE is their merge) | S. V. Patankar & D. B. Spalding, 1972; R. I. Issa, *J. Comput. Phys.* 62, 1986 |
+| Partial elimination of interphase drag | D. B. Spalding, 1980 |
+| Geometric VOF advection (isoAdvector) | J. Roenby, H. Bredmose & H. Jasak, *R. Soc. Open Sci.* 3, 2016 |
+
+What was taken, and where it shows up:
+
+1. **A pressure-solve circuit breaker is not a stability mechanism.** OpenFOAM has no
+   equivalent of `grid_pressure_solver2.js`'s "this solve looked implausible, revert to
+   the previous frame's pressure"; it relies on an adaptive time step, repeated outer
+   corrector iterations, and a linear solve that actually converges. Reading that is
+   what turned a measured symptom (every frame rejected, liquid in free fall) into the
+   conclusion recorded in `docs/openfoam-two-phase-flow.md`. The immediate fix that
+   followed — never snapshot a pressure field that has not passed the bad-cell check,
+   so the "last known good" value cannot itself be NaN — is this project's own, found
+   by measurement, and is not an OpenFOAM mechanism.
+2. **Store the pressure equation's variable coefficient on faces, one value shared by
+   both adjacent cells.** This *corroborates* a decision this port had already made
+   independently (`faceWeights` in `src/linalg/multigrid.js`, `betaU`/`betaV` in
+   `src/grid/grid_flip_solver2.js`) — see that file's own `faceWeights` entry above,
+   which predates this reading. Recorded as confirmation, not as a source.
+3. **Solve for pressure minus the hydrostatic part.** Cited to Rusche 2002 where
+   implemented.
+4. **Assemble gravity and interfacial forces onto faces so the discrete rest state is
+   exact.** Cited to Rusche 2002 where implemented.
+5. **Enforce the divergence constraint on the face flux and reconstruct the cell
+   velocity from it.** Cited to Rhie & Chow 1983 where implemented.
+6. **Pin a reference cell when the pressure system is all-Neumann**, rather than
+   detecting the null-space excursion after the fact. A standard practice, not specific
+   to OpenFOAM; already reached independently for the two-phase solver (see
+   "mantaflow — closed-domain pressure pinning" above).
+7. **Keep a transported fraction in range with a flux limiter instead of clamping it
+   afterwards.** Cited to Zalesak 1979 if implemented.
+8. **Separate the interface Courant condition from the flow Courant condition** when
+   choosing a time step.
+
+Explicitly NOT used, anywhere: any OpenFOAM source file, header, or dictionary; any
+verbatim text from OpenFOAM source comments or documentation; any file of this package
+structured as a translation of an OpenFOAM file. Items 3, 4, 5 and 7 above are
+unimplemented at the time of writing and are recorded in
+`docs/openfoam-two-phase-flow.md` as a work list; this entry will be revisited when any
+of them lands.
+
 ## Design inspiration (not a code dependency)
 
 ### Taichi Lang

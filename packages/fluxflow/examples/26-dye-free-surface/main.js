@@ -209,6 +209,13 @@ try {
 	const initialDensity = Number( new URLSearchParams( location.search ).get( 'density' ) ?? 1 );
 	// `?resample=1` is the A/B control for the resampling trade told below.
 	const resampleEnabled = new URLSearchParams( location.search ).get( 'resample' ) === '1';
+	// Pressure-solve knobs, overridable per run -- see the `pressure:` option
+	// below for why these two in particular are worth A/B'ing.
+	const densityCouplingOff = new URLSearchParams( location.search ).get( 'nodensity' ) === '1';
+	const atomicScaleParam = Number( new URLSearchParams( location.search ).get( 'atomicScale' ) ?? 256 );
+	const maxPressureParam = Number( new URLSearchParams( location.search ).get( 'maxPressure' ) ?? 100 );
+	const maxIterParam = Number( new URLSearchParams( location.search ).get( 'maxIter' ) ?? 100 );
+	const toleranceParam = Number( new URLSearchParams( location.search ).get( 'tol' ) ?? 1e-5 );
 	const densityRatioUniform = tsl_array_n.array0( 'float' );
 	densityRatioUniform.fromArray( new Float32Array( [ initialDensity ] ) );
 	densityRatioInput.value = String( initialDensity );
@@ -231,8 +238,13 @@ try {
 		// Teal (concentration 0) is the reference; amber (concentration 1) is
 		// whatever the slider says. Starting them equal means the scene opens in
 		// the passive-tracer case, which is the control.
-		ambientDensity: 1,
-		componentDensity: densityRatioUniform(),
+		// `?nodensity=1` drops the coupling entirely (passive dye, the scene as
+		// it shipped before de62876), which is the A/B that says whether a
+		// blow-up came in with the variable-density projection or predates it.
+		...( densityCouplingOff ? {} : {
+			ambientDensity: 1,
+			componentDensity: densityRatioUniform()
+		} ),
 		resample: { enabled: resampleEnabled },
 		// Resampling is off, and `?resample=1` is the A/B control that turns
 		// it back on. The reason is the one in the solver's own comment --
@@ -259,7 +271,16 @@ try {
 		// examples/20-flip-dam-break/'s values: same solver, same resolution,
 		// same free-surface gravity-driven setup, so the analogy actually holds
 		// here (unlike example 25's sealed column, where it did not).
-		pressure: { atomicScale: 256, maxPlausiblePressure: 100 }
+		// `?atomicScale=` / `?maxPressure=` override these, so the pair can be
+		// A/B'd across seeds without an edit. They are the two numbers a
+		// blow-up in this scene turns out to hinge on, and neither is
+		// self-evidently right: see the investigation note below.
+		pressure: {
+			atomicScale: atomicScaleParam,
+			maxPlausiblePressure: maxPressureParam,
+			maxIterations: maxIterParam,
+			tolerance: toleranceParam
+		}
 	} );
 
 	function seedScene() {
@@ -505,6 +526,15 @@ try {
 		status( `backend: ${ renderer.backend?.constructor?.name ?? 'unknown' } — reset` );
 
 	} );
+
+	// Test hook. An automated real-hardware run cannot be driven through
+	// requestAnimationFrame: a Chrome tab that is not in the foreground
+	// throttles it to one frame every several seconds, so a several-hundred-
+	// frame stability check is impossible to script that way. Stepping the
+	// solver from a plain `await` loop is not throttled at all, and skipping
+	// the draw makes it faster still. Read-only from the page's point of
+	// view -- nothing here changes what the scene does on its own.
+	window.__fluxflowProbe = { flip, stats, seedScene, velocityGrid };
 
 	requestAnimationFrame( animate );
 

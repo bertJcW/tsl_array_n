@@ -19,7 +19,8 @@
 
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const EXPONENT_MASK = 0x7f800000;
 
@@ -143,9 +144,18 @@ describe( 'float_guards: no source file uses the broken NaN idiom', () => {
 	// written as a NaN test.
 	const selfNotEqual = /([A-Za-z_$][\w$]*(?:\s*\([^()]*\))?)\s*\.notEqual\(\s*\1\s*\)/;
 
-	for ( const file of jsFilesUnder( new URL( '../src', import.meta.url ).pathname ) ) {
+	// fileURLToPath, not .pathname: on Windows a file: URL's pathname is
+	// '/D:/...', and join()ing that produces 'D:\D:\...', which readdirSync
+	// rejects -- this whole suite failed to load on Windows before that fix,
+	// so the very check it exists to enforce was not running there.
+	const srcRoot = fileURLToPath( new URL( '../src', import.meta.url ) );
 
-		it( `${ file.split( '/src/' )[ 1 ] } does not test for NaN with self-inequality`, () => {
+	for ( const file of jsFilesUnder( srcRoot ) ) {
+
+		// Path-separator agnostic for the same reason.
+		const label = relative( srcRoot, file ).split( sep ).join( '/' );
+
+		it( `${ label } does not test for NaN with self-inequality`, () => {
 
 			const lines = readFileSync( file, 'utf8' ).split( '\n' );
 			const offenders = lines
