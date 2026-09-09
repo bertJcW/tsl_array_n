@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>fluxflow — dye injection</title>
+	<style>
+		body { margin: 0; font-family: system-ui, sans-serif; background: #16171b; color: #eee; display: flex; flex-direction: column; align-items: center; gap: 0.75rem; padding: 1.5rem; box-sizing: border-box; }
+		#canvases { display: flex; gap: 1rem; flex-wrap: wrap; justify-content: center; }
+		.canvas-block { display: flex; flex-direction: column; align-items: center; gap: 0.35rem; }
+		canvas { image-rendering: pixelated; width: 384px; height: 384px; border: 2px solid #6b7280; background: #000; }
+		#outParticles { image-rendering: auto; }
+		.canvas-label { font-size: 0.8rem; opacity: 0.7; max-width: 384px; text-align: center; }
+		#status { font-size: 0.9rem; line-height: 1.6; opacity: 0.85; }
+		.err { color: #f87171; }
+		p { max-width: 880px; font-size: 0.85rem; opacity: 0.7; margin: 0; text-align: center; }
+		#perf { font-size: 0.9rem; line-height: 1.6; font-variant-numeric: tabular-nums; background: rgba(20, 21, 24, 0.85); border: 1px solid #3f4148; border-radius: 0.35rem; padding: 0.35rem 0.6rem; }
+		#controls { display: flex; flex-wrap: wrap; gap: 1rem 1.5rem; align-items: center; justify-content: center; background: #1f2024; border: 1px solid #3f4148; border-radius: 0.5rem; padding: 0.75rem 1rem; font-size: 0.85rem; max-width: 900px; }
+		#controls label { display: flex; align-items: center; gap: 0.4rem; white-space: nowrap; }
+		#controls input[type="range"] { width: 110px; }
+		#controls .val { font-variant-numeric: tabular-nums; opacity: 0.8; min-width: 3.2em; }
+		#controls button { background: #3f4148; color: #eee; border: 1px solid #6b7280; border-radius: 0.3rem; padding: 0.3rem 0.7rem; font: inherit; cursor: pointer; }
+		#controls button:hover { background: #4b4d55; }
+	</style>
+</head>
+<body>
+	<div id="canvases">
+		<div class="canvas-block">
+			<canvas id="outParticles" width="1024" height="1024"></canvas>
+			<div class="canvas-label">particles — colour is the carried concentration</div>
+		</div>
+		<div class="canvas-block">
+			<canvas id="outConcentration" width="64" height="64"></canvas>
+			<div class="canvas-label">cell concentration — what the density field, and so the projection, is built from</div>
+		</div>
+	</div>
+	<div id="status">initializing…</div>
+	<div id="perf">fps: --</div>
+	<div id="controls">
+		<label>dye density <input type="range" id="dyeDensity" min="0.85" max="1.30" step="0.005" value="1.05" /> <span class="val" id="dyeDensityValue">1.050</span></label>
+		<label>mixing <input type="range" id="mixing" min="0" max="0.2" step="0.002" value="0.005" /> <span class="val" id="mixingValue">0.005</span></label>
+		<label>fade <input type="range" id="fade" min="0" max="0.05" step="0.001" value="0" /> <span class="val" id="fadeValue">0.000</span></label>
+		<button id="inject">inject dye</button>
+		<button id="reset">reset</button>
+	</div>
+	<p>grid.createGridTwoPhaseFlipSolver2 in its <strong>miscible</strong> mode — dye injected into water.
+	The dye is a continuous concentration carried on each particle, not a field advected on the grid, so it
+	transports with no numerical diffusion and only blends as much as you ask it to. <strong>dye density</strong>
+	is the real physical dial: set it to 1.000 and the dye is a purely passive tracer (uniform density, so the
+	projection reduces exactly to the constant-density one); push it above and the dye sinks and plumes, below
+	and it rises — all through the same variable-density projection a gas bubble uses, just gently.
+	<strong>mixing</strong> blends each particle toward its surroundings so the dye eventually goes uniform;
+	<strong>fade</strong> makes it disappear instead. Both are off by default and cost nothing when off.
+	Open the console for a periodic diagnostic readout.</p>
+	<script type="module" src="./main.js"></script>
+</body>
+</html>

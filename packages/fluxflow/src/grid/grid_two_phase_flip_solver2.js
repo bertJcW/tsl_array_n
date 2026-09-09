@@ -1,6 +1,23 @@
-// A 2D two-phase (liquid + gas) FLIP solver -- this port's first solver in
-// which the *air* is simulated too, rather than being a void the liquid
-// happens to move through.
+// A 2D two-component FLIP solver: two fluids sharing one velocity field,
+// coupled through a variable-density pressure projection, with a continuous
+// concentration carried on each particle.
+//
+// It covers two quite different-looking cases with the same machinery, and it
+// is worth knowing which one you are reading about:
+//
+//   * **Two phases (liquid + gas).** An extreme density ratio and a
+//     concentration that only ever takes the values 0 or 1. This is what the
+//     file was built for and what most of the comments below discuss; it is
+//     this port's first solver in which the *air* is simulated too, rather
+//     than being a void the liquid happens to move through.
+//   * **Miscible mixing (dye in water, two liquids).** A mild or zero density
+//     ratio and a concentration that varies continuously and is allowed to
+//     blend. See "Miscible mixing", below. This case is much better behaved
+//     numerically -- a mild density ratio keeps the pressure system
+//     well-conditioned, which is exactly what the extreme ratio does not.
+//
+// Set `mixing`/`fade` and a mild `ambientDensity`/`componentDensity` pair for
+// the second; leave them at their defaults for the first.
 //
 // ============================================================
 // What "two-phase" changes, and why it needs a new file
@@ -184,6 +201,61 @@
 // scene-dependence -- a deeper V-cycle is simply a better preconditioner.
 //
 // ============================================================
+// Miscible mixing: dye in water, and two liquids
+// ============================================================
+//
+// The two-phase reading above treats concentration as a phase *tag*: a
+// particle is liquid or it is gas, and the two never blend. Nothing in the
+// solver actually requires that. Concentration is a continuous [0,1] value
+// carried per particle, the cell density is a linear blend across it, and the
+// projection never sees anything but the resulting density -- so a
+// concentration of 0.3 is as meaningful as 0 or 1, and always was.
+//
+// What miscible mixing adds is the ability for that value to *change*:
+//
+//   * `mixing` blends each particle's concentration toward the mean of the
+//     fluid immediately around it, so a sharp dye boundary gradually softens
+//     and a stirred scene eventually goes uniform.
+//   * `fade` decays concentration toward zero, so the dye disappears instead
+//     of blending in.
+//
+// Both default to 0 and cost nothing when off (the pass is not even
+// dispatched). Both are documented in full where they are implemented.
+//
+// **Set `ambientDensity`/`componentDensity` to the same value and you get a
+// passive tracer**: the dye is carried by the flow and rendered, but has no
+// dynamical effect at all, because the density field is then uniform and beta
+// is 1 everywhere -- the projection reduces exactly to the constant-density
+// one. Give them a small difference instead (say 1.0 and 1.05) and the dye
+// starts to drive the flow: a heavier dye sinks and plumes, a lighter one
+// rises, entirely through the same variable-density mechanism the gas bubble
+// uses, just gently. That difference is the single most useful dial in a dye
+// scene, and it is a real physical parameter rather than a look control.
+//
+// **What this is not.** `mixing` is a per-frame convex blend, not a
+// discretised diffusion coefficient: it is frame-rate dependent and it is not
+// the Fickian diffusion a physical miscible-fluid model would solve. The
+// literature's proper treatment of genuinely mixing fluids models a drift
+// velocity per component -- see Ren et al., "Multiple-fluid SPH Simulation
+// Using a Mixture Model" (ACM TOG 33(6), SIGGRAPH Asia 2014) and its follow-up
+// Yang et al., "Fast Multiple-fluid Simulation Using Helmholtz Free Energy"
+// (ACM TOG 34(6), 2015), surveyed in Liu et al., "Visual Simulation of
+// Multiple Fluids in Computer Graphics: A State-of-the-Art Report" (JCST
+// 33(3), 2018). Those are SPH formulations, so they are a design reference
+// here rather than something to port; a drift-velocity mixture model is the
+// upgrade path if the phenomenological blend is ever not enough. See
+// ../../THIRD-PARTY-NOTICES.md.
+//
+// **Carried on the particle, not advected on the grid** -- a deliberate choice
+// with a real consequence. A grid-advected scalar picks up numerical diffusion
+// from every semi-Lagrangian lookup, which for a dye filament means it smears
+// out whether or not you asked it to. A particle simply carries its value
+// exactly, so the only blending that happens is the blending you configured.
+// This is also what Houdini does (dye is a per-particle `Cd` attribute rather
+// than a solver), which is where the confirmation for this design came from --
+// see THIRD-PARTY-NOTICES.md, "Design and architecture references".
+//
+// ============================================================
 // What this deliberately does NOT do (first version)
 // ============================================================
 //
@@ -235,7 +307,7 @@ import { createGridBlockedBoundaryConditionSolver2 } from './grid_blocked_bounda
 import { createGridPressureSolver2 } from './grid_pressure_solver2.js';
 import { createSemiLagrangianAdvectionSolver2 } from './advection_solver2.js';
 import { createCopyKernel2, createExtrapolateToRegion2 } from './array_utils.js';
-import { bilinearCoordsAndWeights2, faceCenteredValueAtPosition2 } from './grid_math.js';
+import { bilinearCoordsAndWeights2, collocatedValueAtPosition2, faceCenteredValueAtPosition2 } from './grid_math.js';
 import { DEFAULT_ATOMIC_DOT_SCALE } from '../linalg/linalg.js';
 
 // Same last-resort particle speed bound as the single-phase solver. It
@@ -247,10 +319,21 @@ import { DEFAULT_ATOMIC_DOT_SCALE } from '../linalg/linalg.js';
 // from becoming a permanent one.
 const MAX_PARTICLE_VELOCITY = 500;
 
-// Hard floor on gasDensity as a fraction of liquidDensity -- see where
-// gasDensityNode is built for why this is clamped in the kernel graph
-// rather than merely validated.
-const MIN_DENSITY_RATIO_RECIPROCAL = 1e-4;
+// Fixed-point scale for accumulating a *continuous* per-particle concentration
+// into an integer atomic (see the counting kernel). Unlike the CG solver's own
+// atomicScale this one needs no per-scene tuning and is safe by construction:
+// concentration is bounded to [0,1] and a cell holds a handful of particles, so
+// the worst-case accumulated integer is a few times this value -- five orders
+// of magnitude clear of int32. It is an option only so a caller who wants finer
+// quantisation than 1/4096 can ask for it.
+const DEFAULT_CONCENTRATION_ATOMIC_SCALE = 4096;
+
+// Absolute floor on either component's density. Densities in this port's scenes
+// are O(1), so this never binds in practice -- it exists only so that a zero or
+// negative value reaching the kernel cannot produce an infinite or
+// sign-flipped beta. Deliberately absolute rather than a ratio of the other
+// density, so it means the same thing whichever component is heavier.
+const MIN_DENSITY = 1e-4;
 
 // Phase tag values. Stored as float rather than int purely so the particle
 // arrays stay uniform with positions/velocities and can be read back with
@@ -300,7 +383,12 @@ export function computeTwoPhaseBoxSeed( {
 	gridSpacingX, gridSpacingY,
 	particlesPerCellAxis = 2,
 	jitter = 0.2,
-	isLiquid = () => true
+	isLiquid = () => true,
+	// Continuous form of `isLiquid`, and the one to use for a dye scene: return
+	// a concentration in [0,1] rather than a boolean. Takes precedence when
+	// given. `isLiquid` remains for the binary two-phase case, where it is the
+	// clearer thing to write.
+	concentrationAt
 } = {} ) {
 
 	const [ minX, minY ] = boxMin;
@@ -330,7 +418,9 @@ export function computeTwoPhaseBoxSeed( {
 					const y = minY + cellJ * gridSpacingY + ( subJ + 0.5 ) * subSpacingY + jy;
 
 					positionsList.push( x, y );
-					phasesList.push( isLiquid( [ x, y ] ) ? PHASE_LIQUID : PHASE_GAS );
+					phasesList.push( concentrationAt
+						? Math.min( 1, Math.max( 0, concentrationAt( [ x, y ] ) ) )
+						: ( isLiquid( [ x, y ] ) ? PHASE_LIQUID : PHASE_GAS ) );
 
 				}
 
@@ -342,16 +432,25 @@ export function computeTwoPhaseBoxSeed( {
 
 	const count = positionsList.length / 2;
 	const phasesArray = Float32Array.from( phasesList );
-	let liquidCount = 0;
-	for ( const p of phasesArray ) if ( p > 0.5 ) liquidCount ++;
+	let liquidCount = 0, concentrationSum = 0;
+	for ( const p of phasesArray ) {
+
+		if ( p > 0.5 ) liquidCount ++;
+		concentrationSum += p;
+
+	}
 
 	return {
 		count,
 		positionsArray: new Float32Array( positionsList ),
 		velocitiesArray: new Float32Array( count * 2 ), // zeroed -- particles start at rest
 		phasesArray,
+		// liquidCount/gasCount are the binary reading and stay exact for a
+		// two-phase seed; meanConcentration is the one that stays meaningful
+		// when the seed is continuous.
 		liquidCount,
-		gasCount: count - liquidCount
+		gasCount: count - liquidCount,
+		meanConcentration: count > 0 ? concentrationSum / count : 0
 	};
 
 }
@@ -365,6 +464,19 @@ export function createGridTwoPhaseFlipSolver2( {
 	gravity = [ 0, - 9.81 ],
 	liquidDensity = 1,
 	gasDensity = 0.01,
+	// Neutral aliases for the two densities, preferred for anything that is not
+	// literally liquid-and-gas. `concentration` runs 0 -> 1 across the two
+	// components, so `ambientDensity` is the density at concentration 0 and
+	// `componentDensity` the density at concentration 1. For a dye scene those
+	// read as "clear water" and "dyed water"; for the original gas/liquid case
+	// they are exactly gasDensity and liquidDensity. Same fields either way.
+	ambientDensity,
+	componentDensity,
+	// Miscible-mixing controls, both no-ops at their defaults so every existing
+	// caller is unaffected. See "Miscible mixing" in the header comment.
+	mixing = 0,
+	fade = 0,
+	concentrationAtomicScale = DEFAULT_CONCENTRATION_ATOMIC_SCALE,
 	flipRatio = 0.97,
 	gasFlipRatio = 0.90,
 	velocityDamping = 0.02,
@@ -379,6 +491,9 @@ export function createGridTwoPhaseFlipSolver2( {
 	pressure = {}
 } = {} ) {
 
+	if ( ambientDensity !== undefined ) gasDensity = ambientDensity;
+	if ( componentDensity !== undefined ) liquidDensity = componentDensity;
+
 	if ( ! velocityGrid ) {
 
 		throw new Error( 'createGridTwoPhaseFlipSolver2: options.velocityGrid is required.' );
@@ -391,9 +506,13 @@ export function createGridTwoPhaseFlipSolver2( {
 
 	}
 
-	if ( typeof liquidDensity !== 'number' || ! ( liquidDensity > 0 ) ) {
+	// Both densities may be a plain number or a live node. Only a number can be
+	// range-checked here; a node's invariants are enforced in the kernel graph
+	// instead (see where the density nodes are built), which is the stronger
+	// place for them anyway.
+	if ( typeof liquidDensity === 'number' && ! ( liquidDensity > 0 ) ) {
 
-		throw new Error( `createGridTwoPhaseFlipSolver2: liquidDensity must be a number > 0, got ${ liquidDensity }. Unlike gasDensity it is not settable as a live node -- it is the normalization reference the whole beta field is defined against (beta = liquidDensity/rho), so animating it would just rescale every pressure in the scene rather than change any physics.` );
+		throw new Error( `createGridTwoPhaseFlipSolver2: the concentration-1 density (liquidDensity / componentDensity) must be > 0, got ${ liquidDensity }.` );
 
 	}
 
@@ -404,19 +523,28 @@ export function createGridTwoPhaseFlipSolver2( {
 	// invariants are enforced in the kernel graph instead, below; that is the
 	// stronger place for them regardless, and is the pattern
 	// grid_flip_solver2.js's own velocityDamping clamp already established.
-	if ( typeof gasDensity === 'number' ) {
+	if ( typeof gasDensity === 'number' && ! ( gasDensity > 0 ) ) {
 
-		if ( ! ( gasDensity > 0 ) ) {
+		throw new Error( `createGridTwoPhaseFlipSolver2: the concentration-0 density (gasDensity / ambientDensity) must be > 0, got ${ gasDensity }.` );
 
-			throw new Error( `createGridTwoPhaseFlipSolver2: gasDensity must be > 0, got ${ gasDensity }.` );
+	}
 
-		}
+	// *** Ordering is required by the gas/liquid VOCABULARY, not by the solver. ***
+	//
+	// Under the two-phase reading, "gas" heavier than "liquid" means the two
+	// tags are named backwards, which silently inverts every buoyancy result
+	// instead of failing -- worth rejecting outright. But that is a fact about
+	// the words, not about the mathematics: nothing downstream needs the
+	// concentration-1 component to be the heavier one, and a dye *lighter* than
+	// the water it is injected into is perfectly ordinary. So the check applies
+	// only when the caller used the gas/liquid names; the neutral
+	// ambientDensity/componentDensity pair carries no ordering claim and is not
+	// checked.
+	const usedPhaseVocabulary = ambientDensity === undefined && componentDensity === undefined;
 
-		if ( gasDensity > liquidDensity ) {
+	if ( usedPhaseVocabulary && typeof gasDensity === 'number' && typeof liquidDensity === 'number' && gasDensity > liquidDensity ) {
 
-			throw new Error( `createGridTwoPhaseFlipSolver2: gasDensity (${ gasDensity }) must not exceed liquidDensity (${ liquidDensity }) -- the two phase tags would then be named backwards, which silently inverts every buoyancy result rather than failing.` );
-
-		}
+		throw new Error( `createGridTwoPhaseFlipSolver2: gasDensity (${ gasDensity }) must not exceed liquidDensity (${ liquidDensity }) -- the two phase tags would then be named backwards, which silently inverts every buoyancy result rather than failing. If you genuinely want the concentration-1 component to be the lighter one, use the neutral ambientDensity/componentDensity names instead, which carry no ordering claim.` );
 
 	}
 
@@ -465,6 +593,14 @@ export function createGridTwoPhaseFlipSolver2( {
 
 	}
 
+	// `phase` is a *continuous* concentration in [0,1] -- 0 is the ambient
+	// component, 1 the injected one. The binary liquid/gas case is just the
+	// special case of only ever storing exactly 0 or 1.
+	const concentrationOf = ( p ) => clamp( phase( p ), float( 0 ), float( 1 ) );
+
+	// Used only where a genuinely binary decision is unavoidable: bucketing a
+	// donor particle into one of the two resample pools. Everything physical
+	// reads concentrationOf() instead.
 	const isLiquidParticle = ( p ) => phase( p ).greaterThan( 0.5 );
 
 	// ---------------------------------------------------------------- phase counting -> density -> beta
@@ -473,8 +609,14 @@ export function createGridTwoPhaseFlipSolver2( {
 	// projection needs) and the resampler (which runs at the end of the same
 	// frame). Particle positions don't change in between, so recounting for
 	// the resampler would be pure duplicated work.
-	const liquidCellCount = tsl_array_n.arrayN( 'int', cellShape );
-	liquidCellCount.node.toAtomic();
+	// Accumulates the SUM OF CONCENTRATIONS in a cell, in fixed point -- not a
+	// count of particles over a threshold. That difference is the whole of what
+	// makes miscible mixing work: a cell that is half-way dyed has to be able to
+	// report 0.5, and a thresholded count can only ever report a ratio of whole
+	// particles. The binary phase case still falls out exactly, since a
+	// concentration of exactly 0 or 1 sums to the same thing either way.
+	const concentrationAccum = tsl_array_n.arrayN( 'int', cellShape );
+	concentrationAccum.node.toAtomic();
 	const totalCellCount = tsl_array_n.arrayN( 'int', cellShape );
 	totalCellCount.node.toAtomic();
 
@@ -482,16 +624,18 @@ export function createGridTwoPhaseFlipSolver2( {
 
 	function resetCellCounts() {
 
-		liquidCellCount.fromArray( zeroCells );
+		concentrationAccum.fromArray( zeroCells );
 		totalCellCount.fromArray( zeroCells );
 
 	}
+
+	const concentrationScaleNode = float( concentrationAtomicScale );
 
 	const countPhasesKernel = tsl_array_n.kernel( maxParticles, ( p ) => {
 
 		const { i, j } = cellIndexOf( positions( p ) );
 		atomicAdd( totalCellCount( i, j ), 1 );
-		atomicAdd( liquidCellCount( i, j ), isLiquidParticle( p ).select( int( 1 ), int( 0 ) ) );
+		atomicAdd( concentrationAccum( i, j ), round( concentrationOf( p ).mul( concentrationScaleNode ) ).toInt() );
 
 	} );
 
@@ -504,28 +648,36 @@ export function createGridTwoPhaseFlipSolver2( {
 	// before the first step gets something meaningful rather than zeros.
 	density.fromArray( new Float32Array( cellCount ).fill( liquidDensity ) );
 
-	const liquidDensityNode = float( liquidDensity );
+	// Both densities are floored in the kernel graph regardless of what any
+	// caller passes in, and the floor is not cosmetic: a density of 0 makes
+	// beta infinite and takes the whole pressure system with it, and a negative
+	// one makes the operator indefinite, which CG does not converge slowly on
+	// -- it breaks down. The floor is absolute rather than a ratio of the other
+	// density, so it stays meaningful whichever of the two is larger.
+	const minDensityNode = float( MIN_DENSITY );
+	const densityAtZeroNode = max( numberOrNode( gasDensity ), minDensityNode );
+	const densityAtOneNode = max( numberOrNode( liquidDensity ), minDensityNode );
 
-	// Unconditionally clamped where it is read, regardless of what any caller
-	// passes in -- not cosmetic. A gasDensity of 0 makes beta infinite and
-	// takes the whole pressure system with it; a negative one makes the
-	// operator indefinite, which CG does not merely converge slowly on, it
-	// breaks down. The upper bound keeps gas lighter than liquid, since a
-	// heavier "gas" would invert every buoyancy result silently rather than
-	// failing. The floor is liquidDensity*MIN_DENSITY_RATIO_RECIPROCAL, i.e.
-	// a 10000:1 ratio -- far past anything the constant-coefficient
-	// preconditioner converges well at (see the header comment), and set as a
-	// safety bound rather than a recommendation.
-	const gasDensityNode = clamp(
-		numberOrNode( gasDensity ),
-		float( liquidDensity * MIN_DENSITY_RATIO_RECIPROCAL ),
-		float( liquidDensity )
-	);
+	// beta = referenceDensity / rho, and the reference is the HEAVIER of the two
+	// components rather than a fixed one of them. That keeps beta <= 1
+	// everywhere and equal to 1 through the heavy bulk of a scene, which is
+	// what the constant-coefficient multigrid preconditioner implicitly assumes
+	// -- so the preconditioner stays accurate exactly where most of the domain
+	// is, regardless of which component the caller happened to call "1".
+	//
+	// For the original gas/liquid case this is exactly the previous behaviour
+	// (the liquid IS the max), so nothing about those scenes changes.
+	const referenceDensityNode = max( densityAtZeroNode, densityAtOneNode );
+
+	// Kept under the old name because a lot of the code below reads better with
+	// it, and in the gas/liquid case it is the same value it always was.
+	const liquidDensityNode = referenceDensityNode;
+	const gasDensityNode = densityAtZeroNode;
 
 	const computeDensityKernel = tsl_array_n.kernel( cellShape, ( i, j ) => {
 
 		const total = atomicLoad( totalCellCount( i, j ) ).toFloat();
-		const liquid = atomicLoad( liquidCellCount( i, j ) ).toFloat();
+		const concentrationSum = atomicLoad( concentrationAccum( i, j ) ).toFloat().div( concentrationScaleNode );
 
 		// A cell with no particles at all is treated as pure gas rather than
 		// as "whatever it was last frame". With the whole domain seeded this
@@ -533,10 +685,14 @@ export function createGridTwoPhaseFlipSolver2( {
 		// reading of a momentarily empty cell: an empty pocket should be
 		// something the liquid can collapse into, not a heavy region that
 		// shoves it away.
-		const fraction = total.greaterThan( 0.5 ).select( liquid.div( max( total, float( 1 ) ) ), float( 0 ) );
+		// Clamped because the fixed-point round trip can land a hair outside
+		// [0,1], and everything downstream (the density lerp, then beta, then
+		// the operator's coefficients) assumes it is inside.
+		const mean = concentrationSum.div( max( total, float( 1 ) ) );
+		const fraction = total.greaterThan( 0.5 ).select( clamp( mean, float( 0 ), float( 1 ) ), float( 0 ) );
 
 		liquidFraction( i, j ).assign( fraction );
-		density( i, j ).assign( gasDensityNode.add( liquidDensityNode.sub( gasDensityNode ).mul( fraction ) ) );
+		density( i, j ).assign( densityAtZeroNode.add( densityAtOneNode.sub( densityAtZeroNode ).mul( fraction ) ) );
 
 	} );
 
@@ -556,14 +712,14 @@ export function createGridTwoPhaseFlipSolver2( {
 	const computeBetaU = tsl_array_n.kernel( dataSizeU, ( i, j ) => {
 
 		const rhoFace = density( clampI( i.sub( 1 ) ), j ).add( density( clampI( i ), j ) ).mul( 0.5 );
-		betaU( i, j ).assign( liquidDensityNode.div( max( rhoFace, gasDensityNode ) ) );
+		betaU( i, j ).assign( referenceDensityNode.div( max( rhoFace, minDensityNode ) ) );
 
 	} );
 
 	const computeBetaV = tsl_array_n.kernel( dataSizeV, ( i, j ) => {
 
 		const rhoFace = density( i, clampJ( j.sub( 1 ) ) ).add( density( i, clampJ( j ) ) ).mul( 0.5 );
-		betaV( i, j ).assign( liquidDensityNode.div( max( rhoFace, gasDensityNode ) ) );
+		betaV( i, j ).assign( referenceDensityNode.div( max( rhoFace, minDensityNode ) ) );
 
 	} );
 
@@ -785,13 +941,91 @@ export function createGridTwoPhaseFlipSolver2( {
 		// (its beta is the density ratio) and has the least inertia to
 		// resist that noise. It is where FLIP misbehaves first, so it gets
 		// the more dissipative end of the same blend the liquid uses.
-		const ratio = isLiquidParticle( p ).select( flipRatioNode, gasFlipRatioNode );
+		// Interpolated by concentration rather than switched on a threshold: with
+		// a continuous concentration a hard switch would put a visible seam
+		// through the middle of a mixing region, where nothing physical changes
+		// abruptly. At concentration 0 or 1 this is identical to a switch.
+		const c = concentrationOf( p );
+		const ratio = gasFlipRatioNode.add( flipRatioNode.sub( gasFlipRatioNode ).mul( c ) );
 		const blended = flipVel.mul( ratio ).add( newVel.mul( float( 1 ).sub( ratio ) ) );
 		const damped = blended.mul( float( 1 ).sub( velocityDampingNode ) );
 
 		velocities( p ).assign( clampParticleVelocity( damped ) );
 
 	} );
+
+	// ---------------------------------------------------------------- miscible mixing / fade
+
+	// Two optional per-particle operations on the carried concentration, both
+	// no-ops at their defaults. Together they are what turns this from a
+	// two-phase solver into a miscible one: `mixing` lets a dye blend into what
+	// surrounds it, `fade` lets it disappear.
+	//
+	// Deliberately a SEPARATE kernel rather than extra lines inside g2pUpdate,
+	// for a concrete reason rather than tidiness: g2pUpdate already binds seven
+	// storage buffers (positions, velocities, phase, and four velocity fields),
+	// and the guaranteed per-stage limit is eight. Folding the concentration
+	// field in there would sit exactly on the limit, one binding away from the
+	// failure this file already hit once on real hardware -- see bug 1 in the
+	// resample section. This kernel binds three.
+	//
+	// **mixing** lerps each particle's concentration toward the mean
+	// concentration of the fluid around it, sampled from the same cell-averaged
+	// field the density is built from. That is a particle-side stand-in for
+	// diffusion: it needs no stencil, no extra field, and no stability
+	// condition of its own (it is a convex blend, so it can only ever move a
+	// value *between* existing values -- it cannot overshoot, and at mixing=1
+	// it just adopts the local mean).
+	//
+	// It is worth being explicit that this is a phenomenological control, not a
+	// discretised diffusion coefficient: `mixing` is a per-frame blend factor,
+	// so its effect depends on frame rate, and it is not the Fickian diffusion
+	// a physical miscible-fluid model (Ren et al. 2014's mixture model, say)
+	// would solve for. It is here because it produces the look -- dye that
+	// gradually loses its edges and eventually goes uniform -- at essentially
+	// no cost. A real drift-velocity mixture model is the upgrade path.
+	//
+	// **fade** decays concentration toward zero, so the dye disappears rather
+	// than blending in. Same shape as grid_smoke_solver2.js's own `smokeDecay`,
+	// and the same reasoning: a scene often wants the tracer gone eventually
+	// without wanting the fluid to stop moving.
+	//
+	// Both are clamped in the kernel graph regardless of what a caller passes,
+	// following the precedent grid_flip_solver2.js's velocityDamping set: a
+	// negative `fade` would AMPLIFY concentration every frame and a negative
+	// `mixing` would push each particle *away* from its surroundings, and both
+	// are divergence, not merely a bad-looking result.
+	//
+	// *** Interaction with resampling -- a warning taken from Houdini ***
+	//
+	// SideFX's own documentation and user forums repeatedly report that FLIP
+	// particle reseeding dilutes a carried colour attribute into uniform mush
+	// under shearing, and that users switch reseeding off when they need a
+	// sharp boundary between two coloured fluids. This port's `resample` pass
+	// does the same kind of thing -- it relocates particles, and a relocated
+	// particle carries its concentration to its new home. So a scene chasing
+	// crisp dye filaments should expect to set `resample: { enabled: false }`,
+	// and one chasing smooth blending can leave it on and let it help. Recorded
+	// because it is a real, non-obvious coupling between two features that look
+	// unrelated. See THIRD-PARTY-NOTICES.md, "Design and architecture
+	// references", for the attribution.
+	const mixingNode = clamp( numberOrNode( mixing ), float( 0 ), float( 1 ) );
+	const fadeNode = clamp( numberOrNode( fade ), float( 0 ), float( 1 ) );
+	const cellCenterOrigin = originNode.add( gridSpacingNode.mul( 0.5 ) );
+
+	const mixConcentration = tsl_array_n.kernel( maxParticles, ( p ) => {
+
+		const local = collocatedValueAtPosition2( liquidFraction, gridSpacingNode, cellCenterOrigin, positions( p ), cellShape );
+		const blended = concentrationOf( p ).add( local.sub( concentrationOf( p ) ).mul( mixingNode ) );
+		const faded = blended.mul( float( 1 ).sub( fadeNode ) );
+
+		phase( p ).assign( clamp( faded, float( 0 ), float( 1 ) ) );
+
+	} );
+
+	// Skipped entirely when neither control is on, so the default path costs
+	// nothing -- not even a dispatch.
+	const concentrationPassEnabled = ! ( mixing === 0 && fade === 0 );
 
 	// ---------------------------------------------------------------- advection
 
@@ -938,24 +1172,44 @@ export function createGridTwoPhaseFlipSolver2( {
 		// seed that phase into every void that opens up -- the same
 		// runaway-growth failure grid_flip_solver2.js's own MIN_FLUID_
 		// NEIGHBORS guard exists for, wearing a different hat.
+		// *** A unit mismatch that would have been silent: read before editing. ***
+		//
+		// This test used to compare an integer particle COUNT against another
+		// integer particle count, and "majority" was simply `liquid*2 > total`.
+		// Now that the accumulator holds a FIXED-POINT SUM OF CONCENTRATIONS
+		// instead, the two sides are no longer in the same units -- the sum is
+		// scaled up by concentrationAtomicScale (4096 by default). Left
+		// uncorrected, `sum*2 > total` is true for essentially any cell with a
+		// trace of concentration in it, so every under-full cell would ask for a
+		// dye-rich donor and the whole domain would slowly stain itself. It
+		// would have looked like a plausible physical effect, which is what
+		// makes it worth this comment.
+		//
+		// Descaling to a mean concentration and comparing against 0.5 puts both
+		// sides back in the same units and restores the original meaning.
 		function recipientWantsLiquid( i, j ) {
 
-			const total = atomicLoad( totalCellCount( i, j ) );
-			const liquid = atomicLoad( liquidCellCount( i, j ) );
+			const total = atomicLoad( totalCellCount( i, j ) ).toFloat();
+			const sum = atomicLoad( concentrationAccum( i, j ) ).toFloat().div( concentrationScaleNode );
 
 			const neighborTotal = atomicLoad( totalCellCount( max( 0, i.sub( 1 ) ), j ) )
 				.add( atomicLoad( totalCellCount( min( resolutionX - 1, i.add( 1 ) ), j ) ) )
 				.add( atomicLoad( totalCellCount( i, max( 0, j.sub( 1 ) ) ) ) )
-				.add( atomicLoad( totalCellCount( i, min( resolutionY - 1, j.add( 1 ) ) ) ) );
+				.add( atomicLoad( totalCellCount( i, min( resolutionY - 1, j.add( 1 ) ) ) ) )
+				.toFloat();
 
-			const neighborLiquid = atomicLoad( liquidCellCount( max( 0, i.sub( 1 ) ), j ) )
-				.add( atomicLoad( liquidCellCount( min( resolutionX - 1, i.add( 1 ) ), j ) ) )
-				.add( atomicLoad( liquidCellCount( i, max( 0, j.sub( 1 ) ) ) ) )
-				.add( atomicLoad( liquidCellCount( i, min( resolutionY - 1, j.add( 1 ) ) ) ) );
+			const neighborSum = atomicLoad( concentrationAccum( max( 0, i.sub( 1 ) ), j ) )
+				.add( atomicLoad( concentrationAccum( min( resolutionX - 1, i.add( 1 ) ), j ) ) )
+				.add( atomicLoad( concentrationAccum( i, max( 0, j.sub( 1 ) ) ) ) )
+				.add( atomicLoad( concentrationAccum( i, min( resolutionY - 1, j.add( 1 ) ) ) ) )
+				.toFloat().div( concentrationScaleNode );
 
-			return total.greaterThan( 0 ).select(
-				liquid.mul( 2 ).greaterThan( total ),
-				neighborLiquid.mul( 2 ).greaterThan( neighborTotal )
+			const ownMean = sum.div( max( total, float( 1 ) ) );
+			const neighborMean = neighborSum.div( max( neighborTotal, float( 1 ) ) );
+
+			return total.greaterThan( 0.5 ).select(
+				ownMean.greaterThan( 0.5 ),
+				neighborMean.greaterThan( 0.5 )
 			);
 
 		}
@@ -1172,6 +1426,11 @@ export function createGridTwoPhaseFlipSolver2( {
 
 		g2pUpdate();
 
+		// After g2p, before resampling: the concentration field this reads was
+		// built from the same particle positions still in effect, and resampling
+		// is what would move particles out from under it.
+		if ( concentrationPassEnabled ) mixConcentration();
+
 		if ( resamplePass ) resamplePass();
 
 	}
@@ -1179,6 +1438,10 @@ export function createGridTwoPhaseFlipSolver2( {
 	return {
 		onAdvanceTimeStep,
 		positions, velocities, phase,
+		// `concentration` is the same array as `phase`, under the name that
+		// actually describes it once the value is continuous. Both are exposed
+		// so neither reading of the solver has to use the other's vocabulary.
+		concentration: phase,
 		liquidFraction, density,
 		betaU, betaV,
 		pressure: pressureSolver.pressure,

@@ -94,6 +94,44 @@ describe( 'computeTwoPhaseBoxSeed', () => {
 
 	} );
 
+	it( 'concentrationAt takes precedence over isLiquid and is clamped to [0,1]', () => {
+
+		const seed = computeTwoPhaseBoxSeed( {
+			boxMin: [ 0, 0 ], boxMax: [ 4, 1 ], gridSpacingX: 1, gridSpacingY: 1,
+			particlesPerCellAxis: 1, jitter: 0,
+			isLiquid: () => false,                  // should be ignored entirely
+			concentrationAt: ( [ x ] ) => x / 4     // 0.125, 0.375, 0.625, 0.875
+		} );
+
+		expect( Array.from( seed.phasesArray ) ).toEqual( [ 0.125, 0.375, 0.625, 0.875 ] );
+		expect( seed.meanConcentration ).toBeCloseTo( 0.5, 12 );
+
+	} );
+
+	it( 'concentrationAt values outside [0,1] are clamped rather than accepted', () => {
+
+		const seed = computeTwoPhaseBoxSeed( {
+			boxMin: [ 0, 0 ], boxMax: [ 2, 1 ], gridSpacingX: 1, gridSpacingY: 1,
+			particlesPerCellAxis: 1, jitter: 0,
+			concentrationAt: ( [ x ] ) => ( x < 1 ? - 5 : 5 )
+		} );
+
+		expect( Array.from( seed.phasesArray ) ).toEqual( [ 0, 1 ] );
+
+	} );
+
+	it( 'meanConcentration matches liquidCount/count for a binary seed', () => {
+
+		const seed = computeTwoPhaseBoxSeed( {
+			boxMin: [ 0, 0 ], boxMax: [ 4, 4 ], gridSpacingX: 1, gridSpacingY: 1,
+			particlesPerCellAxis: 2, jitter: 0,
+			isLiquid: ( [ , y ] ) => y < 2
+		} );
+
+		expect( seed.meanConcentration ).toBeCloseTo( seed.liquidCount / seed.count, 12 );
+
+	} );
+
 	it( 'with zero jitter, every particle lands strictly inside [boxMin,boxMax]', () => {
 
 		const seed = computeTwoPhaseBoxSeed( { boxMin: [ 1, 1 ], boxMax: [ 3, 4 ], gridSpacingX: 1, gridSpacingY: 1, particlesPerCellAxis: 3, jitter: 0 } );
@@ -168,6 +206,56 @@ describe( 'createGridTwoPhaseFlipSolver2', () => {
 		expect( () => createGridTwoPhaseFlipSolver2( {
 			velocityGrid: makeGrid(), maxParticles: 16, liquidDensity: 1, gasDensity: 2
 		} ) ).toThrow( /gasDensity/ );
+
+	} );
+
+	it( 'does NOT impose that ordering on the neutral density names', () => {
+
+		// The ordering is a fact about the words "gas" and "liquid", not about
+		// the solver: a dye lighter than the water it is injected into is
+		// perfectly ordinary, and the neutral names carry no ordering claim.
+		expect( () => createGridTwoPhaseFlipSolver2( {
+			velocityGrid: makeGrid(), maxParticles: 16, ambientDensity: 1, componentDensity: 0.95
+		} ) ).not.toThrow();
+
+		expect( () => createGridTwoPhaseFlipSolver2( {
+			velocityGrid: makeGrid(), maxParticles: 16, ambientDensity: 1, componentDensity: 1.05
+		} ) ).not.toThrow();
+
+	} );
+
+	it( 'the neutral names alias the gas/liquid pair (concentration 0 and 1 respectively)', () => {
+
+		expect( () => createGridTwoPhaseFlipSolver2( {
+			velocityGrid: makeGrid(), maxParticles: 16, ambientDensity: 1, componentDensity: 1
+		} ) ).not.toThrow();
+
+		expect( () => createGridTwoPhaseFlipSolver2( {
+			velocityGrid: makeGrid(), maxParticles: 16, ambientDensity: 0, componentDensity: 1
+		} ) ).toThrow( /concentration-0/ );
+
+	} );
+
+	it( 'accepts mixing and fade, and a live node for each', () => {
+
+		const mixing = tsl_array_n.array0( 'float' );
+		mixing.fromArray( new Float32Array( [ 0.01 ] ) );
+
+		expect( () => createGridTwoPhaseFlipSolver2( {
+			velocityGrid: makeGrid(), maxParticles: 16, mixing: 0.05, fade: 0.01
+		} ) ).not.toThrow();
+
+		expect( () => createGridTwoPhaseFlipSolver2( {
+			velocityGrid: makeGrid(), maxParticles: 16, mixing: mixing()
+		} ) ).not.toThrow();
+
+	} );
+
+	it( 'exposes concentration as an alias of phase (the same array)', () => {
+
+		const solver = createGridTwoPhaseFlipSolver2( { velocityGrid: makeGrid(), maxParticles: 16 } );
+
+		expect( solver.concentration ).toBe( solver.phase );
 
 	} );
 
@@ -292,14 +380,21 @@ describe( 'createGridTwoPhaseFlipSolver2 -- live gasDensity', () => {
 
 	} );
 
-	it( 'rejects a live node for liquidDensity -- it is the normalization reference, not a physical knob', () => {
+	it( 'accepts a live node for EITHER density -- both are physical knobs', () => {
 
-		const liquidDensity = tsl_array_n.array0( 'float' );
-		liquidDensity.fromArray( new Float32Array( [ 1 ] ) );
+		// This used to be a rejection: liquidDensity was the fixed
+		// normalization reference, so animating it would only have rescaled
+		// every pressure in the scene. That is no longer true -- the reference
+		// is now the heavier of the two components, computed as a node -- and a
+		// dye scene genuinely wants to vary the injected component's density
+		// live, above and below the ambient fluid's.
+		const componentDensity = tsl_array_n.array0( 'float' );
+		componentDensity.fromArray( new Float32Array( [ 1.05 ] ) );
 
 		expect( () => createGridTwoPhaseFlipSolver2( {
-			velocityGrid: makeGrid(), maxParticles: 16, liquidDensity: liquidDensity()
-		} ) ).toThrow( /liquidDensity/ );
+			velocityGrid: makeGrid(), maxParticles: 16,
+			ambientDensity: 1, componentDensity: componentDensity()
+		} ) ).not.toThrow();
 
 	} );
 
