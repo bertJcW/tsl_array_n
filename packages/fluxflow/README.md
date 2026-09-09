@@ -525,6 +525,46 @@ a live node in place of a plain number (this port's own "number or node" convent
 on interaction, no reload or kernel rebuild needed -- the same already-established live-uniform pattern
 `interaction/pointer.js`/`keyboard.js` and `examples/16-karman-vortex-street/`'s own force controls use.
 
+### `grid_flip_solver2.js` -- `carryConcentration`, a dye carried on the particles
+
+An optional per-particle scalar -- dye, ink, a tracer, a second miscible liquid's mixing fraction --
+carried through an ordinary free-surface FLIP simulation. Off by default; when off, none of its fields or
+kernels are created at all.
+
+**Transport is exact, and that is the point.** A grid-advected scalar picks up numerical diffusion from
+every semi-Lagrangian lookup, so a dye filament smears whether or not you asked it to. A particle simply
+carries its value, so the only blending is the blending you configure. `examples/26-dye-free-surface/`
+states this as a measurement rather than an impression: over 480 real-WebGPU frames of two dyed columns
+collapsing into each other, total dye stayed constant to the digit and the fraction of *partially* mixed
+particles stayed at **0.00%** with `mixing` at zero -- every colour boundary in that scene is genuine
+transport. This is also what Houdini does (dye there is a per-particle `Cd` attribute rather than a
+solver), which is where the confirmation for the design came from.
+
+Two optional controls decide the ending, both defaulting to off:
+`mixing` lerps each particle toward the mean concentration of the particles sharing its cell, so the dye
+softens and eventually goes uniform; `fade` decays it toward zero so the dye disappears instead. `mixing`
+is a per-frame convex blend -- phenomenological and frame-rate dependent, **not** a discretised diffusion
+coefficient. A physical treatment of genuinely mixing fluids models a per-component drift velocity
+instead (Ren et al. 2014; Yang et al. 2015, both SPH and therefore design references rather than
+something to port); that is the upgrade path.
+
+**Why the dye lives here and not only in the two-phase solver**, which can also carry a concentration
+*and* couple it to density: that solver is all-fluid, so its domain is a sealed box, and a sealed box
+completely full of incompressible liquid can only circulate -- there is no free surface to rise or fall.
+A dye scene built there is stable, correct, and visually almost inert, which was demonstrated rather than
+assumed (`examples/25-dye-injection/` is kept precisely as that honest comparison, and its header records
+the measurements and two wrong turns). A free surface removes the constraint: liquid that can slosh,
+break and fold is what stretches a dye blob into filaments. The trade is that this solver has no
+variable-density coupling, so the dye is a passive tracer -- carried and drawn, but exerting nothing. Dye
+whose weight drives the flow is the two-phase solver's job. The two scenes together are the honest
+statement of that trade-off rather than either being "the" answer.
+
+One non-obvious interaction, taken from Houdini's users rather than discovered here: particle resampling
+relocates particles, and a relocated particle carries its concentration to its new home. SideFX's own
+forums repeatedly report reseeding diluting a carried colour attribute into mush under shearing, with
+users disabling it to keep a sharp boundary. The same applies here, so a scene chasing crisp filaments
+should set `resample: { enabled: false }` -- as `examples/26-dye-free-surface/` does.
+
 ### `grid_two_phase_flip_solver2.js` -- a two-phase (liquid + gas) FLIP solver, where the air pushes back
 
 Every liquid solver above this one is single-phase: particles are the liquid, and every cell without a

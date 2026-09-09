@@ -969,6 +969,25 @@ header comment carries the same list alongside the derivation.
 
 ### Academic references (no code, no license obligation)
 
+Miscible mixing (`mixing`/`fade` in `src/grid/grid_two_phase_flip_solver2.js` and
+`carryConcentration` in `src/grid/grid_flip_solver2.js`) is deliberately a
+phenomenological blend rather than a physical mixing model, so these are cited as
+the treatments it does *not* implement and as the upgrade path, not as sources of
+anything ported:
+
+- Ren, B., Li, C., Yan, X., Lin, M. C., Bonet, J. & Hu, S.-M. (2014). *Multiple-fluid
+  SPH Simulation Using a Mixture Model.* ACM Transactions on Graphics 33(5).
+- Yang, T., Chang, J., Ren, B., Lin, M. C., Zhang, J. J. & Hu, S.-M. (2015). *Fast
+  Multiple-fluid Simulation Using Helmholtz Free Energy.* ACM Transactions on
+  Graphics 34(6) (SIGGRAPH Asia 2015).
+- Liu, S., Wang, X., Ban, X., Xu, Y., Zhou, J., Kosinka, J. & Telea, A. C. (2018).
+  *Visual Simulation of Multiple Fluids in Computer Graphics: A State-of-the-Art
+  Report.* Journal of Computer Science and Technology 33(3).
+
+Both mixture-model papers are SPH formulations, so they are design references for a
+future drift-velocity treatment rather than implementations to port.
+
+
 - Brackbill, J. U. & Ruppel, H. M. (1986). *FLIP: A method for adaptively
   zoned, particle-in-cell calculations of fluid flows in two dimensions.*
   Journal of Computational Physics 65(2), 314–343. — FLIP itself.

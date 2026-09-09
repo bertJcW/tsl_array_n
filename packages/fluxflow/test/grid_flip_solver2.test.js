@@ -173,3 +173,85 @@ describe( 'createGridFlipSolver2', () => {
 	} );
 
 } );
+
+describe( 'createGridFlipSolver2 -- carried concentration (dye)', () => {
+
+	// The dye machinery is off by default and must stay that way: every
+	// pre-existing scene constructs this solver without it, and turning it on
+	// allocates fields and dispatches kernels those scenes should not pay for.
+	const makeGrid = ( nx = 8, ny = 8 ) => createFaceCenteredGrid2( nx, ny, 1, 1, 0, 0 );
+
+	it( 'does not expose a concentration field unless asked', () => {
+
+		const flip = createGridFlipSolver2( { velocityGrid: makeGrid(), maxParticles: 16 } );
+
+		expect( flip.concentration ).toBe( null );
+		expect( flip.cellConcentration ).toBe( null );
+
+	} );
+
+	it( 'exposes a per-particle concentration field when carryConcentration is on', () => {
+
+		const flip = createGridFlipSolver2( {
+			velocityGrid: makeGrid(), maxParticles: 16, carryConcentration: true
+		} );
+
+		expect( flip.concentration.type ).toBe( 'float' );
+		expect( flip.concentration.shape ).toEqual( [ 16 ] );
+
+	} );
+
+	it( 'exposes a cell-centered mean concentration matching the resolution', () => {
+
+		const flip = createGridFlipSolver2( {
+			velocityGrid: makeGrid( 5, 7 ), maxParticles: 16, carryConcentration: true
+		} );
+
+		expect( flip.cellConcentration.shape ).toEqual( [ 5, 7 ] );
+
+	} );
+
+	it( 'constructs with mixing and fade, as numbers and as live nodes', () => {
+
+		const mixing = tsl_array_n.array0( 'float' );
+		mixing.fromArray( new Float32Array( [ 0.01 ] ) );
+
+		expect( () => createGridFlipSolver2( {
+			velocityGrid: makeGrid(), maxParticles: 16,
+			carryConcentration: true, mixing: 0.05, fade: 0.01
+		} ) ).not.toThrow();
+
+		expect( () => createGridFlipSolver2( {
+			velocityGrid: makeGrid(), maxParticles: 16,
+			carryConcentration: true, mixing: mixing()
+		} ) ).not.toThrow();
+
+	} );
+
+	it( 'accepts mixing/fade alongside resampling in either state', () => {
+
+		// These two interact -- resampling relocates particles and a relocated
+		// particle carries its concentration -- so both combinations need to at
+		// least build. See the solver's note on the Houdini reseeding lesson.
+		for ( const enabled of [ true, false ] ) {
+
+			expect( () => createGridFlipSolver2( {
+				velocityGrid: makeGrid(), maxParticles: 16,
+				carryConcentration: true, mixing: 0.02,
+				resample: { enabled }
+			} ), `resample.enabled=${ enabled }` ).not.toThrow();
+
+		}
+
+	} );
+
+	it( 'still constructs with a custom concentrationAtomicScale', () => {
+
+		expect( () => createGridFlipSolver2( {
+			velocityGrid: makeGrid(), maxParticles: 16,
+			carryConcentration: true, concentrationAtomicScale: 1024
+		} ) ).not.toThrow();
+
+	} );
+
+} );

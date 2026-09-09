@@ -387,6 +387,13 @@ import { DEFAULT_ATOMIC_DOT_SCALE } from '../linalg/linalg.js';
 // runaway, don't bound normal physical variation" spirit.
 const MAX_PARTICLE_VELOCITY = 500;
 
+// Fixed-point scale for accumulating a continuous per-particle concentration
+// into an integer atomic. Safe by construction rather than by tuning:
+// concentration is bounded to [0,1] and a cell holds a handful of particles, so
+// the worst accumulated integer is a few times this -- orders of magnitude clear
+// of int32. Matches grid_two_phase_flip_solver2.js's own value.
+const DEFAULT_CONCENTRATION_ATOMIC_SCALE = 4096;
+
 function numberOrNode( value ) {
 
 	return typeof value === 'number' ? float( value ) : value;
@@ -550,7 +557,14 @@ export function createGridFlipSolver2( {
 	colliderPushThresh = 0,
 	colliderPushShift = 0,
 	resample = {},
-	pressure = {}
+	pressure = {},
+	// ---------------------------------------------------------------- dye
+	// A per-particle scalar carried through the simulation, off by default and
+	// costing nothing when off. See "Carried concentration (dye)" below.
+	carryConcentration = false,
+	mixing = 0,
+	fade = 0,
+	concentrationAtomicScale = DEFAULT_CONCENTRATION_ATOMIC_SCALE
 } = {} ) {
 
 	if ( ! velocityGrid ) {
@@ -578,6 +592,8 @@ export function createGridFlipSolver2( {
 	const gridSpacingNode = vec2( gridSpacingX, gridSpacingY );
 	const originNode = vec2( originX, originY );
 	const cellCenterOrigin = originNode.add( gridSpacingNode.mul( 0.5 ) );
+	const cellShape = [ resolutionX, resolutionY ];
+	const cellCount = resolutionX * resolutionY;
 
 	const dataSizeU = velocityGrid.dataSizeU;
 	const dataSizeV = velocityGrid.dataSizeV;
@@ -1090,6 +1106,125 @@ export function createGridFlipSolver2( {
 	// cell bookkeeping, before gravity -- mirrors mantaflow's own
 	// adjustNumber placement; see this file's own header comment (the
 	// "Particle resampling" section) for the full design.
+	// ---------------------------------------------------------------- carried concentration (dye)
+
+	// A scalar carried on each particle -- dye, ink, a tracer, a second miscible
+	// liquid's mixing fraction. Entirely optional: with `carryConcentration`
+	// false none of the fields or kernels below are created at all.
+	//
+	// *** Why this lives in the FREE-SURFACE solver and not only in the
+	// two-phase one ***
+	//
+	// grid_two_phase_flip_solver2.js can already carry a continuous
+	// concentration, and it can couple it to density, which this cannot. But it
+	// is an all-fluid solver: every cell is fluid, the domain is a sealed box,
+	// and a sealed box completely full of incompressible fluid can only
+	// circulate -- there is no free surface to rise or fall. A dye scene built
+	// there is stable and correct and barely moves, which was demonstrated
+	// rather than assumed (see examples/25-dye-injection/'s own header comment
+	// for the measurements and the two wrong turns).
+	//
+	// A free surface is what a dye plume actually needs: liquid that can slosh,
+	// break, and fold over is what stretches a dye blob into filaments. So the
+	// carried scalar belongs here too, and it is genuinely cheap to have --
+	// transport is free (the particle already moves; it just takes its value
+	// with it), and only the optional `mixing` needs a grid field at all.
+	//
+	// **Transport is exact.** A grid-advected scalar picks up numerical
+	// diffusion from every semi-Lagrangian lookup, so a dye filament smears
+	// whether or not you asked. A particle carries its value with no diffusion
+	// at all, so the only blending is the blending configured. This matches what
+	// Houdini does -- dye there is a per-particle `Cd` attribute rather than a
+	// solver -- see ../../THIRD-PARTY-NOTICES.md, "Design and architecture
+	// references".
+	//
+	// **mixing** lerps each particle toward the mean concentration of the
+	// particles sharing its cell, which is a particle-side stand-in for
+	// diffusion: no stencil, no extra stability condition (a convex blend can
+	// only move a value between existing values, never overshoot). It is
+	// phenomenological and frame-rate dependent, NOT a discretised diffusion
+	// coefficient -- a physical treatment of genuinely mixing fluids models a
+	// per-component drift velocity instead (Ren et al. 2014; Yang et al. 2015).
+	//
+	// **fade** decays concentration toward zero, so the dye disappears rather
+	// than blending in -- the same shape as grid_smoke_solver2.js's `smokeDecay`.
+	//
+	// *** Interaction with resampling, and a warning taken from Houdini ***
+	//
+	// SideFX's documentation and user forums repeatedly report that FLIP
+	// reseeding dilutes a carried colour attribute into uniform mush under
+	// shearing, and that users turn reseeding off when they need a sharp
+	// boundary. This solver's `resample` pass relocates particles and a relocated
+	// particle carries its concentration to its new home, so the same coupling
+	// applies: a scene chasing crisp filaments should expect to set
+	// `resample: { enabled: false }`. Recorded because it is a real, non-obvious
+	// interaction between two features that look unrelated.
+	let concentration = null;
+	let cellConcentration = null;
+	let concentrationPass = null;
+
+	if ( carryConcentration ) {
+
+		concentration = tsl_array_n.arrayN( 'float', maxParticles );
+		concentration.fromArray( new Float32Array( maxParticles ) );
+
+		cellConcentration = tsl_array_n.arrayN( 'float', cellShape );
+		cellConcentration.fromArray( new Float32Array( cellCount ) );
+
+		const concentrationAccum = tsl_array_n.arrayN( 'int', cellShape );
+		concentrationAccum.node.toAtomic();
+		const concentrationCount = tsl_array_n.arrayN( 'int', cellShape );
+		concentrationCount.node.toAtomic();
+
+		const zeroConcentrationCells = new Int32Array( cellCount );
+		const concentrationScaleNode = float( concentrationAtomicScale );
+		const mixingNode = clamp( numberOrNode( mixing ), float( 0 ), float( 1 ) );
+		const fadeNode = clamp( numberOrNode( fade ), float( 0 ), float( 1 ) );
+		const concentrationOf = ( p ) => clamp( concentration( p ), float( 0 ), float( 1 ) );
+
+		const accumulateConcentration = tsl_array_n.kernel( maxParticles, ( p ) => {
+
+			const { i, j } = cellIndexOf( positions( p ) );
+			atomicAdd( concentrationCount( i, j ), 1 );
+			atomicAdd( concentrationAccum( i, j ), round( concentrationOf( p ).mul( concentrationScaleNode ) ).toInt() );
+
+		} );
+
+		const resolveCellConcentration = tsl_array_n.kernel( cellShape, ( i, j ) => {
+
+			const total = atomicLoad( concentrationCount( i, j ) ).toFloat();
+			const sum = atomicLoad( concentrationAccum( i, j ) ).toFloat().div( concentrationScaleNode );
+			const mean = sum.div( max( total, float( 1 ) ) );
+
+			cellConcentration( i, j ).assign( total.greaterThan( 0.5 ).select( clamp( mean, float( 0 ), float( 1 ) ), float( 0 ) ) );
+
+		} );
+
+		// 3 bindings (positions, concentration, cellConcentration) -- kept as its
+		// own kernel rather than folded into g2pUpdate, which already binds seven
+		// and would sit exactly on the guaranteed per-stage limit of eight.
+		const mixAndFade = tsl_array_n.kernel( maxParticles, ( p ) => {
+
+			const local = collocatedValueAtPosition2( cellConcentration, gridSpacingNode, cellCenterOrigin, positions( p ), cellShape );
+			const c = concentrationOf( p );
+			const blended = c.add( local.sub( c ).mul( mixingNode ) );
+
+			concentration( p ).assign( clamp( blended.mul( float( 1 ).sub( fadeNode ) ), float( 0 ), float( 1 ) ) );
+
+		} );
+
+		concentrationPass = function concentrationPassNow() {
+
+			concentrationAccum.fromArray( zeroConcentrationCells );
+			concentrationCount.fromArray( zeroConcentrationCells );
+			accumulateConcentration();
+			resolveCellConcentration();
+			mixAndFade();
+
+		};
+
+	}
+
 	async function onAdvanceTimeStep() {
 
 		advectParticles();
@@ -1127,11 +1262,16 @@ export function createGridFlipSolver2( {
 
 		g2pUpdate();
 
+		// After g2p and after resampling, so the cell means are built from the
+		// positions the particles will actually keep this frame.
+		if ( concentrationPass ) concentrationPass();
+
 	}
 
 	return {
 		onAdvanceTimeStep,
 		positions, velocities, fluidMask,
+		concentration, cellConcentration,
 		pressure: pressureSolver.pressure,
 		boundarySolver, pressureSolver
 	};
