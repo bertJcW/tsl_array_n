@@ -120,6 +120,36 @@ export const DEFAULT_ATOMIC_DOT_SCALE = 65536;
 // iterations, or the residual genuinely increases at some point.
 const RESIDUAL_RECOMPUTE_INTERVAL = 50;
 
+// *** Why the stop test can be asked less often ***
+//
+// Evaluating "is the residual below tolerance yet?" costs a GPU->CPU round
+// trip, and a round trip cannot return until everything queued in front of
+// it has finished -- so it drains the pipeline. It is also the one round
+// trip per CG iteration that is not load-bearing: alpha needs pAp and beta
+// needs rz, both on the CPU, both this iteration, but nothing except the
+// caller needs to know whether to stop.
+//
+// `residualCheckInterval` exists to price that. Measured paired (both
+// policies interleaved within one run, which is the only way to compare
+// them on an unsteady scene -- see
+// ../docs/perf-investigation-cg-gpu-resident-alpha-beta.md): dropping
+// roughly one of the three round trips per iteration cuts per-iteration
+// cost by 21-22%, reproducibly. Round trips are about three quarters of
+// what an iteration costs.
+//
+// It is *not* a speedup on its own, and the default is 1 for that reason.
+// Asking less often means the loop runs past the point it could have
+// stopped, and the extra iterations cost back everything the skipped round
+// trips saved -- measured at 2% either side of break-even across two
+// paired runs, i.e. nothing. The value here is the number it established,
+// which says the win is in removing round trips *without* adding
+// iterations. That is alpha and beta living on the GPU, not this.
+//
+// Correctness does not depend on the interval. A skipped iteration is only
+// an unasked question: the loop still stops on nothing but a true residual
+// below tolerance, and solve() reads the residual once more after the loop
+// so the value it reports always belongs to the x it is leaving behind.
+
 // Beta-restart threshold for createPreconditionedConjugateGradientSolver's
 // own solve() -- see that function's own header comment at the beta
 // computation site for the full derivation. Every healthy beta actually
@@ -763,10 +793,11 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 		const initRTr = await dotRR.read();
 		let newRTr = initRTr;
-		// Whether newRTr above reflects the current x. Only meaningful when
-		// residualCheckInterval > 1 -- see the loop's own comment.
+		// Whether newRTr above reflects the current x -- only meaningful once
+		// the stop test starts being skipped. See the loop's own comment.
 		let residualIsCurrent = true;
 		let oldRTr = initRTr;
+
 
 		applyPreconditionerToR(); // z0 = M^-1 @ r0
 		let oldRZ = await dotRZ.read();

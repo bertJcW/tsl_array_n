@@ -210,14 +210,31 @@ export function createGridPressureSolver2( {
 	tolerance = 1e-5,
 	maxIterations = 100,
 	// How often the CG loop evaluates its true-residual stop test, in
-	// iterations. Every evaluation is a GPU->CPU round trip that drains the
-	// pipeline in front of it, and it is the one round trip per iteration
-	// that is not load-bearing -- see linalg.js's own comment at the read.
-	// 1 keeps the previous behaviour: test every iteration.
+	// iterations. 1 asks every iteration. Higher values are not a speedup --
+	// see linalg.js's own comment for the measurement and why the default
+	// stays at 1 -- but they are the instrument that priced the round trip,
+	// and mutable at runtime via `settings` below so that pricing can be
+	// done paired.
 	residualCheckInterval = 1,
 	atomicScale,
 	maxPlausiblePressure = DEFAULT_MAX_PLAUSIBLE_PRESSURE
 } = {} ) {
+
+	// The options that are safe to change between frames, exposed on the
+	// returned object so they can be. Everything else here is structural --
+	// it decides what gets allocated and which kernels get built, so it is
+	// fixed once construction is done. `residualCheckInterval` only decides
+	// when the CG loop asks whether it is finished, which is a policy the
+	// next solve can answer differently without anything being rebuilt.
+	//
+	// The reason it is mutable at all is measurement: comparing two
+	// scheduling policies across separate runs of an unsteady scene
+	// compares the scene to itself as much as the policies (its pressure
+	// problem gets harder as the wake develops, and the machine's clocks
+	// drift under sustained load). Alternating the policy *within* one run
+	// makes the comparison paired, and paired is the only kind that means
+	// anything here.
+	const settings = { residualCheckInterval };
 
 	const [ resolutionX, resolutionY ] = resolution;
 	const [ gridSpacingX, gridSpacingY ] = gridSpacing;
@@ -548,7 +565,7 @@ export function createGridPressureSolver2( {
 			// -- a minor, bounded inaccuracy, never a divergent one.
 			if ( updateDirichletFields ) updateDirichletFields();
 			dispatchBuildSystem();
-			diagnostics.converged = await cg.solve( tolerance, maxIterations, residualCheckInterval );
+			diagnostics.converged = await cg.solve( tolerance, maxIterations, settings.residualCheckInterval );
 
 			// Forwarded from the CG solver so a caller can see *why* a frame
 			// was expensive without reaching into linalg.js -- the iteration
@@ -573,6 +590,6 @@ export function createGridPressureSolver2( {
 
 	}
 
-	return { project, pressure: pressureGrid, b, diagnostics };
+	return { project, pressure: pressureGrid, b, diagnostics, settings };
 
 }

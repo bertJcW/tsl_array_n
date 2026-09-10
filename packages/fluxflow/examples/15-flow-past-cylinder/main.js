@@ -189,9 +189,8 @@ try {
 	// could ever buy -- a perfect one still costs one iteration. A capped run
 	// does not solve the pressure properly and is not a correctness config.
 	const maxIter = Number( new URLSearchParams( location.search ).get( 'maxIter' ) ?? 100 );
-	// `?checkEvery=` sets how often CG evaluates its stop test. Unlike
-	// `?maxIter=` this is a real, correctness-preserving setting -- it is a
-	// knob here so its cost can be measured before choosing a default.
+	// `?checkEvery=` sets the stop-test interval, in iterations. 1 is the
+	// real setting; the knob exists to price a GPU->CPU round trip.
 	const checkEvery = Number( new URLSearchParams( location.search ).get( 'checkEvery' ) ?? 1 );
 
 	const velocityGrid = grid.createFaceCenteredGrid2( N, N, 1, 1, 0, 0 );

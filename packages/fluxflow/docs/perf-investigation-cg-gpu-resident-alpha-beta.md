@@ -929,6 +929,16 @@ per CG iteration and watching where the iteration count bottoms out). That
 number decides whether the transform is worth writing, and it is a
 measurement rather than a build.
 
+> **Retraction, added by the section after this one.** Every millisecond
+> figure in the section below was measured with a harness that warmed up for
+> 30 frames and then timed 60. That is not steady state -- this scene needs
+> several hundred frames to reach it, and the measured window sat on the
+> steepest part of the ramp. The frame times (96.8, 80.4, 66.7, 57.3), the
+> 8.0 ms-per-iteration slope, the 3.0 ms-per-round-trip figure and the
+> "1.45x" all measured warm-up. They are wrong and are kept only so the
+> mistake stays visible. What survives is stated at the end of the next
+> section; the correct measurements are there too.
+
 # The bound was measured, the probe was wrong, and the answer was elsewhere
 
 The measurement the section above asked for was run. It produced a number,
@@ -1072,3 +1082,102 @@ clothes. The mechanism that avoids it is to predict rather than poll --
 CG's residual falls close to geometrically, so two checks give a rate, the
 rate gives an estimated crossing iteration, and the next check goes there.
 That self-tunes per solve, with no number for a user to pick.
+
+
+# The harness was wrong, and fixing it reversed the answer
+
+Everything above rests on frame times from one harness: fresh page load,
+30 frames of warm-up, time the next 60. Re-running the same configuration
+three times in a row through it gave 54.77, 64.66 and 69.78 ms -- a 27%
+spread on identical work, which is more than most of the differences it had
+been used to decide.
+
+## What the harness was actually measuring
+
+Timing consecutive segments from a single fresh load, `checkEvery=1`:
+
+| segment | frames | ms/frame | mean iterations |
+| --- | --- | --- | --- |
+| 1 | 30 | 100.65 | 14.03 |
+| 2 | 60 | 71.10 | 12.47 |
+| 3 | 60 | 52.98 | 11.83 |
+| 4 | 60 | 41.86 | 10.05 |
+| 5 | 60 | 40.30 | 10.68 |
+| 6 | 60 | 58.49 | 11.68 |
+| 7 | 60 | 40.57 | 12.27 |
+
+There is a ramp several hundred frames long -- 100 ms down to about 40 --
+and the old harness timed segments 1 and 2 of it. The total time gives the
+same thing away: 60 frames at "96.8 ms" and 150 frames at "44 ms" are both
+about six seconds of wall clock, because both were mostly paying the same
+fixed startup.
+
+So the retracted numbers were a warm-up curve sampled at slightly different
+points, and the ordering they implied was an artifact. Measured properly,
+`checkEvery=1` (44.06 ms) came out *faster* than `checkEvery=4` (46.67 ms)
+-- the reverse of what had been reported.
+
+## Why a single frame-time number cannot work on this scene
+
+Warm-up is not the only problem. After 300 frames of warm-up, five
+consecutive 60-frame segments gave 41.6, 46.5, 50.9, 67.4 and 71.2 ms --
+monotonically rising, with the mean iteration count rising too as the wake
+develops. The scene's own pressure problem gets harder over time, and the
+machine's clocks drift under sustained load. Comparing configuration A in
+one run against configuration B in another compares those two things as
+much as it compares A and B.
+
+## Paired measurement, which is what the comparison needed
+
+`residualCheckInterval` moved onto a mutable `settings` object on the
+pressure solver, so the policy can change between frames without anything
+being rebuilt. The measurement then interleaves both policies inside one
+run -- 30 blocks of 10 timed frames, alternating, 150 frames per arm, three
+untimed frames between blocks -- so scene evolution and thermal drift act
+on both arms equally.
+
+Two runs, the second with the block phase swapped:
+
+| run | arm | ms/frame | mean iterations | **ms per iteration** | converged |
+| --- | --- | --- | --- | --- | --- |
+| 1 | check every iteration | 87.83 | 14.37 | **6.11** | 150/150 |
+| 1 | predictive schedule | 86.08 | 18.11 | **4.75** | 150/150 |
+| 2 | check every iteration | 64.27 | 14.31 | **4.49** | 150/150 |
+| 2 | predictive schedule | 67.29 | 18.87 | **3.57** | 150/150 |
+
+Frame time says nothing: the predictive schedule is 2% faster in run 1 and
+5% slower in run 2. Per-iteration cost says the same thing twice: **21-22%
+cheaper, both runs**, for dropping roughly one of the three round trips.
+
+## What that establishes, and what it kills
+
+Round trips are about **three quarters of what a CG iteration costs**. That
+is the reproducible result, and it holds up where the frame-time numbers
+did not.
+
+It also explains why asking the stop question less often is worth nothing.
+The predictive schedule -- fit a geometric rate to the last two true
+residuals, predict the crossing iteration, check there -- works as designed:
+it cuts per-iteration cost by 21%. It also runs 26-32% more iterations,
+because a skipped check means the loop runs past the point it could have
+stopped. The two cancel. It was built, tested, measured, and reverted; a
+fixed interval is the same trade with worse ergonomics, so the default
+stays at 1.
+
+The knob and the mutable `settings` object were kept, because they are the
+instrument that produced the 21-22% and the same instrument is what will
+have to validate the next change.
+
+## Which makes GPU-resident alpha and beta the whole answer
+
+The other two round trips per iteration -- `pAp` for alpha, `rz` for beta --
+are removable without adding a single iteration, which is exactly the
+penalty that made the stop-test schedule a wash. Removing all three takes an
+iteration from about 4.5 ms to about 1.1 ms on run 2's numbers, with the
+iteration count unchanged at 14.3.
+
+Nothing else measured here comes close, and unlike the preconditioner
+directions it needs no new numerics -- only the scalars kept in device
+memory and the arithmetic that consumes them moved onto the GPU. The
+comparison must be paired, and against per-iteration cost rather than frame
+time.
