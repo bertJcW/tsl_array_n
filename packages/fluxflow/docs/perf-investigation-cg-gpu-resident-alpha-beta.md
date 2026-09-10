@@ -1181,3 +1181,110 @@ directions it needs no new numerics -- only the scalars kept in device
 memory and the arithmetic that consumes them moved onto the GPU. The
 comparison must be paired, and against per-iteration cost rather than frame
 time.
+
+
+# GPU-resident alpha and beta: built, and it is the win
+
+The thing this document has been named after since it was created. alpha and
+beta are consumed by kernels (updateX, updateR, updateP); the host was
+reading their ingredients back only to divide two numbers and upload the
+answer again. Now they are divided where they already live, and the loop
+reads one buffer once per iteration instead of making three round trips.
+
+## What had to move with them
+
+Every guard the host loop applies *before* touching x. The host can check
+`pAp` and break before updateX ever runs; a loop that only finds out an
+iteration later cannot. So the guards moved into the alpha and beta kernels,
+in a stronger form: a tripped guard writes the scalar as exactly **0**,
+which makes the update it feeds a no-op. x cannot be corrupted even for the
+one iteration before the host reads the flag.
+
+Non-finite detection goes through `src/float_guards.js` rather than any
+comparison written by hand. That module exists because the documented WGSL
+idiom is not dependable -- core WGSL has no `isnan()`, the spec lets an
+implementation assume non-finite values never arise, and a compiler may fold
+`x != x` to a constant false with no warning
+(`examples/27-float-guard-probe/` is the measurement that settled it). A
+first draft of these kernels used plain comparisons whose direction happened
+to be safe; that is not the same as being right, and it was replaced.
+
+One real accuracy change: `createDotReducer.read()` sums the per-lane
+partials in JS doubles, and the new GPU reduction sums them in float32. It
+is safe here for a specific reason -- all three dot products are sums of
+same-signed terms (`r.r` and `r.z` positive, `p.Ap` consistently negative
+for this file's negative semi-definite A) -- so there is no cancellation for
+the narrower type to amplify. A mixed-sign dot product would still need the
+host sum.
+
+## Measured, paired, iteration counts matched
+
+| run | arm | ms/frame | mean iterations | converged |
+| --- | --- | --- | --- | --- |
+| 1 | GPU-resident | 52.42 | 14.30 | 150/150 |
+| 1 | host | 64.87 | 14.45 | 150/150 |
+| 2 | GPU-resident | 49.42 | 14.31 | 150/150 |
+| 2 | host | 55.75 | 14.33 | 150/150 |
+
+**1.24x and 1.13x**, second run with the block phase swapped. The iteration
+counts agree to within 1%, which is the whole point: this is the change the
+stop-test schedule could not be, because it removes round trips without
+buying them with extra iterations.
+
+### Correcting the previous section's estimate
+
+That section priced round trips at "about three quarters of what an
+iteration costs", from a 21-22% drop in ms-per-iteration. That figure was
+inflated by a confound: ms-per-iteration is `(fixed frame cost / iterations)
++ per-iteration cost`, so *any* change that raises the iteration count
+lowers it, whether or not iterations got cheaper -- and the predictive
+schedule raised it by 26-32%.
+
+The table above has matched iteration counts, so it does not have that
+problem. Removing two round trips per iteration saves 12.45 ms and 6.33 ms
+per frame across roughly 28.7 removed trips: **one round trip costs about
+0.2-0.4 ms**, and three per iteration are 10-20% of the frame, not 75%.
+
+## Equivalence, checked where it actually matters
+
+`examples/05-preconditioned-conjugate-gradient/` now runs both paths, and
+adds the two cases that reach the guards -- nothing else in the examples
+directory does, and every scene run during this work reported a stop reason
+of none, so the rewritten guards would otherwise have shipped unexercised.
+On real WebGPU hardware:
+
+| case | host | GPU-resident |
+| --- | --- | --- |
+| A=diag(1..8), M^-1=diag(1..1/8) | exact answer | exact answer |
+| singular operator (A = 0) | degenerate-pAp, x finite | degenerate-pAp, x finite |
+| near-null operator (A = diag(1e-12)) | alpha-magnitude, x finite | alpha-magnitude, x finite |
+
+The first guard case is not hypothetical: a fully closed, all-Neumann
+pressure domain is singular, and grid_pressure_solver2.js reaches it.
+
+Across the scenes, with the new path as the default:
+
+| example | converged | rejected | non-finite pressures | stop reasons |
+| --- | --- | --- | --- | --- |
+| 21 irregular container | 250/250 | 0 | 0 | all none |
+| 22 multiple colliders | 248/250 | 0 | 0 | all none |
+| 26 dye in free surface | 199/200 | 0 | 0 | all none |
+| 28 drop into pool | 238/250 | 0 | 0 | all none |
+| 29 static droplet | 80/80 | 0 | 0 | all none |
+
+Example 26 was run against the host path in the same session and agreed on
+peak pressure to every digit (10.382), with the same converged count.
+
+## Where that leaves the frame
+
+On by default, with `gpuResidentScalars: false` restoring the host path --
+which is not dead code: it is what the guards are specified by and what the
+equivalence test compares against.
+
+One round trip per iteration is left, and it is the stop test, which
+genuinely has to be on the host. Removing it means not asking every
+iteration, and the section above measured what that trade costs: the extra
+iterations give it all back. So this direction is finished at roughly
+1.2x, and the next question is a different one -- the frame still spends
+about 500 dispatches on a 64x64 grid, and at 2.28 ms of CPU encoding for
+all of them, whatever the rest of that time is, it is not the host.

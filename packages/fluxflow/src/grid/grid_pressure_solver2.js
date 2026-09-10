@@ -216,6 +216,18 @@ export function createGridPressureSolver2( {
 	// and mutable at runtime via `settings` below so that pricing can be
 	// done paired.
 	residualCheckInterval = 1,
+	// Compute alpha and beta on the GPU and read the loop's scalars back in
+	// one trip per iteration instead of three -- see
+	// solveWithGpuResidentScalars in linalg.js. On by default: measured
+	// paired on example 15 (twice, phase swapped) at 1.13x and 1.24x with
+	// the iteration count unchanged to within 1%, and verified to produce
+	// the same answers, the same guard outcomes and the same stop reasons
+	// as the host path in examples/05-preconditioned-conjugate-gradient/.
+	// `false` restores the host path, which is what that example compares
+	// against and what the guards are specified by. Mutable via `settings`
+	// below, because comparing the two across separate runs of an unsteady
+	// scene compares the scene to itself.
+	gpuResidentScalars = true,
 	atomicScale,
 	maxPlausiblePressure = DEFAULT_MAX_PLAUSIBLE_PRESSURE
 } = {} ) {
@@ -234,7 +246,7 @@ export function createGridPressureSolver2( {
 	// drift under sustained load). Alternating the policy *within* one run
 	// makes the comparison paired, and paired is the only kind that means
 	// anything here.
-	const settings = { residualCheckInterval };
+	const settings = { residualCheckInterval, gpuResidentScalars };
 
 	const [ resolutionX, resolutionY ] = resolution;
 	const [ gridSpacingX, gridSpacingY ] = gridSpacing;
@@ -565,7 +577,7 @@ export function createGridPressureSolver2( {
 			// -- a minor, bounded inaccuracy, never a divergent one.
 			if ( updateDirichletFields ) updateDirichletFields();
 			dispatchBuildSystem();
-			diagnostics.converged = await cg.solve( tolerance, maxIterations, settings.residualCheckInterval );
+			diagnostics.converged = await cg.solve( tolerance, maxIterations, settings.residualCheckInterval, settings.gpuResidentScalars );
 
 			// Forwarded from the CG solver so a caller can see *why* a frame
 			// was expensive without reaching into linalg.js -- the iteration

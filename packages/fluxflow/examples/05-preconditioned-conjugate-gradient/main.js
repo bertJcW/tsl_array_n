@@ -42,6 +42,7 @@
 // case.
 
 import * as tsl_array_n from 'tsl_array_n';
+import { float } from 'three/tsl';
 import { linalg } from 'fluxflow';
 
 const pre = document.querySelector( '#status pre' );
@@ -92,26 +93,122 @@ try {
 
 	}
 
-	const solver = linalg.createPreconditionedConjugateGradientSolver( diagonalOperator, jacobiPreconditioner, b, x );
+	// Both scalar paths have to produce this exact answer. The GPU-resident
+	// one computes alpha and beta in kernels and reads the loop's scalars
+	// back once per iteration instead of three times, which means every
+	// guard the host loop applies before touching x had to move into those
+	// kernels too -- so "does it still land on A^-1@b" is only half of what
+	// needs checking here. The guard cases below are the other half.
+	for ( const gpuResidentScalars of [ false, true ] ) {
 
-	const succeeded = await solver.solve( 1e-5, 20 );
+		const label = gpuResidentScalars ? 'GPU-resident alpha/beta' : 'host alpha/beta';
 
-	const result = Array.from( await x.toArray() );
-	const expected = Array.from( { length: N }, ( _, i ) => 1 / ( i + 1 ) );
+		x.fromArray( new Float32Array( N ) ); // x0 = [0,0,...,0]
 
-	// The length check guards against a vacuous "match": [].every(...) is
-	// trivially true in JS regardless of the predicate, so an empty/short
-	// GPU readback (a real failure mode seen elsewhere in this project)
-	// would otherwise silently report a false pass instead of itself.
-	const matches = result.length === expected.length && result.every( ( v, i ) => Math.abs( v - expected[ i ] ) < 1e-3 );
+		const solver = linalg.createPreconditionedConjugateGradientSolver( diagonalOperator, jacobiPreconditioner, b, x );
 
-	log(
-		'createPreconditionedConjugateGradientSolver — A=diag(1..8), M^-1=diag(1..1/8), b=[1,...,1]',
-		succeeded && matches,
-		matches
-			? `x = [${ result.map( ( v ) => v.toFixed( 4 ) ) }] (expected [${ expected.map( ( v ) => v.toFixed( 4 ) ) }]), succeeded=${ succeeded }`
-			: `got [${ result }], expected [${ expected }], succeeded=${ succeeded }`
-	);
+		const succeeded = await solver.solve( 1e-5, 20, 1, gpuResidentScalars );
+
+		const result = Array.from( await x.toArray() );
+		const expected = Array.from( { length: N }, ( _, i ) => 1 / ( i + 1 ) );
+
+		// The length check guards against a vacuous "match": [].every(...) is
+		// trivially true in JS regardless of the predicate, so an empty/short
+		// GPU readback (a real failure mode seen elsewhere in this project)
+		// would otherwise silently report a false pass instead of itself.
+		const matches = result.length === expected.length && result.every( ( v, i ) => Math.abs( v - expected[ i ] ) < 1e-3 );
+
+		log(
+			`A=diag(1..8), M^-1=diag(1..1/8), b=[1,...,1] — ${ label }`,
+			succeeded && matches,
+			matches
+				? `x = [${ result.map( ( v ) => v.toFixed( 4 ) ) }] (expected [${ expected.map( ( v ) => v.toFixed( 4 ) ) }]), succeeded=${ succeeded }`
+				: `got [${ result }], expected [${ expected }], succeeded=${ succeeded }`
+		);
+
+	}
+
+	// *** The guards, which are the part that had to be rewritten ***
+	//
+	// The host loop checks its denominators on the CPU and breaks *before*
+	// the kernel that would consume a bad alpha. The GPU-resident path
+	// cannot do that -- it only finds out an iteration later -- so instead
+	// its kernels write alpha (or beta) as exactly 0, which makes the update
+	// they feed a no-op. Both arrangements have to leave x untouched and
+	// report the same reason; that equivalence is what these two cases test,
+	// and nothing else in this directory reaches them. The first is not
+	// hypothetical: a fully closed, all-Neumann pressure domain is singular,
+	// and grid_pressure_solver2.js hits it.
+	function identityPreconditioner( input, output ) {
+
+		return tsl_array_n.kernel( N, ( i ) => {
+
+			output( i ).assign( input( i ) );
+
+		} );
+
+	}
+
+	const guardCases = [
+		{
+			name: 'singular operator (A = 0) — p.Ap is exactly 0',
+			expectedStop: 'degenerate-pAp',
+			operator: ( input, output ) => tsl_array_n.kernel( N, ( i ) => {
+
+				output( i ).assign( float( 0 ).mul( input( i ) ) );
+
+			} )
+		},
+		{
+			name: 'near-null operator (A = diag(1e-12)) — alpha overflows its bound',
+			expectedStop: 'alpha-magnitude',
+			operator: ( input, output ) => tsl_array_n.kernel( N, ( i ) => {
+
+				output( i ).assign( input( i ).mul( 1e-12 ) );
+
+			} )
+		}
+	];
+
+	for ( const guardCase of guardCases ) {
+
+		const outcomes = {};
+
+		for ( const gpuResidentScalars of [ false, true ] ) {
+
+			const key = gpuResidentScalars ? 'gpu' : 'host';
+
+			x.fromArray( new Float32Array( N ) );
+
+			const solver = linalg.createPreconditionedConjugateGradientSolver( guardCase.operator, identityPreconditioner, b, x );
+
+			await solver.solve( 1e-5, 20, 1, gpuResidentScalars );
+
+			const finalX = Array.from( await x.toArray() );
+
+			outcomes[ key ] = {
+				stoppedBy: solver.state.stoppedBy,
+				// x must still be finite. A guard that let a bad alpha
+				// through would show up here and nowhere else.
+				finite: finalX.length === N && finalX.every( Number.isFinite ),
+				x: finalX
+			};
+
+		}
+
+		const agree = outcomes.host.stoppedBy === outcomes.gpu.stoppedBy;
+		const expected = outcomes.host.stoppedBy === guardCase.expectedStop;
+		const finite = outcomes.host.finite && outcomes.gpu.finite;
+
+		log(
+			`guard — ${ guardCase.name }`,
+			agree && expected && finite,
+			`host stopped by '${ outcomes.host.stoppedBy }' (x finite: ${ outcomes.host.finite }), ` +
+			`GPU-resident stopped by '${ outcomes.gpu.stoppedBy }' (x finite: ${ outcomes.gpu.finite }), ` +
+			`expected '${ guardCase.expectedStop }'`
+		);
+
+	}
 
 } catch ( error ) {
 

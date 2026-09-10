@@ -72,6 +72,7 @@
 import * as tsl_array_n from 'tsl_array_n';
 import { float, Loop, If } from 'three/tsl';
 import { instrumentDispatch } from '../profiling.js';
+import { isNonFinite, isNonFiniteOrAbove } from '../float_guards.js';
 
 // Fixed-point scale for encoding a float product as an atomically-summable
 // int32 -- see decision 1 above. Too small loses precision (residuals near
@@ -406,7 +407,11 @@ export function createDotReducer( shape, fieldA, fieldB ) {
 
 	}
 
-	return { read, lanes };
+	// `partial` and `dispatch` are exposed for the GPU-resident path, which
+	// needs the same per-lane sums this one reads back -- but summed by a
+	// kernel into a scalar the GPU can go on to divide, instead of by the
+	// host. See buildScalarReduction in the PCG solver below.
+	return { read, lanes, partial, dispatch: instrumentedDispatch };
 
 }
 
@@ -786,7 +791,279 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 	}
 
-	async function solve( tol, maxiter, residualCheckInterval = 1 ) {
+	// *** The GPU-resident scalar path ***
+	//
+	// Measured, paired, on example 15: GPU->CPU round trips are about three
+	// quarters of what a CG iteration costs, and the loop above makes three
+	// of them per iteration -- pAp for alpha, r.r for the stop test, r.z for
+	// beta. Each one drains the pipeline, because a readback cannot return
+	// until the work queued in front of it has finished.
+	//
+	// Only the *stop test* genuinely needs to be on the host. alpha and beta
+	// are consumed by kernels (updateX, updateR, updateP), so the host reads
+	// them back only to divide two numbers and upload the answer again. Here
+	// they are divided where they already live.
+	//
+	// That leaves one readback per iteration instead of three, and it moves
+	// to the *end* of the iteration, where it reports what happened rather
+	// than gating what happens next. The important consequence is that every
+	// guard the host loop applies before touching x has to move too --
+	// otherwise a degenerate alpha would reach updateX an iteration before
+	// the host could notice. They do move, into buildAlphaKernel and
+	// buildBetaKernel below, and they take a stronger form there: instead of
+	// breaking before the update, a tripped guard writes alpha (or beta) as
+	// exactly 0, which makes the update it feeds a no-op. x cannot be
+	// corrupted even for the one iteration before the host reads the flag.
+	//
+	// Accuracy note: `read()` above sums the per-lane partials in JS
+	// doubles, and buildScalarReduction sums them in float32. That is a real
+	// loss, and it is safe here for a specific reason -- every one of these
+	// three dot products is a sum of same-signed terms (r.r and r.z are
+	// positive; p.Ap is consistently negative for this file's negative
+	// semi-definite A), so there is no cancellation for the narrower type to
+	// amplify. A dot product with mixed signs would need the host sum.
+
+	// Slots in the one buffer the host reads. Everything the loop needs to
+	// decide anything lives here, so it can all come back in a single trip.
+	const SLOT_PAP = 0;
+	const SLOT_RR = 1;
+	const SLOT_RZ = 2;
+	const SLOT_RZ_OLD = 3;
+	const SLOT_STOP = 4;
+	const SLOT_PAP_BASELINE = 5;
+	const SCALAR_SLOT_COUNT = 6;
+
+	// Stop codes written by the kernels, read back as floats. 0 means the
+	// iteration was clean.
+	const STOP_NONE = 0;
+	const STOP_DEGENERATE_PAP = 1;
+	const STOP_PAP_GROWTH = 2;
+	const STOP_ALPHA_MAGNITUDE = 3;
+	const STOP_DEGENERATE_OLD_RZ = 4;
+
+	const STOP_REASONS = {
+		[ STOP_DEGENERATE_PAP ]: 'degenerate-pAp',
+		[ STOP_PAP_GROWTH ]: 'pAp-growth',
+		[ STOP_ALPHA_MAGNITUDE ]: 'alpha-magnitude',
+		[ STOP_DEGENERATE_OLD_RZ ]: 'degenerate-oldRZ'
+	};
+
+	const scalars = tsl_array_n.arrayN( 'float', [ SCALAR_SLOT_COUNT ] );
+
+	// Sums one dot reducer's per-lane partials into a slot. One thread: the
+	// lane count is small (the grid's first dimension), and a second
+	// tree-reduction stage would cost more dispatches than it saves work.
+	function buildScalarReduction( reducer, slot ) {
+
+		return tsl_array_n.kernel( [ 1 ], ( _thread ) => {
+
+			const total = float( 0 ).toVar();
+
+			Loop( reducer.lanes, ( { i: lane } ) => {
+
+				total.addAssign( reducer.partial( lane ) );
+
+			} );
+
+			scalars( slot ).assign( total );
+
+		} );
+
+	}
+
+	// Non-finite detection goes through ../float_guards.js rather than any
+	// comparison written here. That module exists because the documented
+	// WGSL idiom for it is not dependable -- core WGSL has no isnan(), the
+	// spec lets an implementation assume non-finite values never arise, and
+	// a compiler is free to fold the usual `x != x` to a constant false with
+	// no warning. examples/27-float-guard-probe/ is the measurement that
+	// settled it on real hardware. A guard that silently stops guarding is
+	// exactly the failure this whole path must not introduce.
+	//
+	// The tests below are the same set the host loop applies, in the same
+	// order: isDegenerateDenominator's (non-finite or exactly zero), then
+	// the growth bound, then the magnitude bound.
+	const alphaKernel = tsl_array_n.kernel( [ 1 ], ( _thread ) => {
+
+		const pAp = scalars( SLOT_PAP ).toVar();
+		const rzOld = scalars( SLOT_RZ_OLD ).toVar();
+		const baseline = scalars( SLOT_PAP_BASELINE ).toVar();
+
+		const value = rzOld.div( pAp ).toVar();
+
+		// Matches isDegenerateDenominator( pAp ) on the host.
+		const pApDegenerate = isNonFinite( pAp ).or( pAp.equal( 0 ) );
+		// Only reached with a finite pAp, so a plain comparison is enough.
+		const pApGrew = pAp.abs().greaterThan( baseline.mul( MAX_PAP_GROWTH_FACTOR ) );
+		const alphaTooLarge = isNonFiniteOrAbove( value, MAX_ALPHA_MAGNITUDE );
+
+		const stopCode = pApDegenerate.select(
+			float( STOP_DEGENERATE_PAP ),
+			pApGrew.select(
+				float( STOP_PAP_GROWTH ),
+				alphaTooLarge.select( float( STOP_ALPHA_MAGNITUDE ), float( STOP_NONE ) )
+			)
+		).toVar();
+
+		// 0 makes updateX and updateR no-ops, so a tripped guard leaves x
+		// and r exactly as they were -- the host breaks out one readback
+		// later having lost nothing but the rest of this iteration's work.
+		alpha().assign( stopCode.equal( STOP_NONE ).select( value, float( 0 ) ) );
+
+		scalars( SLOT_STOP ).assign( stopCode );
+
+	} );
+
+	const betaKernel = tsl_array_n.kernel( [ 1 ], ( _thread ) => {
+
+		const rzNew = scalars( SLOT_RZ ).toVar();
+		const rzOld = scalars( SLOT_RZ_OLD ).toVar();
+
+		const value = rzNew.div( rzOld ).toVar();
+
+		// Matches isDegenerateDenominator( oldRZ ) on the host.
+		const rzOldDegenerate = isNonFinite( rzOld ).or( rzOld.equal( 0 ) );
+
+		// Sign flip via the product rather than two comparisons: same test,
+		// and a NaN on either side leaves it false -- which is correct here
+		// only because isNonFiniteOrAbove below catches that case anyway.
+		const signFlipped = rzOld.mul( rzNew ).lessThan( 0 );
+		const restart = signFlipped.or( isNonFiniteOrAbove( value, MAX_BETA_MAGNITUDE ) );
+
+		// A restart is not an error -- it drops the search direction back to
+		// the preconditioned residual, which is what beta = 0 means. Only an
+		// unusable denominator stops the solve.
+		beta().assign( restart.select( float( 0 ), value ) );
+
+		// Only overwrite the stop slot when this kernel has something to
+		// say, so an alpha-time stop set earlier this iteration survives to
+		// be read.
+		If( rzOldDegenerate, () => {
+
+			scalars( SLOT_STOP ).assign( float( STOP_DEGENERATE_OLD_RZ ) );
+
+		} );
+
+		// beta consumed it; roll rz forward for the next iteration.
+		scalars( SLOT_RZ_OLD ).assign( rzNew );
+
+	} );
+
+	const reducePAp = buildScalarReduction( dotPAp, SLOT_PAP );
+	const reduceRR = buildScalarReduction( dotRR, SLOT_RR );
+	const reduceRZ = buildScalarReduction( dotRZ, SLOT_RZ );
+
+	/**
+	 * The same algorithm as solve() below, with alpha and beta computed on
+	 * the GPU and one readback per iteration instead of three.
+	 *
+	 * Behaviour is meant to be indistinguishable: same guards, same stop
+	 * conditions, same periodic true-residual recompute. The differences are
+	 * that a guard makes its update a no-op rather than breaking before it,
+	 * and that convergence is noticed at the end of the iteration it
+	 * happened in rather than the middle -- so a converging solve does one
+	 * preconditioner apply more than it strictly needs, and a guarded solve
+	 * finishes an iteration whose updates are all no-ops.
+	 */
+	async function solveWithGpuResidentScalars( tol, maxiter ) {
+
+		applyToX(); // Ax = A @ x
+		init(); // r = b - Ax, p = 0, Ap = 0
+
+		// Two host reads to seed the loop. Unlike the ones inside it, these
+		// happen once per solve, not once per iteration.
+		const initRTr = await dotRR.read();
+		let newRTr = initRTr;
+		let oldRTr = initRTr;
+
+		if ( Math.sqrt( Math.abs( initRTr ) ) < tol ) {
+
+			state.residualSquared = initRTr;
+			return true;
+
+		}
+
+		applyPreconditionerToR(); // z0 = M^-1 @ r0
+		const initRZ = await dotRZ.read();
+
+		updateP(); // p0 = z0 (p was 0, so beta cannot matter here)
+
+		// Seed the buffer the kernels work out of. pApBaseline matches the
+		// host loop's own: this solve's starting energy scale, with the same
+		// defensive floor.
+		const seed = new Float32Array( SCALAR_SLOT_COUNT );
+		seed[ SLOT_RZ_OLD ] = initRZ;
+		seed[ SLOT_PAP_BASELINE ] = Math.max( Math.abs( initRTr ), 1e-12 );
+		seed[ SLOT_STOP ] = STOP_NONE;
+		scalars.fromArray( seed );
+
+		let forceResidualRecompute = false;
+
+		for ( let iter = 0; iter < maxiter; iter ++ ) {
+
+			state.iterations = iter + 1;
+
+			applyToP(); // Ap = A @ p
+			dotPAp.dispatch();
+			reducePAp();
+			alphaKernel(); // alpha = rz / pAp, guarded, or 0
+
+			updateX();
+
+			if ( forceResidualRecompute || ( iter % RESIDUAL_RECOMPUTE_INTERVAL === 0 && iter > 0 ) ) {
+
+				applyToX(); // Ax = A @ x (refresh -- x just changed)
+				recomputeR(); // r = b - Ax, correcting drift from past incremental updates
+				forceResidualRecompute = false;
+
+			} else {
+
+				updateR(); // r -= alpha * Ap
+
+			}
+
+			dotRR.dispatch();
+			reduceRR();
+
+			applyPreconditionerToR(); // z = M^-1 @ r
+			dotRZ.dispatch();
+			reduceRZ();
+			betaKernel(); // beta = rz_i+1 / rz_i, guarded, or 0 to restart
+
+			updateP();
+
+			// The only round trip in the iteration. Everything the host has
+			// to decide comes back in it.
+			const snapshot = await scalars.toArray();
+			const stopCode = snapshot[ SLOT_STOP ];
+
+			newRTr = snapshot[ SLOT_RR ];
+
+			if ( stopCode !== STOP_NONE ) {
+
+				state.stoppedBy = STOP_REASONS[ stopCode ] ?? 'unknown';
+				break;
+
+			}
+
+			if ( Math.sqrt( Math.abs( newRTr ) ) < tol ) break;
+
+			if ( newRTr > oldRTr ) forceResidualRecompute = true;
+			oldRTr = newRTr;
+
+		}
+
+		state.residualSquared = newRTr;
+
+		return Math.sqrt( Math.abs( newRTr ) ) < tol;
+
+	}
+
+	async function solve( tol, maxiter, residualCheckInterval = 1, gpuResidentScalars = false ) {
+
+		state.stoppedBy = 'none';
+
+		if ( gpuResidentScalars ) return solveWithGpuResidentScalars( tol, maxiter );
 
 		applyToX(); // Ax = A @ x
 		init(); // r = b - Ax, p = 0, Ap = 0
@@ -1013,6 +1290,6 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 	}
 
-	return { solve, p, r, z, Ap, Ax, state };
+	return { solve, p, r, z, Ap, Ax, state, scalars };
 
 }
