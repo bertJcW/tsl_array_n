@@ -562,6 +562,7 @@ export function createGridFlipSolver2( {
 	gravity = [ 0, -9.81 ],
 	reducedPressure = true,
 	massWeightedTransfer = false,
+	applyForces,
 	maxDt,
 	flipRatio = 0.97,
 	velocityDamping = 0.02,
@@ -886,7 +887,29 @@ export function createGridFlipSolver2( {
 	// construction never larger than that. Pass it and the bound is derived
 	// from it; pass neither and the library default stands.
 	const boundDt = typeof maxDt === 'number' ? maxDt : ( typeof dt === 'number' ? dt : undefined );
-	const derivedMaxPlausiblePressure = ( boundDt !== undefined && reducedPressureEnabled )
+
+	// *** Only when gravity is what sets the scale, which is not always. ***
+	//
+	// The derivation above is specifically the *hydrostatic* scale: under the
+	// reduced-pressure substitution the field's magnitude is bounded by the
+	// air cells' Dirichlet targets, and those are `-dt (g.x)`. With g = 0
+	// every target is 0, the formula gives 0, and a bound of 0 rejects every
+	// solve that produces any pressure at all -- which is every solve.
+	//
+	// Found the moment a scene without gravity existed:
+	// examples/29-static-droplet/ holds a blob together with surface tension
+	// alone, and its first run had converged=true, a perfectly healthy
+	// pressure field peaking at 0.25, rejected=true on every frame, and a
+	// measured pressure jump of exactly zero. The bound, not the solve, was
+	// the problem.
+	//
+	// A floor would just be the magic number this was written to remove. A
+	// scene with no gravity has some *other* quantity setting its pressure
+	// scale -- surface tension's own sigma/R, an inflow's own dynamic
+	// pressure -- and this factory does not know about those, so the honest
+	// answer is to decline to derive one and leave the library default in
+	// place. Such a caller can still pass `pressure.maxPlausiblePressure`.
+	const derivedMaxPlausiblePressure = ( boundDt !== undefined && reducedPressureEnabled && gravityMagnitude > 0 )
 		? PRESSURE_BOUND_HEADROOM * boundDt * gravityMagnitude * domainExtent
 		: undefined;
 
@@ -1710,6 +1733,18 @@ export function createGridFlipSolver2( {
 			applyGravityV();
 
 		}
+
+		// Caller-supplied forces, in the force stage where a force belongs:
+		// after P2G has rebuilt the grid velocity from the particles (so
+		// nothing overwrites it) and before the projection (so the
+		// projection is what turns it into the pressure field it implies).
+		// Same spirit as grid_solver2.js's own stage hooks.
+		//
+		// Called rather than bound at construction so a force that needs one
+		// of this factory's own fields -- surface tension needs
+		// cellConcentration, which does not exist until this returns -- can
+		// be built afterwards and picked up by the closure.
+		if ( applyForces ) applyForces();
 		boundarySolver.constrainVelocity();
 
 		await projectDispatch();
