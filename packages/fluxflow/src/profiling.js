@@ -76,7 +76,7 @@ function record( label, cpuMs ) {
  */
 export function instrumentDispatch( label, dispatch ) {
 
-	return function instrumentedDispatch( ...args ) {
+	const wrapped = function instrumentedDispatch( ...args ) {
 
 		if ( ! state.enabled ) return dispatch( ...args );
 
@@ -87,6 +87,44 @@ export function instrumentDispatch( label, dispatch ) {
 		return result;
 
 	};
+
+	// Forwarded so a wrapped dispatcher can still be handed to
+	// tsl_array_n's dispatchBatch, which submits several kernels in one
+	// command buffer by reaching for this. A batched dispatcher never runs
+	// the wrapper above, so batched work is counted by profileBatch instead
+	// -- see its own comment.
+	wrapped.computeNode = dispatch.computeNode;
+
+	return wrapped;
+
+}
+
+/**
+ * Records a batched submission: `count` dispatches that went out together,
+ * under one label, with the batch's own CPU cost.
+ *
+ * Batching is the point of tsl_array_n's dispatchBatch, and it necessarily
+ * bypasses the per-dispatch wrapper above -- the individual dispatchers are
+ * never called, only their compute nodes are collected. So the batch has to
+ * report itself, and the per-label breakdown inside it is not available.
+ * That is the trade: to see where dispatches go by label, turn batching off
+ * (every batching caller here keeps a switch for exactly that reason) and
+ * re-run.
+ */
+export function profileBatch( label, count, run ) {
+
+	if ( ! state.enabled ) return run();
+
+	const t0 = performance.now();
+	const result = run();
+	const cpuMs = performance.now() - t0;
+
+	// Attributed as `count` dispatches so the per-frame dispatch total stays
+	// comparable across the batched and unbatched paths -- the whole reason
+	// to measure this is to see that number fall.
+	for ( let i = 0; i < count; i ++ ) record( label, i === 0 ? cpuMs : 0 );
+
+	return result;
 
 }
 

@@ -149,6 +149,7 @@
 import * as tsl_array_n from 'tsl_array_n';
 import { float, If } from 'three/tsl';
 import { buildElementwiseKernel } from './linalg.js';
+import { profileBatch } from '../profiling.js';
 
 function validateShape( shape ) {
 
@@ -791,6 +792,7 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 	const numberOfSmoothingIterationsDown = options.numberOfSmoothingIterationsDown ?? 2;
 	const numberOfSmoothingIterationsUp = options.numberOfSmoothingIterationsUp ?? 2;
 	const numberOfCoarsestIterations = options.numberOfCoarsestIterations ?? 20;
+	const batchDispatches = options.batchDispatches;
 	const numberOfFinalIterations = options.numberOfFinalIterations ?? 2;
 	const sorFactor = options.sorFactor ?? 1.0;
 	const dirichletMask = options.dirichletMask;
@@ -908,19 +910,32 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 		// hygiene) fixes in buildRestrictKernel/buildCorrectKernel/
 		// laplacianDiagonalAt turned out not to be what was actually
 		// causing the observed failures.
-		function relax( level, iterations, reversed = false ) {
+		// *** The V-cycle records its dispatches instead of issuing them. ***
+		//
+		// Every `renderer.compute()` call in three.js's WebGPU backend is its
+		// own command encoder, its own compute pass and its own queue submit.
+		// A V-cycle is a pure sequence of kernels with no readback anywhere
+		// in it, so the whole thing can go out as one submission instead of
+		// eighty -- measured at 9.3x cheaper per dispatch, see
+		// tsl_array_n's dispatchBatch and
+		// ../../docs/perf-investigation-cg-gpu-resident-alpha-beta.md.
+		//
+		// Ordering is preserved by the batch (checked, not assumed -- see
+		// that same comment), which is what red-black Gauss-Seidel needs:
+		// the black sweep has to see the red sweep's writes.
+		function relax( queue, level, iterations, reversed = false ) {
 
 			for ( let i = 0; i < iterations; i ++ ) {
 
 				if ( reversed ) {
 
-					levels[ level ].relaxColor1();
-					levels[ level ].relaxColor0();
+					queue.push( levels[ level ].relaxColor1 );
+					queue.push( levels[ level ].relaxColor0 );
 
 				} else {
 
-					levels[ level ].relaxColor0();
-					levels[ level ].relaxColor1();
+					queue.push( levels[ level ].relaxColor0 );
+					queue.push( levels[ level ].relaxColor1 );
 
 				}
 
@@ -928,33 +943,56 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 
 		}
 
-		function vCycle( level ) {
+		function vCycle( queue, level ) {
 
 			if ( level === numberOfLevels - 1 ) {
 
-				relax( level, numberOfCoarsestIterations );
+				relax( queue, level, numberOfCoarsestIterations );
 				return;
 
 			}
 
-			relax( level, numberOfSmoothingIterationsDown );
+			relax( queue, level, numberOfSmoothingIterationsDown );
 
-			levels[ level ].residual();
-			restrictDispatchers[ level ]();
-			levels[ level + 1 ].zeroX();
+			queue.push( levels[ level ].residual );
+			queue.push( restrictDispatchers[ level ] );
+			queue.push( levels[ level + 1 ].zeroX );
 
-			vCycle( level + 1 );
+			vCycle( queue, level + 1 );
 
-			correctDispatchers[ level ]();
+			queue.push( correctDispatchers[ level ] );
 
-			relax( level, level > 0 ? numberOfSmoothingIterationsUp : numberOfFinalIterations, true );
+			relax( queue, level, level > 0 ? numberOfSmoothingIterationsUp : numberOfFinalIterations, true );
 
 		}
 
+		// The queue is the same every call -- the V-cycle's shape is fixed at
+		// construction -- so it is built once rather than rebuilt per solve.
+		const queue = [];
+		queue.push( levels[ 0 ].zeroX );
+		vCycle( queue, 0 );
+
+		// `batchDispatches: false` restores one submit per kernel. Kept
+		// because the per-label dispatch breakdown in ../profiling.js is only
+		// visible on that path -- a batch reports itself as a whole -- so it
+		// is what any future "where did the dispatches go" question runs on.
+		if ( batchDispatches === false ) {
+
+			return function dispatch() {
+
+				for ( const step of queue ) step();
+
+			};
+
+		}
+
+		// Resolved once: the V-cycle's shape never changes, so the per-call
+		// form would re-walk the same list on every iteration.
+		const dispatchVCycle = tsl_array_n.createBatch( queue );
+
 		return function dispatch() {
 
-			levels[ 0 ].zeroX();
-			vCycle( 0 );
+			profileBatch( 'mg-vcycle', queue.length, dispatchVCycle );
 
 		};
 

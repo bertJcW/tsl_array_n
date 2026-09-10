@@ -517,3 +517,67 @@ then group the V-cycle's dispatches, which is where 77% of them are.
 
 That is a change to `tsl_array_n`, not to fluxflow, so it is a decision
 about that package's API rather than something to do unilaterally from here.
+
+---
+
+# Batching, implemented and measured across every solver
+
+`tsl_array_n` grew `createBatch( dispatchers )` (and a one-shot
+`dispatchBatch`), and `kernel()` now exposes its compute node so a batch can
+collect them. `multigrid.js` builds its V-cycle as a list of dispatchers
+once at construction and submits the whole thing through one `createBatch`
+dispatcher -- a V-cycle contains no readback, so there is nothing forcing it
+to be eighty submissions.
+
+`createBatch` rather than the one-shot form is deliberate and was measured:
+resolving the same fixed list on every call is real work, and on a light
+scene it ate the gain.
+
+## Results, same harness, 20 warm-up frames discarded
+
+| scene | before | after | |
+|---|---|---|---|
+| 15 flow-past-cylinder | 8.10 | **12.6-15.3** | **~1.7x** |
+| 20 flip-dam-break | 7.95 | **12.72** | **1.60x** |
+| 28 drop-into-pool | 3.72 | **4.90** | **1.32x** |
+| 26 dye-free-surface | 11.15 | **12.34** | **1.11x** |
+| 29 static-droplet | 61-75 | 60-63 | ~0.9x, inside the noise |
+
+With profiling on, example 15's breakdown shows where it went: encoding fell
+from **57.7 ms per frame to 11.7 ms**, and from 38% of the frame to 15%. The
+V-cycle's own share went from 43.2 ms to 3.2 ms -- 13.7x -- for the same
+1075 dispatches of actual work.
+
+The gradient across the table is the mechanism, visible: the more of a
+frame's time is the pressure solve, the more batching returns. Example 29 is
+the limiting case, at a single CG iteration per frame -- one V-cycle to
+batch, and the rest of the frame is FLIP stages that are still submitted one
+at a time. Its numbers are noisy in both builds (61-75 unbatched over four
+repeats) and the difference does not survive the spread.
+
+## Correctness
+
+Unchanged everywhere it can be checked exactly: examples 04 and 05 still
+reach the analytic solution to all four printed digits, 07 still converges
+to its reference within 1e-2, and 29's Young-Laplace ratio is still 1.019.
+
+One thing found while isolating this, and *not* caused by it:
+examples/06-multigrid-preconditioner/'s Dirichlet check reports its pinned
+cell as -42 against a target of 42, identically with and without batching.
+That is the example not having followed the masked-row sign flip documented
+in `laplacianDiagonalAt` -- the operator's masked row is negated, so a caller
+driving the preconditioner directly has to negate its own `b` for that row,
+which `grid_pressure_solver2.js` does and this example does not. Worth
+fixing; unrelated to anything here.
+
+## What is left
+
+Batching the V-cycle covers 77% of the dispatches. The remainder are in the
+FLIP stages (P2G, G2P, advection, boundary), which are `tsl_array_n.kernel`
+dispatchers too and could be batched the same way wherever a run of them has
+no readback between. That is a fluxflow-side change with no new machinery
+needed.
+
+And the coarse-level finding above still stands and is now worth more, not
+less: forty of a V-cycle's sixty-four relaxation dispatches still go to an
+8x8 grid. Batching made them cheap to submit; it did not make them useful.
