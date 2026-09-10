@@ -1059,6 +1059,37 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 		// construction -- so it is built once rather than rebuilt per solve.
 		const queue = [];
 		queue.push( levels[ 0 ].zeroX );
+
+		// *** Exactly one V-cycle, and why more is not an option here ***
+		//
+		// Repeating the cycle (each one warm-started from the last) is the
+		// textbook way to build a stronger preconditioner out of the same
+		// machinery, and it was tried here to price what a stronger one
+		// could buy. It does not work on this V-cycle, measured on example
+		// 15: two cycles per apply ran to the 100-iteration cap every frame
+		// with `stoppedBy: 'pAp-growth'` and never converged; four cycles
+		// stopped after a single iteration, leaving 5x the post-projection
+		// divergence of one cycle (11.4 against 2.4) while looking 4.5x
+		// "faster".
+		//
+		// That is the same PCG-asymmetry failure this file already
+		// documents at relax() -- an M that is not symmetric makes r.z stop
+		// behaving like a quadratic form -- and the composition is what
+		// exposes it. `B_n = (I - (I - BA)^n) A^-1` is symmetric whenever B
+		// is, so n > 1 breaking means B itself is not quite symmetric: the
+		// smoothing colour order is reversed on the way up (that fix is
+		// above), but the coarsest level still runs its sweeps as
+		// colour-0-then-1 every time, never reversed, so `(RB)^k` stands in
+		// for an operator whose adjoint is `(BR)^k`. One cycle is close
+		// enough to symmetric that CG tolerates it; composing amplifies the
+		// gap instead of damping it.
+		//
+		// So a stronger preconditioner is not reachable from here without
+		// making the coarsest solve symmetric first -- and the measurement
+		// that probe was for has since been answered another way: the frame
+		// is not spent on preconditioner quality at all, it is spent on
+		// GPU->CPU round trips. See linalg.js's residualCheckInterval and
+		// ../../docs/perf-investigation-cg-gpu-resident-alpha-beta.md.
 		vCycle( queue, 0 );
 
 		// `batchDispatches: false` restores one submit per kernel. Kept

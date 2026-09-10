@@ -928,3 +928,147 @@ strong preconditioner (for instance by running many more multigrid V-cycles
 per CG iteration and watching where the iteration count bottoms out). That
 number decides whether the transform is worth writing, and it is a
 measurement rather than a build.
+
+# The bound was measured, the probe was wrong, and the answer was elsewhere
+
+The measurement the section above asked for was run. It produced a number,
+the number was wrong, and chasing why it was wrong is what finally located
+the bottleneck. Both halves are recorded here, because the wrong number was
+convincing.
+
+## The probe: more V-cycles per apply, and why it cannot answer the question
+
+`createMultigridPreconditioner` was given a temporary `vCyclesPerApply`
+option -- repeated V-cycles, each warm-started from the last, which is the
+standard way to make a stronger preconditioner out of the machinery already
+present. Example 15, 64x64, four levels:
+
+| V-cycles per apply | ms/frame | mean CG iterations |
+| --- | --- | --- |
+| 1 (baseline) | 72.3 | 12.5 |
+| 4 | 16.2 | 1 |
+
+A 4.5x speedup, and the iteration count collapsing to 1, is exactly the
+shape the FFT direction was hoping for. It is also exactly the shape of a
+solver that has stopped solving, which is why it was checked before being
+believed. Over 40 frames past warm-up:
+
+| V-cycles per apply | frames converged | max post-projection divergence |
+| --- | --- | --- |
+| 1 | 40 / 40 | 2.38 |
+| 4 | 0 / 40 | 11.43 |
+
+Five times the divergence it was supposed to be removing. Two cycles per
+apply is the same failure in its other form: 100 iterations every frame,
+`stoppedBy: 'pAp-growth'`, never converged.
+
+`pAp-growth` is this file's own PCG-breakdown detector, and it fires for one
+reason: the preconditioner is not symmetric. `B_n = (I - (I - BA)^n) A^-1`
+is symmetric whenever `B` is, so composition breaking means the single cycle
+was already slightly asymmetric. It is: the smoothing colour order is
+reversed on the way up (the mantaflow-derived fix documented in
+multigrid.js), but the coarsest level runs `colour 0, colour 1` on every one
+of its sweeps and never reverses, so it stands in for an operator whose
+adjoint runs them the other way. One cycle is close enough that CG tolerates
+it; composing amplifies the gap rather than damping it.
+
+So this probe cannot price a stronger preconditioner without the coarsest
+solve being made symmetric first. It was removed rather than fixed, because
+by then the bound had been established a cheaper way and it pointed
+somewhere else entirely.
+
+## Pricing one CG iteration instead, which needs no new machinery
+
+A perfect preconditioner still costs one iteration. So the ceiling on every
+possible preconditioner is just the frame time at one iteration, and that is
+measurable by capping the iteration count -- a configuration that does not
+solve correctly but times honestly. Example 15, `?maxIter=`, 60 frames after
+30 warm-up, each run ending in a readback so queued GPU work is included:
+
+| iteration cap | ms/frame | mean iterations |
+| --- | --- | --- |
+| 1 | 20.29 | 1 |
+| 2 | 26.49 | 2 |
+| 4 | 42.55 | 4 |
+| 8 | 76.21 | 8 |
+| 100 (uncapped) | 96.81 | 11.62 |
+
+Straight line: **12.3 ms fixed, 8.0 ms per CG iteration** (slope from 1 to 8;
+the 2 and 4 points sit 1.8 and 1.7 ms under the fit). The ceiling on the
+whole preconditioner direction is therefore 96.8 -> 20.3 ms.
+
+That is a large ceiling, and it is also the number that made the real
+problem visible. The grid is 64x64. A V-cycle is about 40 dispatches over
+4096 cells, which is microseconds of arithmetic, not 8 ms.
+
+## Where the frame actually goes
+
+The profiler, on the uncapped baseline:
+
+- 502 dispatches per frame, 420 of them inside the V-cycle's single batched
+  submission
+- **CPU-side encoding: 2.28 ms, 2.5% of an 89.8 ms frame**
+
+Encoding is not the bottleneck, which retires dispatch-fusion as a
+direction. The other 97.5% is spent waiting. The profiler says on what:
+`cg-dot` runs **34.2 times per frame against 11.62 iterations -- 2.94, three
+per iteration**. Those are `dotPAp`, `dotRR` and `dotRZ`, and each one is a
+`.read()`: a GPU->CPU round trip.
+
+It is not the transfer that costs. A bare 4096-float readback on an idle
+queue measures 0.307 ms. It is that a round trip cannot return until
+everything queued in front of it has finished, so each one drains the
+pipeline -- three times per iteration, cutting the V-cycle's 40 batched
+dispatches into pieces that cannot overlap.
+
+Two of the three are load-bearing: alpha needs `pAp` and beta needs `rz`,
+both on the CPU, both this iteration. The third, `dotRR`, only answers
+"should we stop?".
+
+## Asking the stop question less often: 1.45x, no correctness cost
+
+`residualCheckInterval` (linalg.js, threaded through
+grid_pressure_solver2.js, `?checkEvery=` on example 15) evaluates the
+true-residual stop test every k iterations instead of every one. The
+criterion is unchanged -- the loop still never stops on anything but a true
+residual below tolerance, and a final read after the loop makes sure the
+residual it reports belongs to the `x` it is actually leaving behind. It is
+only asked less often. The default is 1, which is the previous behaviour
+exactly.
+
+| checkEvery | ms/frame | mean iterations | converged | max divergence |
+| --- | --- | --- | --- | --- |
+| 1 | 96.81 | 11.62 | 60 / 60 | 2.38 |
+| 2 | 80.44 | 11.10 | 60 / 60 | - |
+| 4 | 66.74 | 12.07 | 60 / 60 | 2.17 |
+
+**1.45x**, with every frame still converging and slightly *less* leftover
+divergence than the baseline. The cost is the up-to-`k-1` extra iterations a
+solve may run past the point it could have stopped, and at k=4 that is worth
+about half an iteration against roughly ten round trips saved.
+
+Fitting the round-trip count (`2 * iterations + checks`) against these three
+points prices one drain at **about 3.0 ms**, and puts 25-35 of them in every
+frame. That is the frame.
+
+## What this reorders
+
+The preconditioner direction (option 3 above) is not dead but it is no
+longer first: its ceiling is 96.8 -> 20.3 ms, and it needs an FFT/DCT
+transform written from scratch plus a symmetric coarsest solve before it can
+even be priced honestly.
+
+Making alpha and beta GPU-resident -- the thing this document has been named
+after since it was created -- removes the other two round trips per
+iteration. At 3.0 ms each and 11.6 iterations, that is about 70 ms of drain
+per frame, and unlike the preconditioner direction it needs no new numerics,
+only the scalars kept in device memory and the branch that consumes them
+moved onto the GPU. It is now the largest measured item by a wide margin.
+
+A fixed `checkEvery` default is not the right way to ship the 1.45x: k=4
+helps a scene that takes twelve iterations and hurts one that would have
+converged in two, which is per-scene tuning wearing a global constant's
+clothes. The mechanism that avoids it is to predict rather than poll --
+CG's residual falls close to geometrically, so two checks give a rate, the
+rate gives an estimated crossing iteration, and the next check goes there.
+That self-tunes per solve, with no number for a user to pick.

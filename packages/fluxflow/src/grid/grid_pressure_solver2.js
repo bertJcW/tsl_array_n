@@ -166,7 +166,8 @@ const DEFAULT_MAX_PLAUSIBLE_PRESSURE = 1e6;
 // multigrid.js's own default when no mask is given at all).
 // options.multigrid: forwarded as-is to createMultigridPreconditioner's
 // own options (e.g. { numberOfLevels: 4 }).
-// options.tolerance/maxIterations: forwarded to the underlying CG solve().
+// options.tolerance/maxIterations/residualCheckInterval: forwarded to the
+// underlying CG solve().
 // options.atomicScale: accepted and ignored, forwarded only so callers that
 // still pass one keep working. The CG dot product no longer uses a
 // fixed-point encoding at all -- see linalg.js's createDotReducer for why
@@ -208,6 +209,12 @@ export function createGridPressureSolver2( {
 	multigrid = {},
 	tolerance = 1e-5,
 	maxIterations = 100,
+	// How often the CG loop evaluates its true-residual stop test, in
+	// iterations. Every evaluation is a GPU->CPU round trip that drains the
+	// pipeline in front of it, and it is the one round trip per iteration
+	// that is not load-bearing -- see linalg.js's own comment at the read.
+	// 1 keeps the previous behaviour: test every iteration.
+	residualCheckInterval = 1,
 	atomicScale,
 	maxPlausiblePressure = DEFAULT_MAX_PLAUSIBLE_PRESSURE
 } = {} ) {
@@ -541,7 +548,7 @@ export function createGridPressureSolver2( {
 			// -- a minor, bounded inaccuracy, never a divergent one.
 			if ( updateDirichletFields ) updateDirichletFields();
 			dispatchBuildSystem();
-			diagnostics.converged = await cg.solve( tolerance, maxIterations );
+			diagnostics.converged = await cg.solve( tolerance, maxIterations, residualCheckInterval );
 
 			// Forwarded from the CG solver so a caller can see *why* a frame
 			// was expensive without reaching into linalg.js -- the iteration

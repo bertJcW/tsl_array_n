@@ -183,6 +183,16 @@ try {
 	// ../../docs/perf-investigation-cg-gpu-resident-alpha-beta.md.
 	const mgLevels = Number( new URLSearchParams( location.search ).get( 'mgLevels' ) ?? 4 );
 	const coarseIter = Number( new URLSearchParams( location.search ).get( 'coarseIter' ) ?? 20 );
+	// `?maxIter=` caps the CG iteration count. It exists purely to price one
+	// iteration: timing the frame at several caps gives the ms-per-iteration
+	// slope, and therefore the ceiling on what *any* stronger preconditioner
+	// could ever buy -- a perfect one still costs one iteration. A capped run
+	// does not solve the pressure properly and is not a correctness config.
+	const maxIter = Number( new URLSearchParams( location.search ).get( 'maxIter' ) ?? 100 );
+	// `?checkEvery=` sets how often CG evaluates its stop test. Unlike
+	// `?maxIter=` this is a real, correctness-preserving setting -- it is a
+	// knob here so its cost can be measured before choosing a default.
+	const checkEvery = Number( new URLSearchParams( location.search ).get( 'checkEvery' ) ?? 1 );
 
 	const velocityGrid = grid.createFaceCenteredGrid2( N, N, 1, 1, 0, 0 );
 
@@ -253,7 +263,7 @@ try {
 		// report -- switching back to numberOfLevels: 4 alone (no other
 		// change) resolves it, confirmed stable (all-finite, low residual)
 		// over 1000+ real-hardware frames.
-		pressure: { multigrid: { numberOfLevels: mgLevels, numberOfCoarsestIterations: coarseIter }, tolerance: 1e-5, maxIterations: 100 }
+		pressure: { multigrid: { numberOfLevels: mgLevels, numberOfCoarsestIterations: coarseIter }, tolerance: 1e-5, maxIterations: maxIter, residualCheckInterval: checkEvery }
 	} );
 
 	// dye's own advection, bound to the solver's already-projected

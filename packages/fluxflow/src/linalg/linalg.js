@@ -756,13 +756,16 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 	}
 
-	async function solve( tol, maxiter ) {
+	async function solve( tol, maxiter, residualCheckInterval = 1 ) {
 
 		applyToX(); // Ax = A @ x
 		init(); // r = b - Ax, p = 0, Ap = 0
 
 		const initRTr = await dotRR.read();
 		let newRTr = initRTr;
+		// Whether newRTr above reflects the current x. Only meaningful when
+		// residualCheckInterval > 1 -- see the loop's own comment.
+		let residualIsCurrent = true;
 		let oldRTr = initRTr;
 
 		applyPreconditionerToR(); // z0 = M^-1 @ r0
@@ -854,18 +857,49 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 				}
 
-				newRTr = await dotRR.read();
+				// *** Why this read is conditional ***
+				//
+				// Every `.read()` in this loop is a GPU->CPU round trip, and
+				// a round trip cannot return until everything already queued
+				// has finished -- so it is not the transfer that costs (a
+				// bare 4096-float readback on an idle queue measures 0.31 ms)
+				// but the pipeline drain in front of it. Measured on example
+				// 15: 502 dispatches/frame, of which CPU-side encoding is
+				// 2.28 ms -- 2.5% of an 89.8 ms frame. The other 97.5% is
+				// spent waiting, and there are exactly three of these reads
+				// per iteration (dotPAp, dotRR, dotRZ; profiler: 34.2 dots
+				// over 11.62 iterations = 2.94).
+				//
+				// Two of the three are load-bearing: alpha needs pAp and
+				// beta needs rz, both on the CPU, this iteration. This one
+				// is not -- it only answers "should we stop?". Asking less
+				// often trades at most `residualCheckInterval - 1` extra
+				// iterations for one drain saved per skipped iteration.
+				//
+				// The criterion itself is unchanged: the loop still never
+				// stops on anything but a true-residual test (see this
+				// function's header on why r.r and not r.z). It is only
+				// evaluated less often, so the default of 1 is exactly the
+				// previous behaviour.
+				const checkResidualNow = iter % residualCheckInterval === 0;
+				residualIsCurrent = checkResidualNow;
 
-				if ( Math.sqrt( Math.abs( newRTr ) ) < tol ) break;
+				if ( checkResidualNow ) {
 
-				// Residual grew since last iteration -- shouldn't happen in
-				// exact arithmetic; a sign the incremental r has drifted,
-				// so force a true recompute next iteration (see
-				// RESIDUAL_RECOMPUTE_INTERVAL's comment). Compared against
-				// the true rTr, not rz, consistent with this function's
-				// own convergence check above.
-				if ( newRTr > oldRTr ) forceResidualRecompute = true;
-				oldRTr = newRTr;
+					newRTr = await dotRR.read();
+
+					if ( Math.sqrt( Math.abs( newRTr ) ) < tol ) break;
+
+					// Residual grew since last iteration -- shouldn't happen in
+					// exact arithmetic; a sign the incremental r has drifted,
+					// so force a true recompute next iteration (see
+					// RESIDUAL_RECOMPUTE_INTERVAL's comment). Compared against
+					// the true rTr, not rz, consistent with this function's
+					// own convergence check above.
+					if ( newRTr > oldRTr ) forceResidualRecompute = true;
+					oldRTr = newRTr;
+
+				}
 
 				applyPreconditionerToR(); // z = M^-1 @ r, for the updated r
 				const newRZ = await dotRZ.read();
@@ -930,6 +964,15 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 			}
 
 		}
+
+		// With residualCheckInterval > 1 the loop can exit on an iteration
+		// that skipped its read, leaving newRTr stale by up to
+		// residualCheckInterval - 1 iterations -- and a stale value is
+		// exactly the kind of thing that reports a solve as converged when
+		// it is not. One read here settles it: the value this function
+		// returns and publishes is always the residual of the x it is
+		// actually leaving behind.
+		if ( ! Number.isFinite( newRTr ) || ! residualIsCurrent ) newRTr = await dotRR.read();
 
 		state.residualSquared = newRTr;
 
