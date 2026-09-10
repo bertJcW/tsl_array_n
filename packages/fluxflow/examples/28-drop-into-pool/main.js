@@ -70,8 +70,8 @@
 //   ?density=1.25    starting dye density (the slider's initial value)
 //   ?speed=22        the drop's downward speed at t = 0
 //   ?radius=6        drop radius in cells
-//   ?height=0.92     drop centre height as a fraction of the tank
-//   ?pool=0.75       pool depth as a fraction of the tank
+//   ?height=0.72     drop centre height as a fraction of the tank
+//   ?pool=0.55       pool depth as a fraction of the tank
 //   ?resX=64 ?resY=96  grid resolution
 //   ?targetDt=0.016  per-frame simulated time
 
@@ -102,13 +102,47 @@ const params = new URLSearchParams( location.search );
 // extra per particle -- the particle count follows the *filled* area, and a
 // narrow deep tank holds fewer particles than a square one of the same
 // depth.
+//
+// *** The resolution is not the thing to turn down. ***
+//
+// Asked to make this scene cheaper, the two obvious knobs are less water
+// and a coarser grid, and only one of them works. Measured by the dye's
+// lateral extent in drop radii -- the ring spreading is what makes this
+// scene worth looking at, and it collapses long before the penetration
+// depth does:
+//
+//   64x96, pool 0.75 (baseline)   5.4 / 8.4 / 8.7 / 7.3 / 7.5
+//   64x96, pool 0.45              5.2 / 7.3 / 6.5 / 4.4 / 4.9
+//   48x64, pool 0.75              4.7 / 4.7 / 2.2 / 3.5 / 5.1
+//   48x64, pool 0.55              5.7 / 6.4 / 3.1 / 2.6 / 4.8
+//   40x56, pool 0.50              6.2 / 6.4 / 3.0 / 3.3 / 5.7
+//
+// Halving the water degrades it gently. Dropping to 48x64 collapses the
+// ring to barely more than the drop's own diameter, whatever the pool
+// depth -- and it is the grid, not the drop being under-resolved: holding
+// the drop at the baseline's 5.76-cell radius on a 48x64 grid collapses
+// the same way (5.1 / 6.3 / 5.2 / 2.8 / 3.6). So the pool depth is where
+// the savings are, and 64x96 stays.
 const NX = Number( params.get( 'resX' ) ?? 64 );
 const NY = Number( params.get( 'resY' ) ?? 96 );
 const targetDt = Number( params.get( 'targetDt' ) ?? 1 / 60 );
 const initialDensity = Number( params.get( 'density' ) ?? 1.25 );
 const dropRadius = Number( params.get( 'radius' ) ?? NX * 0.09 );
-const dropHeight = Number( params.get( 'height' ) ?? 0.92 ) * NY;
-const poolDepth = Number( params.get( 'pool' ) ?? 0.75 ) * NY;
+// The pool used to be 0.75 of the tank, and most of it was never involved:
+// the dye's deepest reach is about 2 drop radii below the surface, against
+// a pool 12 radii deep. 0.55 keeps the same behaviour on 26% fewer
+// particles -- measured against the baseline at frames 80/160/240/320/400,
+// the dye's lateral extent (the ring's own signature, in drop radii) runs
+// 5.3/7.7/7.4/5.3/5.7 against the baseline's 5.4/8.1/8.0/6.1/6.3, inside
+// its own run-to-run spread. 0.45 is where the floor starts being felt
+// (late-time extent drops to 4.4-4.9), so this is not the last cell that
+// could go, but it is past the point of diminishing returns.
+//
+// `height` moves with it: what matters is the fall in cells, not the
+// fraction, and 0.72 of the tank keeps the same ~16-cell drop onto a
+// surface that is now lower.
+const dropHeight = Number( params.get( 'height' ) ?? 0.72 ) * NY;
+const poolDepth = Number( params.get( 'pool' ) ?? 0.55 ) * NY;
 // Impact speed, downward, given to the drop's particles at t = 0.
 //
 // *** This is the difference between a scene that shows something and one
