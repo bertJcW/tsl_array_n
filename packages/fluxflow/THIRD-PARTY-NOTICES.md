@@ -1168,6 +1168,7 @@ production-quality *arrangement* of them, not as their origin:
 | SIMPLE / PISO pressure-velocity coupling (PIMPLE is their merge) | S. V. Patankar & D. B. Spalding, 1972; R. I. Issa, *J. Comput. Phys.* 62, 1986 |
 | Partial elimination of interphase drag | D. B. Spalding, 1980 |
 | Geometric VOF advection (isoAdvector) | J. Roenby, H. Bredmose & H. Jasak, *R. Soc. Open Sci.* 3, 2016 |
+| Transporting mass and momentum with the same limited flux | M. Rudman, *Int. J. Numer. Meth. Fluids* 28, 1998 |
 
 What was taken, and where it shows up:
 
@@ -1198,14 +1199,39 @@ What was taken, and where it shows up:
 7. **Keep a transported fraction in range with a flux limiter instead of clamping it
    afterwards.** Cited to Zalesak 1979 if implemented.
 8. **Separate the interface Courant condition from the flow Courant condition** when
-   choosing a time step.
+   choosing a time step. The interface limit is computed over interface-adjacent
+   cells only and the smaller of the two steps is taken.
+
+A second reading, specifically of the two-phase parts, added four more. They are
+recorded in `docs/openfoam-two-phase-flow.md` under "Second pass" and none of them
+is implemented yet:
+
+9. **Transport mass and momentum with the identical flux.** The momentum equation's
+   convection term uses the mass flux built from the *already-limited* phase flux,
+   not an independently computed one. Cited to Rudman 1998 if implemented; the
+   particle-solver form of the same statement is that a particle-to-grid scatter
+   must weight by particle mass, not by kernel weight alone, once particles differ
+   in density.
+10. **Continuum Surface Force with a stabilised interface normal.** Normalising the
+    phase-fraction gradient by `|grad(alpha)| + deltaN`, taking curvature as the
+    negative divergence of the resulting face-normal field, and adding
+    `sigma K grad(alpha)` to the face flux. Cited to Brackbill, Kothe & Zemach 1992
+    if implemented.
+11. **A global flux-compatibility correction before solving pressure**, distinct
+    from pinning a reference cell: pinning fixes a system with many solutions, this
+    fixes one with none.
+12. **The concrete shape of a multidimensional flux limiter** -- per-cell bounds
+    from neighbours, positive and negative corrective fluxes limited separately, a
+    per-face limiter taken as the minimum of its two cells' allowances, iterated a
+    few times. Cited to Zalesak 1979 if implemented.
 
 Explicitly NOT used, anywhere: any OpenFOAM source file, header, or dictionary; any
 verbatim text from OpenFOAM source comments or documentation; any file of this package
-structured as a translation of an OpenFOAM file. Items 3, 4, 5 and 7 above are
-unimplemented at the time of writing and are recorded in
-`docs/openfoam-two-phase-flow.md` as a work list; this entry will be revisited when any
-of them lands.
+structured as a translation of an OpenFOAM file. Items 3, 4 and 5 have since landed
+(see `src/grid/grid_flip_solver2.js`'s reduced-pressure comment and
+`src/grid/grid_pressure_solver2.js`); items 7 and 9-12 are unimplemented at the time of
+writing and are recorded in `docs/openfoam-two-phase-flow.md` as a work list. This
+entry will be revisited when any of them lands.
 
 ## Design inspiration (not a code dependency)
 

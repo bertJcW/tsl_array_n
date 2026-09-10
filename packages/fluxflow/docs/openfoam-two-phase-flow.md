@@ -330,3 +330,146 @@ path.
   built on.
 - **Anything from the source text.** No OpenFOAM source, comment, or documentation
   wording is reproduced in this repository. See the licensing section at the top.
+
+---
+
+# Second pass: the two-phase specifics
+
+The first pass above was about the pressure-velocity machinery, and everything
+it recommended has now landed. This second reading went after the parts that
+are specifically about carrying *two fluids*, which is where the remaining
+value is. Same licensing rule throughout: methods only, no source excerpt,
+originals cited where they exist.
+
+## 1. Mass and momentum must be transported by the *same* flux **[open, highest value]**
+
+The single most transferable idea in the whole two-phase solver, and the one
+fluxflow currently gets wrong.
+
+OpenFOAM does not advect momentum with the velocity flux. It builds a **mass**
+flux from the *already-limited* phase flux that transported the phase
+fraction -- schematically `rhoPhi = alphaPhi1 (rho1 - rho2)_f + phi rho2_f`,
+where `alphaPhi1` is exactly the flux MULES limited -- and the momentum
+equation's convection term is then the divergence of *that*. Mass and momentum
+cross every face together, computed once.
+
+Why it matters, and why it is not pedantry: if momentum is transported by a
+flux that differs at all from the one that moved the mass, then a cell
+receives an amount of momentum that does not correspond to the mass it
+received, and the implied velocity is wrong by the ratio of the two. At a 1:1
+density ratio the error is invisible. At 1000:1 it is a spurious acceleration
+concentrated exactly on the interface, and it is the standard explanation for
+why a naive VOF implementation blows up at high density ratios while looking
+fine in a density-matched test. Rudman (*Int. J. Numer. Meth. Fluids* 28,
+1998) is the usual citation for making the two consistent.
+
+**What this maps to here.** fluxflow's FLIP has the same problem in
+particle-to-grid form. `grid_flip_solver2.js`'s P2G accumulates
+`sum(w * v) / sum(w)` -- a *kernel-weighted* velocity average, with no
+particle mass in it anywhere. That is exactly right while every particle
+weighs the same, and it is the wrong average the moment they do not, which is
+precisely the case `carryConcentration` + `ambientDensity`/`componentDensity`
+creates, and the case `grid_two_phase_flip_solver2.js` exists for. The
+momentum-consistent form is `sum(m w v) / sum(m w)` with `m` the particle's
+own mass from its carried density -- one extra multiply in the scatter, and
+the finalize divides as before.
+
+This is testable rather than a matter of taste: a density-stratified scene at
+rest should stay at rest, and a volume-weighted P2G will show interface
+velocity that a mass-weighted one does not.
+
+## 2. Surface tension, which this port does not have at all **[open]**
+
+Continuum Surface Force (Brackbill, Kothe & Zemach, *J. Comput. Phys.* 100,
+1992), and the implementation details are the interesting part:
+
+- The interface normal is `n = grad(alpha)_f / (|grad(alpha)_f| + deltaN)`,
+  where `deltaN` is a small stabiliser derived from the average cell volume
+  (order `1e-8 / V^(1/3)`). It exists because `grad(alpha)` is zero
+  *everywhere except* at the interface, so the normalisation is 0/0 over most
+  of the domain; the stabiliser makes it harmlessly zero instead.
+- Curvature is the negative divergence of the face-normal field,
+  `K = -div(n . Sf)` -- computed from the same face-interpolated normals, not
+  from a second derivative of alpha directly.
+- The force is `sigma K grad(alpha)`, and it is added **to the face flux**,
+  in the same slot as the gravity term. fluxflow already built that slot for
+  the reduced-pressure gravity term, so the plumbing exists.
+- A wall contact angle enters by rotating the normal at the boundary before
+  the curvature is taken, rather than as a separate force.
+
+For a particle solver the alpha field is the P2G-scattered concentration or
+fluid mask, which is noisier than a VOF alpha; smoothing before taking the
+gradient is the known cost. Worth attempting only when bubbles or droplets
+are actually the goal -- see `docs/two-phase-bubbles-research.md`.
+
+## 3. The interface has its own Courant number **[open, cheap]**
+
+Alongside the ordinary flow Courant number, OpenFOAM computes a second one
+restricted to cells near the interface (`0.5 * max(sum|phi|/V) * dt`, over
+interface cells only) and takes the smaller time step of the two. The bulk
+can tolerate a larger step than the interface can.
+
+fluxflow now has a single CFL limit over the whole velocity field. Adding an
+interface-restricted one is cheap: the same max-magnitude reduction, run over
+faces adjacent to a mixed cell, with a tighter Courant number. It would only
+matter in a scene where the interface is fast and the bulk is slow -- which is
+most splash scenes.
+
+## 4. MULES, concretely enough to implement **[open]**
+
+The first pass recorded what MULES is for. The algorithm itself, from this
+reading:
+
+1. For each cell, form bounds from its neighbours' values (the max and min
+   over the neighbour set, optionally relaxed).
+2. Split each cell's incoming corrective flux into its positive and negative
+   parts separately, so the two directions can be limited independently.
+3. Iterate a per-face limiter `lambda`, starting at 1: each sweep computes,
+   per cell, how much of the correction the bounds still allow, and each face
+   takes the *minimum* of the two allowances of the cells it separates.
+   Three sweeps is the usual setting.
+4. The final flux is the guaranteed-bounded upwind flux plus `lambda` times
+   the correction.
+
+That shape maps cleanly onto this port: a few elementwise kernels plus three
+iterations of a face kernel, no atomics and no solve. It is the principled
+replacement for clamping the dye to [0,1] after the fact.
+
+## 5. A closed domain needs a *compatibility* fix, not just a pinned cell **[open]**
+
+Worth separating two failure modes this port has so far treated as one.
+
+- **Singular**: with no Dirichlet anywhere, the pressure is defined only up to
+  a constant. The fix is to pin a reference cell. fluxflow does this.
+- **Inconsistent**: if the prescribed boundary fluxes do not balance -- more
+  coming in than going out -- then the Poisson equation has *no solution* at
+  all, and pinning does not help. Before solving, OpenFOAM scales the
+  adjustable outflow so that global inflow equals global outflow, and refuses
+  to continue if the imbalance cannot be removed that way.
+
+fluxflow's `sdf_inflow_outflow2.js` is exactly exposed to the second case: an
+inflow and an outflow specified independently need not balance, and nothing
+currently checks. The symptom would be a solve that never converges, on a
+system that has no answer to converge to -- which is worth being able to tell
+apart from a solver that is merely struggling.
+
+## 6. Recorded as deliberately not applicable
+
+- **Rhie-Chow interpolation and the ddt flux correction.** OpenFOAM stores
+  velocity at cell centres, so it needs both to stop the pressure field
+  checkerboarding. fluxflow is staggered (MAC): the pressure gradient is
+  evaluated exactly where the velocity component lives, and the checkerboard
+  mode cannot form. Nothing to import, and worth writing down so nobody
+  imports a cure for an absent disease.
+- **The optional momentum predictor.** A solver-cost knob for an implicit
+  momentum equation; this port has no implicit momentum solve to skip.
+
+## 7. Not from OpenFOAM: one magic number is still in the stack
+
+Noticed while checking P2G for item 1, and recorded here because it is the
+same class of defect the scale-free dot product removed: the particle-to-grid
+scatter still accumulates through a **fixed-point atomic** with its own
+`p2gAtomicScale`, defaulting to the old shared constant. A per-cell scatter is
+much harder to overflow than a whole-field dot product, so this has not caused
+a measured failure -- but it quantizes every transferred velocity, and it is a
+knob a caller can still get wrong. The same treatment applies.
