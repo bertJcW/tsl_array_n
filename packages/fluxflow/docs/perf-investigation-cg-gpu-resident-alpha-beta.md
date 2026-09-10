@@ -581,3 +581,71 @@ needed.
 And the coarse-level finding above still stands and is now worth more, not
 less: forty of a V-cycle's sixty-four relaxation dispatches still go to an
 8x8 grid. Batching made them cheap to submit; it did not make them useful.
+
+---
+
+# Re-locating the bottleneck after batching
+
+Batching moved the frame's composition, so the "what next" list written
+against the old composition was re-derived rather than executed. Two
+measurements, both on the post-batching build.
+
+## Synchronisation is free at the margin. The GPU is the bottleneck.
+
+Added 8 extra full readbacks per frame to examples/28-drop-into-pool/ and
+measured the frame:
+
+    baseline            220.4 ms
+    + 8 readbacks       207.2 ms      marginal cost per readback: ~0
+
+Eight extra round trips, each of which costs 3.3 ms measured standalone
+against an idle queue, added nothing at all -- the difference is noise and
+points the wrong way. If the CPU were waiting on latency, eight more
+latencies would have added about 26 ms.
+
+So the CPU is not waiting on the round trip, it is waiting on GPU work that
+is already queued. **The frame is GPU-execution-bound.** This also settles,
+rather than contradicts, the earlier surprise that fusing two dot products
+into one readback changed nothing: there was never any latency to save.
+
+(A resolution sweep was tried as the complementary test and thrown away: at
+96x144 against 64x96 the particle count, the CG iteration count and the
+scene's state all move together, and it produced a *faster* frame at 2.25x
+the cells. Too many things vary at once to mean anything.)
+
+## Which makes the coarse level worth far more than it was
+
+Before batching, cutting `numberOfCoarsestIterations` from 20 to 4 was worth
+11%. Re-measured now:
+
+| `?coarseIter=` | ms/frame | mean CG iterations |
+|---|---|---|
+| 20 (default) | 80.7 | 12.5 |
+| 4 | **52.7** | 14.2 |
+
+**1.53x**, for 1.7 extra CG iterations.
+
+The reason it grew is the reason the whole picture changed. Those forty
+dispatches per V-cycle were previously buried in submission cost, so
+removing thirty-two of them barely showed. With submission nearly free,
+what is left of them is GPU execution -- and an 8x8 grid is 64 threads,
+which is far below what any GPU fills a launch with. They are close to pure
+launch overhead, now measurably so.
+
+## Conclusion for the next piece of work
+
+**Solve the coarsest level directly.** It is worth roughly 1.5x on this
+scene, and unlike the `coarseIter` knob it costs nothing in convergence: 64
+unknowns is small enough to solve exactly, replacing forty dispatches of
+Gauss-Seidel with one solve.
+
+**Do not batch the FLIP stages.** That was the other candidate, and this
+measurement rules it out: those stages are a few dozen dispatches per frame
+against the pressure solve's thousand, and submission -- the only thing
+batching addresses -- is no longer what costs. It would buy a percent or
+two.
+
+After the coarse solve, the next question is occupancy rather than count:
+whether the relaxation kernels on the finer levels are themselves filling
+the GPU, which is a different measurement again and needs the timestamp
+queries this machine's adapter does not expose.
