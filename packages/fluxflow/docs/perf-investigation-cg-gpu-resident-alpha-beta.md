@@ -754,3 +754,100 @@ motivated: a *direct* coarse solve does not need barriers at all. Sixty-four
 unknowns, an operator that only changes when the Dirichlet mask does -- once
 per frame, not once per V-cycle -- so one factorisation could serve a
 frame's dozen cycles and cost neither launches nor barriers.
+
+---
+
+# Three direct-solve directions, measured before building any of them
+
+## 1. CPU coarse solve, one per V-cycle: dead
+
+The plan was to read the coarse `b` back, solve sixty-four unknowns exactly
+on the CPU, and upload `x` -- once per V-cycle. Its whole viability rested
+on an assumption worth testing first: that a readback *inside* the V-cycle
+is as cheap as the ones measured at the end of a frame, which cost nothing
+at the margin.
+
+It is not. Probe: one extra readback per CG iteration, right after the
+preconditioner, on examples/15-flow-past-cylinder/.
+
+    no sync            46.0 ms/frame   (34.9 on a repeat)
+    mid-cycle sync     87.1 ms/frame
+
+About **3.9 ms per mid-cycle synchronisation** -- the full standalone
+readback latency, none of it absorbed. The reason the end-of-frame ones were
+free is that the GPU had queued work to get on with; mid-cycle it does not,
+so the CPU stalls and then has to re-encode the rest of the cycle.
+
+Twelve iterations means twelve of those: **~47 ms per frame, to save the
+15-20 ms the coarse level still costs.** A clear net loss, and the reason to
+measure before building.
+
+**What survives**: the same idea with the synchronisation moved to *once per
+frame* instead of once per V-cycle. The coarse operator only changes when
+the Dirichlet mask and face weights do, which is once a frame -- so the CPU
+could read those back once, invert the 64x64 system once (trivial in JS),
+upload the inverse once, and every V-cycle in that frame does one dense
+matvec: sixty-four threads, sixty-four multiply-adds each, one dispatch, no
+barrier, no sync. One stall per frame rather than twelve. That is the
+version worth building.
+
+## 2. FFT/DCT preconditioner: not attempted, and why
+
+The largest available lever and the only one that would remove the V-cycle
+rather than shrink it: a DCT solves the constant-coefficient Neumann Poisson
+problem *exactly* in O(N log N), and an exact solve of a nearby operator is
+an excellent preconditioner for the real one. Two transforms of about six
+passes each would replace roughly eighty dispatches, and the iteration count
+could fall well below 12.5.
+
+Not attempted here, deliberately, and not because of the build cost alone:
+its payoff is scene-dependent in a way the others are not. MGPCG is the
+graphics standard precisely because it copes with irregular domains, and a
+free surface makes every air cell a Dirichlet cell -- exactly where a
+constant-coefficient FFT preconditioner is worst. The closed-domain grid
+scenes (14, 15, 16) should benefit strongly; the free-surface FLIP scenes
+(20-29) might not benefit at all. Building it means building the transform
+*and* the per-scene comparison, and shipping it means a
+`preconditioner: 'fft' | 'multigrid'` choice that the library picks
+automatically from whether a scene has a Dirichlet region at all.
+
+That is a real piece of work rather than an afternoon, and it should start
+from its own measurement: how far below 12.5 iterations a *perfect*
+preconditioner would get each scene, which bounds what any of this can buy.
+
+## 3. Per-frame precompute: a large ceiling, an uncertain floor
+
+The structural observation is that the operator changes once per frame but
+is applied about twelve times, and nothing exploits that. The clearest
+candidate is `laplacianDiagonalAt`, recomputed inside every relax
+invocation, on every sweep, at every level, from inputs that are fixed for
+the whole frame.
+
+Probed by substituting a constant diagonal -- numerically wrong, so the
+iteration count moves and only the *per-iteration* figure is meaningful:
+
+    computed diagonal   72.3 ms / 12.5 iterations = 5.78 ms per iteration
+    constant diagonal   95.8 ms / 25.7 iterations = 3.73 ms per iteration
+
+**35% of per-iteration cost is the diagonal computation** -- a big ceiling
+for a term that is pure redundancy within a frame.
+
+The floor is the uncertain part, and it is why this is a measurement rather
+than a change: precomputing the diagonal replaces that arithmetic with a
+*buffer read*. On a GPU, recomputing cheap ALU work is frequently faster
+than loading a value, and this scene's diagonal is select-heavy arithmetic
+with no memory access at all (it has no face weights). So the realistic gain
+is somewhere between 35% and negative, and only an implementation settles
+it. It is cheap enough to be worth that: one extra field per level, filled
+once per frame.
+
+## Where this leaves things
+
+Ordered by expected value per unit of work, on the evidence above:
+
+1. **Per-frame diagonal precompute** -- cheapest to build, 35% ceiling on
+   per-iteration cost, real risk of being a wash. Build it and measure.
+2. **Coarse inverse, uploaded once per frame** -- the surviving form of
+   direction 1, one stall per frame instead of twelve.
+3. **FFT preconditioner** -- biggest ceiling by far, biggest build, and
+   needs its own scene-by-scene justification first.
