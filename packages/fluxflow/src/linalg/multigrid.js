@@ -147,7 +147,7 @@
 // the reported numbers.
 
 import * as tsl_array_n from 'tsl_array_n';
-import { float, If } from 'three/tsl';
+import { float, If, Loop, storageBarrier } from 'three/tsl';
 import { buildElementwiseKernel } from './linalg.js';
 import { profileBatch } from '../profiling.js';
 
@@ -476,6 +476,86 @@ function buildRelaxKernel( shape, spacing, sorFactor, color, x, b, dirichletMask
 		x( ...I ).assign( isColor.select( updated, current ) );
 
 	}, 'mg-relax' );
+
+}
+
+// *** The coarsest level's whole relaxation in one dispatch. ***
+//
+// A four-level V-cycle spends forty of its sixty-four relaxation dispatches
+// on the smallest grid -- 8x8, sixty-four unknowns on a 64x64 domain, far
+// below what fills a GPU launch. Once dispatch submission stopped being the
+// bottleneck (see ../../docs/perf-investigation-cg-gpu-resident-alpha-beta.md)
+// those forty launches became measurable GPU cost: cutting the sweeps from
+// 20 to 4 took a frame from 80.7 ms to 52.7 ms.
+//
+// The fix is to run every sweep inside *one* dispatch. What makes that
+// possible is that the grid is small enough to fit in a single workgroup,
+// so the invocations can synchronise with each other between sweeps instead
+// of needing a new dispatch as the barrier.
+//
+// *** storageBarrier, and why the workgroup size is pinned ***
+//
+// A barrier in WGSL synchronises within a workgroup, not across a dispatch.
+// So this is only correct if every cell of the coarse grid is in the same
+// workgroup, which is what the explicit `workgroupSize` does -- and why
+// COARSE_SINGLE_GROUP_MAX_CELLS exists, since WebGPU caps a workgroup at
+// (commonly) 256 invocations. Past that the old dispatch-per-colour path is
+// used unchanged.
+//
+// storageBarrier rather than workgroupBarrier: `x` lives in a storage
+// buffer, not in workgroup memory, and it is storage writes that the next
+// colour has to see.
+//
+// The colours are kept. An earlier attempt replaced them with one thread
+// walking the grid sequentially -- true Gauss-Seidel, one launch -- and it
+// was worse on every axis (120 ms against 80.7, and 18.6 CG iterations
+// against 12.5) because red-black's *smoothing* factor, which is the only
+// thing a smoother is judged on, beats lexicographic ordering's for a
+// Poisson stencil. That result is written up in the doc above. This keeps
+// red-black's arithmetic exactly and changes only how the barrier between
+// the two halves is obtained.
+const COARSE_SINGLE_GROUP_MAX_CELLS = 256;
+
+function buildCoarseSweepKernel( shape, spacing, sorFactor, sweeps, x, b, dirichletMask, faceWeights ) {
+
+	const [ nx ] = shape;
+	const cells = shape[ 0 ] * shape[ 1 ];
+
+	return tsl_array_n.kernel( [ cells ], ( flat ) => {
+
+		// Same unflattening idiom tsl_array_n's own kernel() uses.
+		const i = flat.mod( nx );
+		const j = flat.div( nx );
+		const I = [ i, j ];
+		const isColor0 = colorOf( I ).equal( 0 );
+
+		// Rebuilt per colour rather than hoisted: the node graph has to read
+		// `x` *after* the barrier for the second half, and a hoisted
+		// expression would be the pre-barrier read.
+		const sweepOnce = ( writeThisColour ) => {
+
+			const Ax = laplacianAt( x, spacing, shape, I, dirichletMask, faceWeights );
+			const diagonal = laplacianDiagonalAt( spacing, shape, I, dirichletMask, faceWeights );
+			const updated = x( i, j ).add( b( i, j ).sub( Ax ).div( diagonal ).mul( sorFactor ) );
+
+			If( writeThisColour, () => {
+
+				x( i, j ).assign( updated );
+
+			} );
+
+		};
+
+		Loop( sweeps, () => {
+
+			sweepOnce( isColor0 );
+			storageBarrier();
+			sweepOnce( isColor0.not() );
+			storageBarrier();
+
+		} );
+
+	}, { workgroupSize: [ cells ] } );
 
 }
 
@@ -823,6 +903,11 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 				x, b, buffer,
 				relaxColor0: buildRelaxKernel( levelShape, levelSpacing, sorFactor, 0, x, b, levelMask, levelFaceWeights ),
 				relaxColor1: buildRelaxKernel( levelShape, levelSpacing, sorFactor, 1, x, b, levelMask, levelFaceWeights ),
+				// Only ever used for the coarsest level, and only while it
+				// fits in one workgroup -- see buildCoarseSweepKernel.
+				coarseSweeps: ( levelShape[ 0 ] * levelShape[ 1 ] <= COARSE_SINGLE_GROUP_MAX_CELLS )
+					? buildCoarseSweepKernel( levelShape, levelSpacing, sorFactor, numberOfCoarsestIterations, x, b, levelMask, levelFaceWeights )
+					: null,
 				residual: buildResidualKernel( levelShape, levelSpacing, x, b, buffer, levelMask, levelFaceWeights ),
 				zeroX: buildZeroKernel( levelShape, x ),
 			} );
@@ -947,7 +1032,11 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 
 			if ( level === numberOfLevels - 1 ) {
 
-				relax( queue, level, numberOfCoarsestIterations );
+				const singleGroup = levels[ level ].coarseSweeps;
+
+				if ( singleGroup !== null ) queue.push( singleGroup );
+				else relax( queue, level, numberOfCoarsestIterations );
+
 				return;
 
 			}

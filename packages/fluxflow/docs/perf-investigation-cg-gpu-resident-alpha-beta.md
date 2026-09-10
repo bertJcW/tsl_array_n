@@ -700,3 +700,57 @@ What remains, in order of promise:
 - **Fewer levels**, so the coarsest grid is large enough to be worth a
   launch. Already measurable via `?mgLevels=`, and already known to trade
   against iteration count.
+
+## The coarse level, done with a barrier instead: it works, and it prices barriers
+
+Second attempt at the same target, keeping red-black rather than replacing
+it. The coarsest grid fits in one workgroup, so its invocations can
+synchronise with each other between colours instead of needing a fresh
+dispatch as the barrier: one dispatch, `storageBarrier()` between the two
+halves, the arithmetic byte-for-byte what the two-dispatch version did.
+`tsl_array_n.kernel` grew a `workgroupSize` option to pin every cell into
+the same workgroup, which is what makes the barrier mean anything.
+
+Measured on examples/15-flow-past-cylinder/:
+
+| | ms/frame | CG iterations |
+|---|---|---|
+| 40 dispatches (batched) | 80.7 | 12.5 |
+| **1 dispatch + barriers** | **72.3** | **12.5** |
+
+**1.12x, with the iteration count unchanged** -- unlike the single-thread
+attempt, this is the same preconditioner, and examples/07 is back inside its
+1e-2 tolerance. Neutral on the FLIP scenes (20: 12.7 to 12.1; 28: 4.90 to
+4.94), where the pressure solve is a smaller share of the frame.
+
+### What the numbers price, and it caps this whole direction
+
+Cross-referencing the four measurements gives the cost of a barrier
+directly:
+
+    40 dispatches, 20 sweeps    80.7 ms
+     8 dispatches,  4 sweeps    52.7 ms     (-28.0)
+     1 dispatch,   20 sweeps    72.3 ms     (-8.4)
+     1 dispatch,    4 sweeps    68.1 ms     (-4.2 from the line above)
+
+The last line isolates the *work*: sixteen sweeps of arithmetic on an 8x8
+grid are worth 4.2 ms. So of the 28 ms that cutting sweeps saved in the
+40-dispatch world, about 4 ms was work and about **24 ms was the 32 removed
+dispatches -- roughly 0.75 ms each**.
+
+Removing 39 dispatches with barriers should then have been worth ~29 ms. It
+was worth 8.4. The difference is what the barriers cost: 20 sweeps x 2
+barriers, about **0.5 ms per storageBarrier** -- two thirds of a full
+dispatch launch.
+
+That is the useful, transferable number here, and it caps the whole
+"fuse dispatches with barriers" direction: **fusing N dispatches into one
+recovers only about a third of what removing them outright would.** Worth
+doing where it is free, as here, and not worth building elaborate machinery
+for.
+
+Which leaves the original recommendation standing, and now better
+motivated: a *direct* coarse solve does not need barriers at all. Sixty-four
+unknowns, an operator that only changes when the Dirichlet mask does -- once
+per frame, not once per V-cycle -- so one factorisation could serve a
+frame's dozen cycles and cost neither launches nor barriers.

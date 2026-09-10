@@ -26,10 +26,23 @@ function unflattenNodeIndex( flatIndexNode, dims ) {
 
 }
 
-export function kernel( shape, fn ) {
+// options.workgroupSize: the compute shader's workgroup dimensions, as
+// [x] / [x, y] / [x, y, z]. Left alone (three.js picks 64) this is an
+// implementation detail nothing should care about -- with one exception,
+// which is why it is exposed: a kernel that uses storageBarrier() or
+// workgroupBarrier() to synchronise between its own invocations only
+// synchronises *within a workgroup*, so such a kernel is only correct if
+// every invocation it needs to coordinate is in the same one. Setting the
+// workgroup size equal to the dispatch count is how that is guaranteed.
+//
+// WebGPU caps a workgroup at maxComputeInvocationsPerWorkgroup, commonly
+// 256, so this only helps for small dispatches -- which is exactly the case
+// where a barrier is worth having.
+export function kernel( shape, fn, options = {} ) {
 
 	const dims = normalizeShape( shape );
 	const count = dims.reduce( ( total, dim ) => total * dim, 1 );
+	const { workgroupSize } = options;
 
 	if ( fn.length !== dims.length ) {
 
@@ -43,7 +56,7 @@ export function kernel( shape, fn ) {
 
 		fn( ...unflattenNodeIndex( instanceIndex, dims ) );
 
-	} )().compute( count );
+	} )().compute( count, workgroupSize );
 
 	const dispatch = () => getRenderer().compute( computeNode );
 
