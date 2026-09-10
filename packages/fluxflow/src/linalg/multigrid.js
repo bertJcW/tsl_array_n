@@ -872,7 +872,23 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 	const numberOfSmoothingIterationsDown = options.numberOfSmoothingIterationsDown ?? 2;
 	const numberOfSmoothingIterationsUp = options.numberOfSmoothingIterationsUp ?? 2;
 	const numberOfCoarsestIterations = options.numberOfCoarsestIterations ?? 20;
-	const batchDispatches = options.batchDispatches;
+	// The two dispatch decisions that are measurable rather than structural,
+	// kept mutable so both can be exercised inside one run. Comparing them
+	// across separate runs measures the scene against itself -- an unsteady
+	// wake's pressure problem gets harder as it develops, and the clocks
+	// drift under sustained load -- so every form each one can take is built
+	// here at construction and chosen per call instead.
+	//
+	// batchDispatches: submit the whole V-cycle as one command buffer
+	// instead of one per kernel. `false` is also what ../profiling.js needs
+	// to attribute dispatches by label, since a batch reports itself as a
+	// whole.
+	// coarseSingleGroup: solve the coarsest level in one workgroup with
+	// storageBarrier() between colours, instead of a dispatch per colour.
+	const settings = {
+		batchDispatches: options.batchDispatches !== false,
+		coarseSingleGroup: options.coarseSingleGroup !== false
+	};
 	const numberOfFinalIterations = options.numberOfFinalIterations ?? 2;
 	const sorFactor = options.sorFactor ?? 1.0;
 	const dirichletMask = options.dirichletMask;
@@ -884,7 +900,11 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 	const levelShapes = computeLevelShapes( shape, numberOfLevels );
 	const levelSpacings = computeLevelSpacings( gridSpacing, numberOfLevels );
 
-	return function applyMultigridPreconditioner( input, output ) {
+	applyMultigridPreconditioner.settings = settings;
+
+	return applyMultigridPreconditioner;
+
+	function applyMultigridPreconditioner( input, output ) {
 
 		const levels = [];
 
@@ -1028,11 +1048,11 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 
 		}
 
-		function vCycle( queue, level ) {
+		function vCycle( queue, level, useSingleGroupCoarse ) {
 
 			if ( level === numberOfLevels - 1 ) {
 
-				const singleGroup = levels[ level ].coarseSweeps;
+				const singleGroup = useSingleGroupCoarse ? levels[ level ].coarseSweeps : null;
 
 				if ( singleGroup !== null ) queue.push( singleGroup );
 				else relax( queue, level, numberOfCoarsestIterations );
@@ -1047,7 +1067,7 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 			queue.push( restrictDispatchers[ level ] );
 			queue.push( levels[ level + 1 ].zeroX );
 
-			vCycle( queue, level + 1 );
+			vCycle( queue, level + 1, useSingleGroupCoarse );
 
 			queue.push( correctDispatchers[ level ] );
 
@@ -1057,8 +1077,6 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 
 		// The queue is the same every call -- the V-cycle's shape is fixed at
 		// construction -- so it is built once rather than rebuilt per solve.
-		const queue = [];
-		queue.push( levels[ 0 ].zeroX );
 
 		// *** Exactly one V-cycle, and why more is not an option here ***
 		//
@@ -1090,29 +1108,39 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 		// is not spent on preconditioner quality at all, it is spent on
 		// GPU->CPU round trips. See linalg.js's residualCheckInterval and
 		// ../../docs/perf-investigation-cg-gpu-resident-alpha-beta.md.
-		vCycle( queue, 0 );
+		// One queue per coarse-level form, and for each a batched and an
+		// unbatched submitter -- four dispatchers, all resolved here. The
+		// V-cycle's shape never changes, so resolving per call would re-walk
+		// the same list every iteration; and building all four up front is
+		// what lets settings above be a runtime choice rather than a
+		// constructor argument that can only be compared across runs.
+		function buildForm( useSingleGroupCoarse ) {
 
-		// `batchDispatches: false` restores one submit per kernel. Kept
-		// because the per-label dispatch breakdown in ../profiling.js is only
-		// visible on that path -- a batch reports itself as a whole -- so it
-		// is what any future "where did the dispatches go" question runs on.
-		if ( batchDispatches === false ) {
+			const queue = [];
+			queue.push( levels[ 0 ].zeroX );
+			vCycle( queue, 0, useSingleGroupCoarse );
 
-			return function dispatch() {
+			const dispatchBatched = tsl_array_n.createBatch( queue );
 
-				for ( const step of queue ) step();
+			return {
+				batched: () => profileBatch( 'mg-vcycle', queue.length, dispatchBatched ),
+				unbatched: () => {
 
+					for ( const step of queue ) step();
+
+				}
 			};
 
 		}
 
-		// Resolved once: the V-cycle's shape never changes, so the per-call
-		// form would re-walk the same list on every iteration.
-		const dispatchVCycle = tsl_array_n.createBatch( queue );
+		const singleGroupForm = buildForm( true );
+		const perColourForm = buildForm( false );
 
 		return function dispatch() {
 
-			profileBatch( 'mg-vcycle', queue.length, dispatchVCycle );
+			const form = settings.coarseSingleGroup ? singleGroupForm : perColourForm;
+
+			( settings.batchDispatches ? form.batched : form.unbatched )();
 
 		};
 

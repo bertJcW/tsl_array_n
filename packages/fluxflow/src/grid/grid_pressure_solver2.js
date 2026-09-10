@@ -602,6 +602,11 @@ export function createGridPressureSolver2( {
 
 	}
 
+	// The preconditioner's own runtime-switchable settings (V-cycle
+	// batching, coarsest-level form), surfaced next to this solver's so a
+	// measurement has one place to reach for. See multigrid.js.
+	settings.multigrid = applyPreconditioner.settings;
+
 	return { project, pressure: pressureGrid, b, diagnostics, settings };
 
 }

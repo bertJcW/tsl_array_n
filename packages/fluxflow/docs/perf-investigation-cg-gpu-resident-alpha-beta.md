@@ -1288,3 +1288,50 @@ iterations give it all back. So this direction is finished at roughly
 1.2x, and the next question is a different one -- the frame still spends
 about 500 dispatches on a 64x64 grid, and at 2.28 ms of CPU encoding for
 all of them, whatever the rest of that time is, it is not the host.
+
+
+# Re-measuring the two earlier optimisations, paired
+
+Batching and the single-workgroup coarse solve were both landed on numbers
+from the 30-warm-up/60-frame harness -- the one shown above to be timing a
+several-hundred-frame warm-up ramp. Their reported figures (1.1x-1.7x and
+1.12x) were therefore not trustworthy, whatever their mechanisms suggested.
+Both are now re-measured the same way the GPU-resident change was.
+
+Both were constructor-time decisions, which is the reason they could only
+ever be compared across runs. They are now runtime choices instead: every
+form each one can take -- two coarse-level queues, each with a batched and
+an unbatched submitter, four dispatchers in all -- is built once at
+construction, and `settings` on the preconditioner picks per call. That is
+the same move `residualCheckInterval` needed, for the same reason.
+
+Example 15, paired, 150 frames per arm, each measured twice with the block
+phase swapped and with the other two optimisations left on:
+
+| optimisation | run 1 | run 2 | iterations matched |
+| --- | --- | --- | --- |
+| V-cycle dispatch batching | 1.53x | 1.74x | 14.41 vs 14.77 |
+| single-workgroup coarse solve | 1.10x | 1.09x | 14.41 vs 14.77 |
+| GPU-resident alpha/beta | 1.24x | 1.13x | 14.30 vs 14.45 |
+
+The old figures survive re-measurement: batching's range was right, and the
+coarse solve's 1.12x lands within noise of 1.09-1.10x. That they were
+arrived at unreliably did not make them wrong -- but it was not knowable
+until now, which is the point.
+
+## All three together
+
+Everything off against everything on, paired, 100 frames per arm:
+
+| run | all off | all on | speedup |
+| --- | --- | --- | --- |
+| 1 | 148.96 ms | 48.06 ms | **3.10x** |
+| 2 | 135.85 ms | 51.62 ms | **2.63x** |
+
+Iteration counts matched in both (14.36 vs 14.01, 13.62 vs 13.86) and every
+frame converged on both arms.
+
+The compound is larger than the product of the three individual figures
+(about 2.1x). That is an interaction, not an error: each one was measured
+with the other two *on*, and removing a single optimisation from an
+already-fast configuration costs less than removing it from a slow one.
