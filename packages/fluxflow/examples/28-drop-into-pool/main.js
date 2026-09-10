@@ -70,8 +70,8 @@
 //   ?density=1.25    starting dye density (the slider's initial value)
 //   ?speed=22        the drop's downward speed at t = 0
 //   ?radius=6        drop radius in cells
-//   ?height=0.72     drop centre height as a fraction of the tank
-//   ?pool=0.55       pool depth as a fraction of the tank
+//   ?height=0.92     drop centre height as a fraction of the tank
+//   ?pool=0.75       pool depth as a fraction of the tank
 //   ?resX=64 ?resY=96  grid resolution
 //   ?targetDt=0.016  per-frame simulated time
 
@@ -79,6 +79,7 @@ import * as tsl_array_n from 'tsl_array_n';
 import { grid } from 'fluxflow';
 
 const canvas = document.querySelector( '#out' );
+const vorticityCanvas = document.querySelector( '#vorticity' );
 const statusEl = document.querySelector( '#status' );
 const perfEl = document.querySelector( '#perf' );
 const densityRatioInput = document.querySelector( '#densityRatio' );
@@ -111,38 +112,42 @@ const params = new URLSearchParams( location.search );
 // scene worth looking at, and it collapses long before the penetration
 // depth does:
 //
-//   64x96, pool 0.75 (baseline)   5.4 / 8.4 / 8.7 / 7.3 / 7.5
+//   64x96, pool 0.75 (default)    5.4 / 8.4 / 8.7 / 7.3 / 7.5
+//   64x96, pool 0.55              5.2 / 7.9 / 7.9 / 6.1 / 6.2
 //   64x96, pool 0.45              5.2 / 7.3 / 6.5 / 4.4 / 4.9
 //   48x64, pool 0.75              4.7 / 4.7 / 2.2 / 3.5 / 5.1
 //   48x64, pool 0.55              5.7 / 6.4 / 3.1 / 2.6 / 4.8
 //   40x56, pool 0.50              6.2 / 6.4 / 3.0 / 3.3 / 5.7
 //
-// Halving the water degrades it gently. Dropping to 48x64 collapses the
-// ring to barely more than the drop's own diameter, whatever the pool
-// depth -- and it is the grid, not the drop being under-resolved: holding
-// the drop at the baseline's 5.76-cell radius on a 48x64 grid collapses
-// the same way (5.1 / 6.3 / 5.2 / 2.8 / 3.6). So the pool depth is where
-// the savings are, and 64x96 stays.
+// Halving the water degrades it gently -- 0.55 costs 26% of the particles
+// and stays inside the default's own run-to-run spread, 0.45 visibly
+// shrinks the ring. None of it is a stability problem: pool 0.45 and even
+// 0.30 run 397/400 and 398/400 frames converged, zero rejections, zero
+// non-finite values, and the same peak pressure (15.61) as the deep pool,
+// because peak pressure is set by the impact and not by how much water is
+// under it. It is purely how wide the ring gets.
+//
+// Dropping to 48x64 is the one that actually breaks the scene: the ring
+// collapses to barely more than the drop's own diameter at any pool depth
+// -- and it is the grid, not the drop being under-resolved, since holding
+// the drop at the default's 5.76-cell radius on a 48x64 grid collapses the
+// same way (5.1 / 6.3 / 5.2 / 2.8 / 3.6). So the pool depth is where the
+// savings are if they are wanted, and 64x96 stays either way.
 const NX = Number( params.get( 'resX' ) ?? 64 );
 const NY = Number( params.get( 'resY' ) ?? 96 );
 const targetDt = Number( params.get( 'targetDt' ) ?? 1 / 60 );
 const initialDensity = Number( params.get( 'density' ) ?? 1.25 );
 const dropRadius = Number( params.get( 'radius' ) ?? NX * 0.09 );
-// The pool used to be 0.75 of the tank, and most of it was never involved:
-// the dye's deepest reach is about 2 drop radii below the surface, against
-// a pool 12 radii deep. 0.55 keeps the same behaviour on 26% fewer
-// particles -- measured against the baseline at frames 80/160/240/320/400,
-// the dye's lateral extent (the ring's own signature, in drop radii) runs
-// 5.3/7.7/7.4/5.3/5.7 against the baseline's 5.4/8.1/8.0/6.1/6.3, inside
-// its own run-to-run spread. 0.45 is where the floor starts being felt
-// (late-time extent drops to 4.4-4.9), so this is not the last cell that
-// could go, but it is past the point of diminishing returns.
-//
-// `height` moves with it: what matters is the fall in cells, not the
-// fraction, and 0.72 of the tank keeps the same ~16-cell drop onto a
-// surface that is now lower.
-const dropHeight = Number( params.get( 'height' ) ?? 0.72 ) * NY;
-const poolDepth = Number( params.get( 'pool' ) ?? 0.55 ) * NY;
+// The pool is deeper than the dye ever needs -- the dye's deepest reach is
+// about 2 drop radii below the surface, against a pool 12 radii deep -- so
+// it is the obvious place to save particles, and it does save them without
+// breaking anything. It stays at 0.75 anyway because this scene exists to
+// be looked at, and the ring is widest here. The cost of going shallower is
+// measured under "the resolution is not the thing to turn down" above; pair
+// any change with `height`, since what matters is the fall in cells (~16)
+// rather than the fraction.
+const dropHeight = Number( params.get( 'height' ) ?? 0.92 ) * NY;
+const poolDepth = Number( params.get( 'pool' ) ?? 0.75 ) * NY;
 // Impact speed, downward, given to the drop's particles at t = 0.
 //
 // *** This is the difference between a scene that shows something and one
@@ -308,6 +313,11 @@ try {
 	canvas.style.width = `${ NX * ( 560 / NY ) }px`;
 	canvas.style.height = '560px';
 
+	vorticityCanvas.width = canvas.width;
+	vorticityCanvas.height = canvas.height;
+	vorticityCanvas.style.width = canvas.style.width;
+	vorticityCanvas.style.height = canvas.style.height;
+
 	const ctx = canvas.getContext( '2d' );
 	const scale = PIXELS_PER_CELL;
 	const RADIUS = scale * 0.5 * 1.05; // slight overlap, so the bulk reads as liquid
@@ -325,6 +335,191 @@ try {
 
 		const t = clamp01( c );
 		return `rgb(${ Math.round( 38 + t * 214 ) },${ Math.round( 96 + t * 42 ) },${ Math.round( 140 - t * 78 ) })`;
+
+	}
+
+	// ------------------------------------------------- the vorticity panel
+	//
+	// *** Why this is worth a second canvas ***
+	//
+	// This page's own description says the mushroom's shape "comes from the
+	// impact -- the drop deposits vorticity and the vorticity rolls the dye
+	// up". The dye panel shows the consequence; it does not show the cause.
+	// Vorticity is what is actually being conserved and transported here, so
+	// the ring is visible in it a long time before the dye has wrapped
+	// around, and it stays visible after the dye has smeared out.
+	//
+	// *** Where it is evaluated ***
+	//
+	// On a staggered MAC grid, curl in 2D is naturally a *corner* quantity:
+	// the four faces around a node are exactly the four samples the two
+	// derivatives need, so nothing has to be interpolated first.
+	//
+	//     u lives at (i, j+1/2)  ->  index i + (NX+1) * j
+	//     v lives at (i+1/2, j)  ->  index i + NX * j
+	//
+	//     omega(i,j) = ( v(i+1/2,j) - v(i-1/2,j) ) / h
+	//                - ( u(i,j+1/2) - u(i,j-1/2) ) / h
+	//
+	// with h = 1 in this scene's cell units. Interpolating to cell centres
+	// instead would blur exactly the thin shear layer that is the whole
+	// point of looking.
+	const vorticity = new Float32Array( ( NX + 1 ) * ( NY + 1 ) );
+
+	function computeVorticity( uData, vData ) {
+
+		const uStride = NX + 1;
+
+		for ( let j = 1; j < NY; j ++ ) {
+
+			for ( let i = 1; i < NX; i ++ ) {
+
+				const dvdx = vData[ i + NX * j ] - vData[ ( i - 1 ) + NX * j ];
+				const dudy = uData[ i + uStride * j ] - uData[ i + uStride * ( j - 1 ) ];
+
+				vorticity[ i + ( NX + 1 ) * j ] = dvdx - dudy;
+
+			}
+
+		}
+
+		return vorticity;
+
+	}
+
+	// The colour scale tracks the flow instead of being a constant, because
+	// no constant works for both ends of this scene: the impact produces
+	// vorticity a couple of orders of magnitude stronger than the ring that
+	// survives it, and a scale fixed to the impact leaves the interesting
+	// part black. It rises instantly to whatever the current frame needs and
+	// decays slowly, so the impact does not make the next hundred frames
+	// unreadable, and the panel is never renormalising visibly frame to
+	// frame. The floor stops an at-rest field from being amplified into
+	// noise.
+	//
+	// Scaled to a high percentile rather than the maximum. Vorticity here is
+	// concentrated in thin shear layers with a long tail, so the maximum is
+	// one cell and normalising by it puts the entire visible structure in
+	// the bottom few percent of the range -- measured, before this: 96% of
+	// the panel below 0.3% of peak, i.e. black. The percentile lets the
+	// tail clip, which is what clipping is for.
+	const VORTICITY_SCALE_DECAY = 0.985;
+	const VORTICITY_SCALE_FLOOR = 0.05;
+	const VORTICITY_SCALE_PERCENTILE = 0.99;
+	let vorticityScale = VORTICITY_SCALE_FLOOR;
+
+	// *** Log magnitude, not linear, and not a power law either ***
+	//
+	// Measured on this scene mid-run, over the 5985 interior nodes:
+	//
+	//     median 0.0004 | p90 0.199 | p99 1.548 | max 4.502
+	//
+	// Four orders of magnitude between the median and the top. Vorticity
+	// concentrates into thin shear layers and leaves the bulk of the pool
+	// almost irrotational, so any linear ramp -- and any gamma gentle
+	// enough to keep the cores from saturating -- puts nearly the whole
+	// panel at zero. Both were tried: 96% of pixels came back at
+	// background, then 93%.
+	//
+	// So the magnitude is mapped logarithmically over a fixed span below
+	// the scale, and everything quieter than that span is background. Two
+	// decades is what covers this field's actual structure (p90 lands
+	// around the middle of the ramp) without amplifying the near-still
+	// water into texture.
+	const VORTICITY_DECADES = 100;
+
+	// Reused across frames so the per-frame percentile costs no allocation.
+	const magnitudes = new Float32Array( ( NX + 1 ) * ( NY + 1 ) );
+
+	function percentileMagnitude( field ) {
+
+		let n = 0;
+
+		for ( let k = 0; k < field.length; k ++ ) {
+
+			const m = Math.abs( field[ k ] );
+			if ( Number.isFinite( m ) && m > 0 ) magnitudes[ n ++ ] = m;
+
+		}
+
+		if ( n === 0 ) return 0;
+
+		const sorted = magnitudes.subarray( 0, n ).sort();
+
+		return sorted[ Math.min( n - 1, Math.floor( n * VORTICITY_SCALE_PERCENTILE ) ) ];
+
+	}
+
+	const vorticityCtx = vorticityCanvas.getContext( '2d' );
+	const vorticityImage = vorticityCtx.createImageData( NX * PIXELS_PER_CELL, NY * PIXELS_PER_CELL );
+
+	function drawVorticity( uData, vData, fluidData ) {
+
+		const field = computeVorticity( uData, vData );
+
+		const level = percentileMagnitude( field );
+
+		vorticityScale = Math.max( level, vorticityScale * VORTICITY_SCALE_DECAY, VORTICITY_SCALE_FLOOR );
+
+		const pixels = vorticityImage.data;
+		const width = NX * PIXELS_PER_CELL;
+
+		for ( let py = 0; py < NY * PIXELS_PER_CELL; py ++ ) {
+
+			// The canvas has y down, the grid has y up.
+			const gy = NY - 1 - Math.floor( py / PIXELS_PER_CELL );
+
+			for ( let px = 0; px < width; px ++ ) {
+
+				const gx = Math.floor( px / PIXELS_PER_CELL );
+
+				// Cell colour from the mean of its four corners -- the field
+				// is defined on nodes, and showing one arbitrary corner per
+				// cell would shift the whole picture half a cell.
+				const w = 0.25 * (
+					field[ gx + ( NX + 1 ) * gy ] +
+					field[ ( gx + 1 ) + ( NX + 1 ) * gy ] +
+					field[ gx + ( NX + 1 ) * ( gy + 1 ) ] +
+					field[ ( gx + 1 ) + ( NX + 1 ) * ( gy + 1 ) ]
+				);
+
+				const o = ( py * width + px ) * 4;
+
+				// Outside the liquid the velocity field is extrapolated, so
+				// its curl is an artefact of the extrapolation rather than
+				// anything the fluid is doing. Drawn as background.
+				const inFluid = fluidData === null || fluidData[ gx + NX * gy ] > 0.5;
+				const magnitude = inFluid && Number.isFinite( w ) ? Math.abs( w ) : 0;
+				const quiet = vorticityScale / VORTICITY_DECADES;
+
+				// Diverging, through the same near-black the dye panel uses
+				// so the two read as one figure. Signed, because which way
+				// the ring turns is the thing worth seeing.
+				const shaped = magnitude <= quiet
+					? 0
+					: Math.min( 1, Math.log( magnitude / quiet ) / Math.log( VORTICITY_DECADES ) );
+
+				if ( w >= 0 ) {
+
+					pixels[ o ] = 6 + shaped * 249;
+					pixels[ o + 1 ] = 8 + shaped * 114;
+					pixels[ o + 2 ] = 12 + shaped * 54;
+
+				} else {
+
+					pixels[ o ] = 6 + shaped * 58;
+					pixels[ o + 1 ] = 8 + shaped * 148;
+					pixels[ o + 2 ] = 12 + shaped * 243;
+
+				}
+
+				pixels[ o + 3 ] = 255;
+
+			}
+
+		}
+
+		vorticityCtx.putImageData( vorticityImage, 0, 0 );
 
 	}
 
@@ -453,9 +648,16 @@ try {
 
 		if ( ! nanDetected && frame % DRAW_INTERVAL === 0 ) {
 
-			const [ positionsData, concentrationData ] = await Promise.all( [
+			// One Promise.all rather than sequential awaits: these are
+			// independent readbacks, and each one waits on the queue in
+			// front of it, so issuing them together is the difference
+			// between one stall and four.
+			const [ positionsData, concentrationData, uData, vData, fluidData ] = await Promise.all( [
 				flip.positions.toArray(),
-				flip.concentration.toArray()
+				flip.concentration.toArray(),
+				velocityGrid.dataU.toArray(),
+				velocityGrid.dataV.toArray(),
+				flip.fluidMask ? flip.fluidMask.toArray() : Promise.resolve( null )
 			] );
 
 			checkForNonFinite( positionsData, frame );
@@ -476,6 +678,7 @@ try {
 				}
 
 				draw( positionsData, concentrationData );
+				drawVorticity( uData, vData, fluidData );
 
 			}
 
@@ -514,6 +717,10 @@ try {
 
 	window.__fluxflowProbe = {
 		flip, velocityGrid, stats, seedScene, step, adaptiveTimeStep,
+		// Exposed so a driver that has paused the rAF loop can still render
+		// -- which is the only way to check the panels are not blank when
+		// the page is not the foreground tab and rAF never fires.
+		draw, drawVorticity,
 		pause: async () => {
 
 			driverPaused = true;
