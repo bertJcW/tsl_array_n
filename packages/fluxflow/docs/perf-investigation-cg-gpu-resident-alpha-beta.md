@@ -649,3 +649,54 @@ After the coarse solve, the next question is occupancy rather than count:
 whether the relaxation kernels on the finer levels are themselves filling
 the GPU, which is a different measurement again and needs the timestamp
 queries this machine's adapter does not expose.
+
+## The coarse solve was built, measured, and rejected
+
+The recommendation above -- replace the coarsest level's forty relaxation
+dispatches with one solve -- was implemented as a single-thread kernel that
+walks the whole coarse grid every sweep in sequence. One launch instead of
+forty, real Gauss-Seidel rather than red-black (a single thread sees each
+neighbour's update immediately), no race to reason about, gated to grids of
+at most 256 cells so a larger coarse level keeps the old path.
+
+It is worse on every axis that matters:
+
+| | red-black, 40 dispatches | single thread, 1 dispatch |
+|---|---|---|
+| examples/15 frame | **80.7 ms** | 120.0 ms |
+| mean CG iterations | **12.5** | 18.6 |
+| examples/07 max abs diff | **< 0.01** | 0.0132 |
+
+Slower, *and* a worse preconditioner, *and* it moved a reference test past
+its tolerance. Reverted.
+
+Two things were wrong in the reasoning that produced it, and both are worth
+keeping:
+
+1. **"One GPU thread is slow, but the grid is small" underestimated how
+   slow.** Twenty sweeps over sixty-four cells is 1280 serial iterations of
+   a dependent read-modify-write chain on a single lane, and that costs more
+   than forty launches of sixty-four parallel threads -- even though the
+   launches were the thing being removed. The dispatches were nearly pure
+   overhead; one lane is nearly pure latency.
+2. **"Sequential Gauss-Seidel converges faster per sweep than red-black" is
+   not true for this operator.** It is true in general for a fixed ordering,
+   but red-black is the standard multigrid smoother precisely because its
+   *smoothing* factor -- how fast it kills high-frequency error, which is
+   all a smoother is for -- is better than lexicographic ordering's for a
+   Poisson stencil. The iteration count says so directly: 12.5 to 18.6.
+
+So the coarse level is still worth attacking, but not by serialising it.
+What remains, in order of promise:
+
+- **A genuinely direct solve**, not more iterations: sixty-four unknowns is
+  a small dense system, and the operator only changes when the Dirichlet
+  mask does, i.e. once per frame rather than once per V-cycle. A per-frame
+  factorisation reused across the frame's dozen V-cycles is the version
+  worth building.
+- **A single-workgroup parallel solve** with `workgroupBarrier()` between
+  sweeps -- keeps the parallelism, still one dispatch. Needs a barrier
+  primitive tsl_array_n does not currently expose.
+- **Fewer levels**, so the coarsest grid is large enough to be worth a
+  launch. Already measurable via `?mgLevels=`, and already known to trade
+  against iteration count.
