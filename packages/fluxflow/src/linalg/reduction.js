@@ -9,16 +9,27 @@
 // of linalg.js itself.
 //
 // Same WGSL-atomics-are-int-only constraint as linalg.js (see that file's
-// own header comment, decision 1): magnitude is encoded as a fixed-point
-// int via the same round(value * scale) trick. Unlike the dot-product
-// case, magnitude is always >=0, so no sign handling is needed -- a plain
-// atomicMax over the encoded values is exactly the reduction wanted, with
-// no risk of a negative encoding confusing a signed-int comparison the
-// way it could for atomicAdd's own accumulator.
+// own header comment, decision 1): the value has to reach the atomic as an
+// integer. Unlike a *sum*, though, a maximum needs no arithmetic on the
+// encoded values -- only their ordering -- and IEEE-754 hands that over for
+// free: for non-negative floats the bit pattern read as an integer is
+// monotonically increasing in the value, and the sign bit is 0 so it never
+// looks negative to a signed comparison. So this encodes the bit pattern
+// itself and decodes it back on the host, exactly, with no scale anywhere.
+//
+// This used to be a fixed-point `round(value * scale)` encoding sharing
+// linalg.js's own DEFAULT_ATOMIC_DOT_SCALE. That was survivable here in a
+// way it was not for the dot product (a max never accumulates, so it cannot
+// overflow the way a sum does -- see createDotReducer's own comment for
+// what that cost), but it still quantized the answer, still capped the
+// representable magnitude at 2^31/scale, and still left a knob for a caller
+// to get wrong. A bit-pattern max has none of those properties and is
+// simpler. `atomicScale` is accepted and ignored so existing callers keep
+// working.
 
 import * as tsl_array_n from 'tsl_array_n';
-import { atomicMax, round, abs } from 'three/tsl';
-import { buildElementwiseKernel, DEFAULT_ATOMIC_DOT_SCALE } from './linalg.js';
+import { atomicMax, abs, floatBitsToUint } from 'three/tsl';
+import { buildElementwiseKernel } from './linalg.js';
 
 // fields: one arrayN/array2 field, or an array of them. Each gets its own
 // dispatch (built once, at construction time, same "kernels bind to a
@@ -32,15 +43,16 @@ import { buildElementwiseKernel, DEFAULT_ATOMIC_DOT_SCALE } from './linalg.js';
 export function createMaxAbsReducer( fields, options = {} ) {
 
 	const list = Array.isArray( fields ) ? fields : [ fields ];
-	const scale = options.atomicScale ?? DEFAULT_ATOMIC_DOT_SCALE;
 
 	const accum = tsl_array_n.array0( 'int' );
 	accum.node.toAtomic();
 
 	const dispatchers = list.map( ( field ) => buildElementwiseKernel( field.shape, ( I ) => {
 
-		const encoded = round( abs( field( ...I ) ).mul( scale ) ).toInt();
-		atomicMax( accum(), encoded );
+		// Bit pattern, not a scaled integer -- see this file's own header
+		// comment. abs() first, so the sign bit is always 0 and the ordering
+		// is the float ordering.
+		atomicMax( accum(), floatBitsToUint( abs( field( ...I ) ) ).toInt() );
 
 	} ) );
 
@@ -50,11 +62,13 @@ export function createMaxAbsReducer( fields, options = {} ) {
 	// One readback per call, regardless of how many fields were given.
 	async function read() {
 
+		// 0 as a bit pattern is +0.0, which is the correct identity for a
+		// maximum over magnitudes.
 		accum.fromArray( new Int32Array( [ 0 ] ) );
 		for ( const dispatch of dispatchers ) dispatch();
 
-		const [ scaledMax ] = await accum.toArray();
-		return scaledMax / scale;
+		const [ bits ] = await accum.toArray();
+		return new Float32Array( new Int32Array( [ bits ] ).buffer )[ 0 ];
 
 	}
 

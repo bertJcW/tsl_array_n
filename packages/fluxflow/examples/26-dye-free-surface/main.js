@@ -114,7 +114,16 @@ function status( text, isErr ) {
 
 const NX = 64;
 const NY = 64;
-const dt = 1 / 60;
+// The per-frame time budget, not the solver's own step: an adaptive CFL
+// loop below divides this into N equal substeps, and N substeps of
+// targetDt/N always sum back to exactly targetDt.
+//
+// `?targetDt=` overrides it, and that is how the adaptive loop gets tested:
+// at the default 1/60 this scene's own peak speed (~24 cells/second) gives
+// a Courant number around 0.4, so the answer is always one substep and the
+// machinery, correctly, never engages. Ask for a frame ten times longer and
+// it has to split the frame, which is the case worth being able to run.
+const targetDt = Number( new URLSearchParams( location.search ).get( 'targetDt' ) ?? 1 / 60 );
 const diagnosticInterval = 60;
 const DRAW_INTERVAL = 2;
 
@@ -220,6 +229,12 @@ try {
 	densityRatioInput.value = String( initialDensity );
 	densityRatioValueEl.textContent = initialDensity.toFixed( 2 );
 
+	// Live, because adaptive dt only works if every kernel that bakes dt in
+	// reads the *same* node -- see grid_adaptive_timestep2.js's own header
+	// comment on why a plain number silently would not update.
+	const dtUniform = tsl_array_n.array0( 'float' );
+	dtUniform.fromArray( new Float32Array( [ targetDt ] ) );
+
 	const mixingUniform = tsl_array_n.array0( 'float' );
 	mixingUniform.fromArray( new Float32Array( [ 0 ] ) );
 	const fadeUniform = tsl_array_n.array0( 'float' );
@@ -230,7 +245,10 @@ try {
 		gridSpacing: [ 1, 1 ],
 		origin: [ 0, 0 ],
 		maxParticles: count,
-		dt,
+		dt: dtUniform(),
+		// The largest dt any substep can take, which is what the solver's own
+		// derived pressure bound needs -- see grid_flip_solver2.js's boundDt.
+		maxDt: targetDt,
 		carryConcentration: true,
 		mixing: mixingUniform(),
 		fade: fadeUniform(),
@@ -291,6 +309,40 @@ try {
 	}
 
 	seedScene();
+
+	// ---------------------------------------------------------------- adaptive dt
+	//
+	// One rendered frame is `targetDt` of simulated time, taken as however
+	// many equal substeps the CFL condition asks for. Without this the scene
+	// ran at a fixed 1/60 whatever the flow was doing, which is fine while it
+	// is settled and wrong during the initial collapse -- the splash's own
+	// peak speed is around 22 cells/second here, so a fixed 1/60 step moves
+	// the fastest particles about a third of a cell, and a scene with a
+	// taller column or a coarser grid would move them further still.
+	//
+	// courantNumber 1, not computeAdaptiveSubSteps' own default of 5. That
+	// default is justified for a semi-Lagrangian grid advection, which is
+	// unconditionally stable and only loses accuracy at a large CFL. This is
+	// a particle solver: a particle that crosses more than about one cell in
+	// a step outruns the assumptions the P2G/G2P transfer and the collider
+	// push-out are built on. One cell per step is the physical statement, not
+	// a tuned number.
+	const adaptiveTimeStep = grid.createGridAdaptiveTimeStep2( {
+		velocityGrid, gridSpacing: [ 1, 1 ], dt: dtUniform, targetDt, courantNumber: 1
+	} );
+
+	// What both the animation loop and the test hook call: advance exactly
+	// `targetDt` of simulated time, in as many substeps as this frame needs.
+	async function step() {
+
+		const numSubSteps = await adaptiveTimeStep.update();
+
+		for ( let i = 0; i < numSubSteps; i ++ ) await flip.onAdvanceTimeStep();
+
+		return numSubSteps;
+
+	}
+
 
 	// ---------------------------------------------------------------- drawing
 
@@ -445,7 +497,7 @@ try {
 		if ( frameTimes.length > FPS_WINDOW ) frameTimes.shift();
 
 		const avgMs = frameTimes.reduce( ( a, b ) => a + b, 0 ) / frameTimes.length;
-		perfEl.textContent = `fps: ${ ( 1000 / avgMs ).toFixed( 1 ) } | particles: ${ count }`;
+		perfEl.textContent = `fps: ${ ( 1000 / avgMs ).toFixed( 1 ) } | particles: ${ count } | substeps: ${ adaptiveTimeStep.state.lastNumSubSteps }`;
 
 	}
 
@@ -461,7 +513,7 @@ try {
 		if ( driverPaused ) return;
 
 		updatePerf();
-		await flip.onAdvanceTimeStep();
+		await step();
 
 		if ( ! nanDetected && frame % DRAW_INTERVAL === 0 ) {
 
@@ -550,7 +602,7 @@ try {
 	// promise it returns before driving anything -- it resolves once any
 	// step already in flight has finished.
 	window.__fluxflowProbe = {
-		flip, stats, seedScene, velocityGrid,
+		flip, stats, seedScene, velocityGrid, step, adaptiveTimeStep,
 		pause: async () => {
 
 			driverPaused = true;

@@ -561,6 +561,7 @@ export function createGridFlipSolver2( {
 	dt,
 	gravity = [ 0, -9.81 ],
 	reducedPressure = true,
+	maxDt,
 	flipRatio = 0.97,
 	velocityDamping = 0.02,
 	p2gAtomicScale = DEFAULT_ATOMIC_DOT_SCALE,
@@ -878,8 +879,14 @@ export function createGridFlipSolver2( {
 	// library default in place.
 	const domainExtent = resolutionX * gridSpacingX + resolutionY * gridSpacingY;
 	const gravityMagnitude = Math.hypot( gravity[ 0 ], gravity[ 1 ] );
-	const derivedMaxPlausiblePressure = ( typeof dt === 'number' && reducedPressureEnabled )
-		? PRESSURE_BOUND_HEADROOM * dt * gravityMagnitude * domainExtent
+	// `maxDt` exists for the adaptive-timestep case: with a live dt node
+	// there is no number to read at construction time, but a CFL loop always
+	// knows its own frame budget (the dt it subdivides), and a substep is by
+	// construction never larger than that. Pass it and the bound is derived
+	// from it; pass neither and the library default stands.
+	const boundDt = typeof maxDt === 'number' ? maxDt : ( typeof dt === 'number' ? dt : undefined );
+	const derivedMaxPlausiblePressure = ( boundDt !== undefined && reducedPressureEnabled )
+		? PRESSURE_BOUND_HEADROOM * boundDt * gravityMagnitude * domainExtent
 		: undefined;
 
 	const pressureSolver = createGridPressureSolver2( {
