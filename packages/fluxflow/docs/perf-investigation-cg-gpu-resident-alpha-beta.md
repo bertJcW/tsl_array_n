@@ -851,3 +851,80 @@ Ordered by expected value per unit of work, on the evidence above:
    direction 1, one stall per frame instead of twelve.
 3. **FFT preconditioner** -- biggest ceiling by far, biggest build, and
    needs its own scene-by-scene justification first.
+
+---
+
+# Options 1 and 2, built and priced
+
+## 1. Per-frame diagonal precompute: built, 30% slower, reverted
+
+Implemented as a `diagonalField` per level, filled by its own kernel at the
+head of the V-cycle batch (rather than through a `refresh()` the caller has
+to remember, which would give a silently wrong answer -- a zero diagonal is
+a division by zero -- the first time someone forgot). relax and the coarse
+sweep read the field instead of recomputing `laplacianDiagonalAt`.
+
+Correct: examples/07 still converges inside 1e-2.
+
+| | ms/frame | CG iterations | ms/iteration |
+|---|---|---|---|
+| recomputed (baseline) | **72.3** | 12.5 | **5.78** |
+| precomputed field | 93.7 | 11.2 | 8.36 |
+
+**30% slower per frame, 45% worse per iteration.** Reverted.
+
+The 35% ceiling measured earlier was real as a ceiling and useless as a
+prediction, exactly as flagged: the substitution being priced there removed
+the arithmetic *and put nothing in its place*, while the real change
+replaces it with a buffer read. On this GPU that read costs more than the
+select-heavy arithmetic it replaced -- and this scene's diagonal has no
+memory access at all to begin with, so the exchange was ALU for bandwidth
+in the worst direction. Four extra dispatches per V-cycle for the fills add
+to it.
+
+Worth stating as a rule, since it will come up again: **a "remove the work"
+probe does not price a "cache the work" change.** They differ by whatever
+the cache costs to read, and on a GPU that is frequently more than the work.
+
+## 2. Coarse inverse uploaded once per frame: not built, priced out of it
+
+The surviving form of direction 1 in the section above -- read the mask and
+face weights back once a frame, invert the 64x64 coarse system on the CPU,
+upload the inverse, and let each V-cycle do a dense matvec instead of twenty
+sweeps.
+
+It does not need building, because the data already collected bounds what it
+could possibly win. From the two barrier-kernel measurements:
+
+    1 dispatch, 20 sweeps    72.3 ms
+    1 dispatch,  4 sweeps    68.1 ms
+
+Sixteen sweeps of coarse-level work are **4.2 ms**, so all twenty are about
+**5.3 ms of a 72 ms frame -- roughly 7%**. That is the entire prize, and it
+is what a *perfect, free* coarse solve would return.
+
+Against it: one mid-frame synchronisation, measured at **3.9 ms**, plus a
+dense-matvec dispatch in each of the frame's twelve V-cycles. The cost is
+the same order as the prize before any of the machinery is written.
+
+So it is not worth building, and the reason is worth keeping: the coarse
+level looked expensive when it was forty dispatches, and the two changes
+that have already landed -- batching the V-cycle, then folding the coarse
+sweeps into one barrier kernel -- are precisely what took its cost from
+"dominant" to "seven percent". **The target was removed by the earlier work,
+not by this analysis.**
+
+## What that leaves
+
+Only direction 3, the FFT/DCT preconditioner, and its case is unchanged: it
+is the one remaining lever with a large ceiling, because it attacks the
+iteration count rather than the cost of an iteration. Everything measured
+since batching has been chipping at the second, and the pieces left there
+are single-digit percentages of the frame.
+
+The honest next step for it is still its own bound rather than its
+implementation: measure how few iterations each scene would need with a very
+strong preconditioner (for instance by running many more multigrid V-cycles
+per CG iteration and watching where the iteration count bottoms out). That
+number decides whether the transform is worth writing, and it is a
+measurement rather than a build.
