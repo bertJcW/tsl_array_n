@@ -432,3 +432,88 @@ is already exposed. The measurement points somewhere better.
 Both are changes to `multigrid.js`, and both are now measurable end to end
 rather than argued: `profile(n)` reports dispatches per frame per label
 before and after.
+
+---
+
+# Is TSL the problem? Measured: no, but one call in it is
+
+Prompted by a direct question -- whether three.js's TSL is costing enough
+against native WebGPU to justify replacing fluxflow's foundation. The
+profiler above put a number on the suspicion: **54 microseconds of CPU time
+per dispatch**, where a native `dispatchWorkgroups()` is a few microseconds
+of appending to a command encoder. An order of magnitude is worth chasing.
+
+## Reading the code first
+
+`tsl_array_n`'s `kernel()` returns `() => getRenderer().compute( computeNode )`
+-- one `compute()` call per dispatch. And in three.js's WebGPU backend:
+
+    finishCompute( computeGroup ) {
+        groupData.passEncoderGPU.end();
+        submit( this.device, groupData.cmdEncoderGPU.finish() );
+    }
+
+Every `compute()` call creates its own command encoder, opens its own
+compute pass, and **submits its own command buffer to the queue**. At 1075
+dispatches per frame that is 1075 encoders, 1075 passes and 1075 queue
+submits, where native code would use one of each and 1075
+`dispatchWorkgroups()` calls inside them.
+
+But `renderer.compute()` already accepts an **array**, and wraps the whole
+array in a single `beginCompute`/`finishCompute` pair -- one encoder, one
+pass, one submit. The batched form exists; nothing is using it.
+
+## Measured, not inferred
+
+64 trivial dispatches over a 4096-element buffer, ten repetitions, warmed up
+so pipeline creation is excluded:
+
+| | per dispatch |
+|---|---|
+| `compute(node)` once per node | **62.2 us** |
+| `compute([ ...nodes ])` once for all | **6.7 us** |
+
+**9.26x.** And 62.2 us against the 54 us the profiler measured inside the
+real solver is two independent measurements agreeing, which is the main
+reason to believe either.
+
+## Batching does not break ordering
+
+Worth checking rather than assuming, because red-black Gauss-Seidel depends
+on it: 40 dispatches each doing a read-modify-write of the *same* cell, run
+as one batched pass, produce exactly 40 -- identical to running them as 40
+separate passes. WebGPU orders dispatches within a pass and handles the
+hazard between them, so a batched V-cycle stays correct.
+
+## What this means for the architecture question
+
+**Do not replace the foundation.** The gap between this port and native
+WebGPU, on the evidence, is not TSL's authoring model, the generated WGSL,
+or three.js's node system -- it is one call doing per-dispatch submission,
+and three.js already ships the fix. Roughly nine tenths of a 9x gap is
+available without leaving TSL, without touching a kernel, and without
+touching the multigrid algorithm.
+
+Projected on the real solver: 57.7 ms of encoding per frame becomes of order
+6 ms, taking encoding from 38% of the frame to about 4%, and the frame from
+~123 ms to ~72 ms -- about 1.7x -- before any algorithmic change. It also
+composes with the coarse-level work above rather than competing with it:
+fewer dispatches and cheaper dispatches multiply.
+
+What native WebGPU would still buy, and what it would cost, for the record:
+finer control of bind-group reuse and buffer lifetimes, no node-system
+bookkeeping, and no dependence on three.js's release cadence -- against
+rewriting every kernel in this port by hand in WGSL and giving up the
+authoring model that is the entire premise of `tsl_array_n`. That trade is
+not worth making to recover an overhead that a batched call already
+recovers.
+
+## What the change actually is
+
+`tsl_array_n.kernel()` would need to expose its compute node, or grow a
+batch API -- something like a `dispatchBatch( [ ...dispatchers ] )` that
+calls `renderer.compute()` once with the underlying nodes. fluxflow would
+then group the V-cycle's dispatches, which is where 77% of them are.
+
+That is a change to `tsl_array_n`, not to fluxflow, so it is a decision
+about that package's API rather than something to do unilaterally from here.
