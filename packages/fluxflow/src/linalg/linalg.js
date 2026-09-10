@@ -71,6 +71,7 @@
 
 import * as tsl_array_n from 'tsl_array_n';
 import { float, Loop, If } from 'three/tsl';
+import { instrumentDispatch } from '../profiling.js';
 
 // Fixed-point scale for encoding a float product as an atomically-summable
 // int32 -- see decision 1 above. Too small loses precision (residuals near
@@ -204,13 +205,24 @@ function shapesEqual( a, b ) {
 // always 0 -- can't be used directly here.) Exported for reuse by
 // multigrid.js, which needs the exact same dimension-generic kernel
 // construction for its own 1D/2D/3D-generic stencil operators.
-export function buildElementwiseKernel( shape, indexedFn ) {
+// `label` is optional and exists only for ../profiling.js: every kernel in
+// this file and in multigrid.js -- the whole pressure-solve hot path -- is
+// built here, which makes this the one place that can count dispatches
+// without threading a profiler through a dozen factories. The wrapper is a
+// single boolean test when profiling is off.
+export function buildElementwiseKernel( shape, indexedFn, label = 'unlabelled' ) {
 
-	if ( shape.length === 1 ) return tsl_array_n.kernel( shape, ( i ) => indexedFn( [ i ] ) );
-	if ( shape.length === 2 ) return tsl_array_n.kernel( shape, ( i, j ) => indexedFn( [ i, j ] ) );
-	if ( shape.length === 3 ) return tsl_array_n.kernel( shape, ( i, j, k ) => indexedFn( [ i, j, k ] ) );
+	const build = () => {
 
-	throw new Error( `conjugateGradient: only 1D/2D/3D shapes are supported, got ${ shape.length }D.` );
+		if ( shape.length === 1 ) return tsl_array_n.kernel( shape, ( i ) => indexedFn( [ i ] ) );
+		if ( shape.length === 2 ) return tsl_array_n.kernel( shape, ( i, j ) => indexedFn( [ i, j ] ) );
+		if ( shape.length === 3 ) return tsl_array_n.kernel( shape, ( i, j, k ) => indexedFn( [ i, j, k ] ) );
+
+		throw new Error( `conjugateGradient: only 1D/2D/3D shapes are supported, got ${ shape.length }D.` );
+
+	};
+
+	return instrumentDispatch( label, build() );
 
 }
 
@@ -347,9 +359,11 @@ export function createDotReducer( shape, fieldA, fieldB ) {
 
 	}
 
+	const instrumentedDispatch = instrumentDispatch( 'cg-dot', dispatch );
+
 	async function read() {
 
-		dispatch();
+		instrumentedDispatch();
 
 		const partials = await partial.toArray();
 		let sum = 0;
@@ -463,7 +477,7 @@ export function createConjugateGradientSolver( applyOperator, b, x, options = {}
 		p( ...I ).assign( 0 );
 		Ap( ...I ).assign( 0 );
 
-	} );
+	}, 'cg-init' );
 
 	// r = b - Ax, the *true* residual -- unlike init() above, does not
 	// touch p/Ap, so it's safe to call mid-loop for the periodic drift
@@ -473,25 +487,25 @@ export function createConjugateGradientSolver( applyOperator, b, x, options = {}
 
 		r( ...I ).assign( b( ...I ).sub( Ax( ...I ) ) );
 
-	} );
+	}, 'cg-recomputeR' );
 
 	const updateX = buildElementwiseKernel( shape, ( I ) => {
 
 		x( ...I ).addAssign( p( ...I ).mul( alpha() ) );
 
-	} );
+	}, 'cg-updateX' );
 
 	const updateR = buildElementwiseKernel( shape, ( I ) => {
 
 		r( ...I ).subAssign( Ap( ...I ).mul( alpha() ) );
 
-	} );
+	}, 'cg-updateR' );
 
 	const updateP = buildElementwiseKernel( shape, ( I ) => {
 
 		p( ...I ).assign( r( ...I ).add( p( ...I ).mul( beta() ) ) );
 
-	} );
+	}, 'cg-updateP' );
 
 	function setScalar( field, value ) {
 
@@ -706,7 +720,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		p( ...I ).assign( 0 );
 		Ap( ...I ).assign( 0 );
 
-	} );
+	}, 'pcg-init' );
 
 	// r = b - Ax, the *true* residual -- unlike init() above, does not
 	// touch p/Ap, so it's safe to call mid-loop for the periodic drift
@@ -716,25 +730,25 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 		r( ...I ).assign( b( ...I ).sub( Ax( ...I ) ) );
 
-	} );
+	}, 'pcg-recomputeR' );
 
 	const updateP = buildElementwiseKernel( shape, ( I ) => {
 
 		p( ...I ).assign( z( ...I ).add( p( ...I ).mul( beta() ) ) );
 
-	} );
+	}, 'pcg-updateP' );
 
 	const updateX = buildElementwiseKernel( shape, ( I ) => {
 
 		x( ...I ).addAssign( p( ...I ).mul( alpha() ) );
 
-	} );
+	}, 'pcg-updateX' );
 
 	const updateR = buildElementwiseKernel( shape, ( I ) => {
 
 		r( ...I ).subAssign( Ap( ...I ).mul( alpha() ) );
 
-	} );
+	}, 'pcg-updateR' );
 
 	function setScalar( field, value ) {
 

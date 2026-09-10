@@ -95,6 +95,7 @@ import { createCopyKernel2 } from './array_utils.js';
 import { createLaplacianOperator, createMultigridPreconditioner } from '../linalg/multigrid.js';
 import { createPreconditionedConjugateGradientSolver } from '../linalg/linalg.js';
 import { isNonFiniteOrAbove } from '../float_guards.js';
+import { instrumentDispatch } from '../profiling.js';
 
 // Last-resort bound on a single pressure cell's own magnitude -- see
 // dispatch()'s own use, below, for the full circuit-breaker this backs.
@@ -302,8 +303,8 @@ export function createGridPressureSolver2( {
 	// which is a bounded, recoverable error, unlike a NaN.
 	const pressureSnapshot = tsl_array_n.arrayN( 'float', shape );
 	pressureSnapshot.fromArray( new Float32Array( shape.reduce( ( a, n ) => a * n, 1 ) ) );
-	const snapshotPressure = createCopyKernel2( pressureGrid.data, pressureSnapshot, shape );
-	const restorePressure = createCopyKernel2( pressureSnapshot, pressureGrid.data, shape );
+	const snapshotPressure = instrumentDispatch( 'pressure-snapshot', createCopyKernel2( pressureGrid.data, pressureSnapshot, shape ) );
+	const restorePressure = instrumentDispatch( 'pressure-restore', createCopyKernel2( pressureSnapshot, pressureGrid.data, shape ) );
 
 	// Reliable (see maxPlausiblePressure's own comment on why a scalar
 	// derived from linalg.js's atomic-int reduction isn't) bad-cell

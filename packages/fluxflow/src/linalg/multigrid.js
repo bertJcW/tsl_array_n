@@ -451,7 +451,7 @@ export function createLaplacianOperator( shape, gridSpacing, options = {} ) {
 
 			output( ...I ).assign( laplacianAt( input, gridSpacing, shape, I, dirichletMask, faceWeights ) );
 
-		} );
+		}, 'mg-relax' );
 
 	};
 
@@ -474,7 +474,7 @@ function buildRelaxKernel( shape, spacing, sorFactor, color, x, b, dirichletMask
 
 		x( ...I ).assign( isColor.select( updated, current ) );
 
-	} );
+	}, 'mg-relax' );
 
 }
 
@@ -486,7 +486,7 @@ function buildResidualKernel( shape, spacing, x, b, buffer, dirichletMask, faceW
 
 		buffer( ...I ).assign( b( ...I ).sub( laplacianAt( x, spacing, shape, I, dirichletMask, faceWeights ) ) );
 
-	} );
+	}, 'mg-residual' );
 
 }
 
@@ -496,7 +496,7 @@ function buildZeroKernel( shape, field ) {
 
 		field( ...I ).assign( 0 );
 
-	} );
+	}, 'mg-clear' );
 
 }
 
@@ -626,7 +626,7 @@ function buildRestrictKernel( finer, coarser, coarseShape, dirichletMask ) {
 
 		coarser( ...I ).assign( sum );
 
-	} );
+	}, 'mg-restrict' );
 
 }
 
@@ -749,7 +749,7 @@ function buildCorrectKernel( coarser, finer, fineShape, dirichletMask ) {
 
 		}
 
-	} );
+	}, 'mg-prolong' );
 
 }
 

@@ -92,7 +92,7 @@
 
 import * as tsl_array_n from 'tsl_array_n';
 import { vec2, float, max } from 'three/tsl';
-import { grid } from 'fluxflow';
+import { grid, profiling } from 'fluxflow';
 
 const dyeCanvas = document.querySelector( '#outDye' );
 const pressureCanvas = document.querySelector( '#outPressure' );
@@ -164,12 +164,25 @@ function makeWallStripPolygon( innerX, outerX ) {
 
 try {
 
-	const renderer = await tsl_array_n.init( { canvas: document.createElement( 'canvas' ), allowFallback: true } );
+	// `?profile=1` turns on WebGPU timestamp queries. Off by default because
+	// they make the renderer write a timestamp around every pass, which is
+	// not free and is only wanted when someone is actually measuring.
+	const profileEnabled = new URLSearchParams( location.search ).get( 'profile' ) === '1';
+
+	const renderer = await tsl_array_n.init( {
+		canvas: document.createElement( 'canvas' ),
+		allowFallback: true,
+		// tsl_array_n.init forwards anything it does not recognise straight
+		// to the WebGPURenderer constructor, so this needs no support from
+		// that package.
+		trackTimestamp: profileEnabled
+	} );
 	status( `backend: ${ renderer.backend?.constructor?.name ?? 'unknown' }` );
 
 	// `?mgLevels=` exists to measure where the frame time goes -- see
 	// ../../docs/perf-investigation-cg-gpu-resident-alpha-beta.md.
 	const mgLevels = Number( new URLSearchParams( location.search ).get( 'mgLevels' ) ?? 4 );
+	const coarseIter = Number( new URLSearchParams( location.search ).get( 'coarseIter' ) ?? 20 );
 
 	const velocityGrid = grid.createFaceCenteredGrid2( N, N, 1, 1, 0, 0 );
 
@@ -240,7 +253,7 @@ try {
 		// report -- switching back to numberOfLevels: 4 alone (no other
 		// change) resolves it, confirmed stable (all-finite, low residual)
 		// over 1000+ real-hardware frames.
-		pressure: { multigrid: { numberOfLevels: mgLevels }, tolerance: 1e-5, maxIterations: 100 }
+		pressure: { multigrid: { numberOfLevels: mgLevels, numberOfCoarsestIterations: coarseIter }, tolerance: 1e-5, maxIterations: 100 }
 	} );
 
 	// dye's own advection, bound to the solver's already-projected
@@ -493,7 +506,49 @@ try {
 	}
 
 	window.__fluxflowProbe = {
-		velocityGrid, solver,
+		velocityGrid, solver, renderer,
+
+		// The measurement the two performance investigations in
+		// ../../docs/perf-investigation-cg-gpu-resident-alpha-beta.md both
+		// ended up needing and neither had: dispatches per frame, where the
+		// CPU-side encoding time goes, and -- when ?profile=1 is on and the
+		// adapter supports timestamp queries -- how much of the frame the
+		// GPU is actually busy for.
+		profile: async ( frames = 60 ) => {
+
+			// Warm-up outside the measurement: first-dispatch and shader
+			// compilation costs are real but they are not what a steady-state
+			// frame is made of.
+			for ( let k = 0; k < 15; k ++ ) await solver.onAdvanceTimeStep();
+
+			profiling.startProfiling();
+
+			const t0 = performance.now();
+			for ( let k = 0; k < frames; k ++ ) await solver.onAdvanceTimeStep();
+			const wallMs = performance.now() - t0;
+
+			profiling.stopProfiling();
+
+			const report = profiling.profilingReport( frames );
+			const gpuMs = await profiling.readComputeTimestampMs( renderer );
+
+			return {
+				frames,
+				fps: +( frames / ( wallMs / 1000 ) ).toFixed( 2 ),
+				wallMsPerFrame: +( wallMs / frames ).toFixed( 2 ),
+				dispatchesPerFrame: +report.dispatchesPerFrame.toFixed( 1 ),
+				encodeMsPerFrame: +report.cpuMsPerFrame.toFixed( 2 ),
+				encodeShareOfFrame: +( report.cpuMs / wallMs ).toFixed( 3 ),
+				gpuComputeMs: gpuMs,
+				byLabel: report.labels.map( ( l ) => ( {
+					label: l.label,
+					perFrame: +l.callsPerFrame.toFixed( 1 ),
+					msPerFrame: +l.cpuMsPerFrame.toFixed( 3 ),
+					share: +l.cpuShare.toFixed( 3 )
+				} ) )
+			};
+
+		},
 		step: () => solver.onAdvanceTimeStep(),
 		pause: async () => {
 

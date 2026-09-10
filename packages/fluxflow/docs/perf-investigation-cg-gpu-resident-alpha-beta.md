@@ -343,3 +343,92 @@ and is still unmet: before another implementation round, add actual GPU-side
 profiling (timestamp queries, or a `chrome://tracing` capture) so that
 "dispatch overhead" stops being an inference from fps deltas and becomes a
 measurement.
+
+---
+
+# The instrumentation both rounds asked for, and what it says
+
+Both investigations above end with the same recommendation: stop inferring
+dispatch cost from fps deltas and measure it. `src/profiling.js` does that.
+Every kernel in `linalg.js` and `multigrid.js` is built through one function,
+`buildElementwiseKernel`, so wrapping the dispatcher there counts the entire
+pressure-solve hot path without threading a profiler through a dozen
+factories. Cost when off: one boolean test per dispatch.
+
+`examples/15-flow-past-cylinder/` exposes it as `__fluxflowProbe.profile(n)`,
+and `?profile=1` additionally asks the renderer for WebGPU timestamp queries
+(`tsl_array_n.init` forwards `trackTimestamp` straight to the
+WebGPURenderer, so that needed no change to that package).
+
+## The number nobody had
+
+**1075 dispatches per frame**, at 64x64, for 12.4 CG iterations.
+
+| label | dispatches/frame | encode ms/frame | share of encode |
+|---|---|---|---|
+| `mg-relax` | **829.9** | **43.24** | **75%** |
+| `mg-clear` | 51.0 | 2.90 | 5% |
+| `cg-dot` | 39.3 | 2.41 | 4% |
+| `mg-restrict` | 38.3 | 2.24 | 4% |
+| `mg-residual` | 38.3 | 2.11 | 4% |
+| `mg-prolong` | 38.3 | 2.01 | 3% |
+| `pcg-updateX/P/R` | 12.8 each | ~0.9 each | ~5% total |
+
+Frame: 151 ms wall (with profiling on; 123 ms without). **57.7 ms of it --
+38% -- is spent inside the dispatch calls themselves**, i.e. CPU-side
+encoding, before any GPU work or synchronisation. Three quarters of that is
+one label.
+
+GPU timestamps came back null on this machine: the adapter does not expose
+`timestamp-query`, so `readComputeTimestampMs` correctly reports "not
+available" rather than throwing. The CPU-side numbers are the ones the
+decision rests on and they need no special support.
+
+## Where the relaxation dispatches are, and it is not where the work is
+
+A V-cycle at 4 levels with the default sweep counts costs, per cycle:
+
+    down    3 levels x 2 sweeps x 2 colours  = 12
+    coarsest        20 sweeps x 2 colours    = 40
+    up      2 levels x 2 sweeps x 2 colours  =  8
+    level 0  final 2 sweeps x 2 colours      =  4
+                                        total  64
+
+**Forty of sixty-four -- 62% -- go to the coarsest level, which at 4 levels
+from 64x64 is an 8x8 grid of 64 unknowns.** Each of those dispatches does
+almost no arithmetic and pays a full dispatch's overhead. That is the
+pathology, stated precisely for the first time.
+
+Confirmed by measurement, `?coarseIter=4` against the default 20:
+
+| | dispatches/frame | `mg-relax` | encode ms/frame | CG iterations | fps |
+|---|---|---|---|---|---|
+| `numberOfCoarsestIterations: 20` | 1075 | 830 | 57.7 | 12.4 | 6.60 |
+| `numberOfCoarsestIterations: 4` | 750 | 475 | 53.5 | 14.0 | **7.31** |
+
+11% faster, for four extra CG iterations. Note also that encode time fell
+only 7% while dispatch count fell 30%: the coarse-level dispatches are the
+*cheap* ones to encode, so cutting them helps less than counting them
+suggests. Encode cost per dispatch is not constant -- it rises with grid
+size -- which is worth knowing before anyone budgets a fusion by dispatch
+count alone.
+
+## What this makes the next piece of work
+
+Not "fewer sweeps": that is a knob, it trades against CG iterations, and it
+is already exposed. The measurement points somewhere better.
+
+1. **Solve the coarsest level directly instead of relaxing it.** Sixty-four
+   unknowns is small enough to solve exactly, and it would replace 40
+   dispatches per V-cycle with one -- or with zero, by reading the level back
+   and solving on the CPU, which at 64 values costs one readback against the
+   forty dispatches it removes.
+2. **Fuse the two colour passes.** Red-black needs a global barrier between
+   the halves, and a dispatch is the only global barrier available, so this
+   is not free -- it means either damped Jacobi (one dispatch per sweep,
+   weaker smoothing) or a workgroup-level scheme. Worth measuring against
+   option 1, not before it.
+
+Both are changes to `multigrid.js`, and both are now measurable end to end
+rather than argued: `profile(n)` reports dispatches per frame per label
+before and after.
