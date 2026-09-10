@@ -390,7 +390,16 @@ try {
 
 	}
 
+	// See examples/26-dye-free-surface/'s own hook for why an automated
+	// stability run has to be able to stop this loop: a backgrounded Chrome
+	// tab throttles requestAnimationFrame to one frame every several
+	// seconds, and a driver loop stepping the solver at the same time as
+	// this one interleaves GPU dispatches with it.
+	let driverPaused = false;
+
 	async function animate() {
+
+		if ( driverPaused ) return;
 
 		updatePerf();
 
@@ -433,6 +442,31 @@ try {
 		velocityDampingValueEl.textContent = v.toFixed( 3 );
 
 	} );
+
+	// `step` is what a driver should call, not onAdvanceTimeStep directly:
+	// it carries whatever per-frame scene work this example does around the
+	// solve, so an automated run exercises the same physics the page does.
+	window.__fluxflowProbe = {
+		flip, velocityGrid,
+		step: async () => {
+
+			rigidCollider.update( dt );
+			flip.boundarySolver.setCollider( rigidCollider, [ NX, NY ], [ 1, 1 ], [ 0, 0 ] );
+			await flip.onAdvanceTimeStep();
+		},
+		pause: async () => {
+
+			driverPaused = true;
+			await new Promise( ( resolve ) => setTimeout( resolve, 100 ) );
+
+		},
+		resume: () => {
+
+			driverPaused = false;
+			requestAnimationFrame( animate );
+
+		}
+	};
 
 	requestAnimationFrame( animate );
 
