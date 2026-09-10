@@ -265,7 +265,7 @@ export function createGridPressureSolver2( {
 	// rejected: see dispatch()'s own use of maxPlausiblePressure below --
 	// true whenever this project() call's own solve() looked bad enough
 	// that its pressure update was discarded rather than trusted.
-	const diagnostics = { converged: null, rejected: false };
+	const diagnostics = { converged: null, rejected: false, iterations: null, stoppedBy: null };
 
 	// Last-resort circuit breaker: a snapshot of the last pressure field
 	// that actually *passed* this solver's own bad-cell check, restored in
@@ -541,6 +541,13 @@ export function createGridPressureSolver2( {
 			if ( updateDirichletFields ) updateDirichletFields();
 			dispatchBuildSystem();
 			diagnostics.converged = await cg.solve( tolerance, maxIterations );
+
+			// Forwarded from the CG solver so a caller can see *why* a frame
+			// was expensive without reaching into linalg.js -- the iteration
+			// count is the number every performance question here turns out
+			// to depend on.
+			diagnostics.iterations = cg.state ? cg.state.iterations : null;
+			diagnostics.stoppedBy = cg.state ? cg.state.stoppedBy : null;
 
 			diagnostics.rejected = ( await countBadPressureCellsNow() ) > 0;
 

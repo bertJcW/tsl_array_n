@@ -675,6 +675,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	const dotRZ  = createDotReducer( shape, r, z );
 	const dotPAp = createDotReducer( shape, p, Ap );
 
+
 	// Live view of the most recent solve()'s own final r.r -- exposed (not
 	// just returned from solve() as a boolean, which every existing caller
 	// already treats as "converged or not") so a caller can add its own
@@ -687,7 +688,13 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	// outcome. See grid_pressure_solver2.js's own use of this for exactly
 	// that: reverting a frame's pressure update entirely if this comes
 	// back non-finite, rather than let a bad solve reach velocity.
-	const state = { residualSquared: 0 };
+	// iterations: how many the last solve() actually ran, and why it
+	// stopped. Exposed because it is the number every performance question
+	// about this solver turns out to hinge on -- "is a frame slow because
+	// the solve is expensive, or because it is doing eighty iterations?" is
+	// not answerable without it, and it was guessed at more than once before
+	// it was measurable.
+	const state = { residualSquared: 0, iterations: 0, stoppedBy: 'none' };
 
 	const applyToX = applyOperator( x, Ax );
 	const applyToP = applyOperator( p, Ap );
@@ -762,6 +769,8 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 			for ( let iter = 0; iter < maxiter; iter ++ ) {
 
+				state.iterations = iter + 1;
+
 				applyToP(); // Ap = A @ p
 				const pAp = await dotPAp.read();
 
@@ -776,7 +785,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 				// it, since A@constant=0 exactly), and once p is dominated by
 				// it, Ap collapses toward 0 everywhere -- exactly the
 				// condition this check catches.
-				if ( isDegenerateDenominator( pAp ) ) break;
+				if ( isDegenerateDenominator( pAp ) ) { state.stoppedBy = 'degenerate-pAp'; break; }
 
 				// p has drifted implausibly far from this solve's own starting
 				// scale across the iterations so far -- see MAX_PAP_GROWTH_
@@ -786,7 +795,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 				// one individually passing every other guard here). Same
 				// "break, don't corrupt x further" response as every other
 				// guard in this loop.
-				if ( Math.abs( pAp ) > pApBaseline * MAX_PAP_GROWTH_FACTOR ) break;
+				if ( Math.abs( pAp ) > pApBaseline * MAX_PAP_GROWTH_FACTOR ) { state.stoppedBy = 'pAp-growth'; break; }
 
 				const alphaValue = oldRZ / pAp;
 
@@ -814,7 +823,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 				// (956 stable frames -> 178) on the exact same repro this
 				// fix's other half (beta) was confirmed against. Magnitude
 				// alone, without the sign condition, is what's kept here.
-				if ( Math.abs( alphaValue ) > MAX_ALPHA_MAGNITUDE ) break;
+				if ( Math.abs( alphaValue ) > MAX_ALPHA_MAGNITUDE ) { state.stoppedBy = 'alpha-magnitude'; break; }
 
 				setScalar( alpha, alphaValue ); // alpha = rz / pTAp
 				updateX();
@@ -854,7 +863,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 				// no other convergence check anywhere in this loop (only r.r
 				// is compared against tol), so this is the *only* guard
 				// protecting this particular division.
-				if ( isDegenerateDenominator( oldRZ ) ) break;
+				if ( isDegenerateDenominator( oldRZ ) ) { state.stoppedBy = 'degenerate-oldRZ'; break; }
 
 				// *** A real, confirmed-on-real-hardware CG robustness fix,
 				// found via direct real-hardware dot-product logging ***

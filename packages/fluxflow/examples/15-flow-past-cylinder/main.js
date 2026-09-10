@@ -167,6 +167,10 @@ try {
 	const renderer = await tsl_array_n.init( { canvas: document.createElement( 'canvas' ), allowFallback: true } );
 	status( `backend: ${ renderer.backend?.constructor?.name ?? 'unknown' }` );
 
+	// `?mgLevels=` exists to measure where the frame time goes -- see
+	// ../../docs/perf-investigation-cg-gpu-resident-alpha-beta.md.
+	const mgLevels = Number( new URLSearchParams( location.search ).get( 'mgLevels' ) ?? 4 );
+
 	const velocityGrid = grid.createFaceCenteredGrid2( N, N, 1, 1, 0, 0 );
 
 	// dye state, ping-ponged -- see this file's own header comment for why
@@ -236,7 +240,7 @@ try {
 		// report -- switching back to numberOfLevels: 4 alone (no other
 		// change) resolves it, confirmed stable (all-finite, low residual)
 		// over 1000+ real-hardware frames.
-		pressure: { multigrid: { numberOfLevels: 4 }, tolerance: 1e-5, maxIterations: 100 }
+		pressure: { multigrid: { numberOfLevels: mgLevels }, tolerance: 1e-5, maxIterations: 100 }
 	} );
 
 	// dye's own advection, bound to the solver's already-projected
@@ -436,7 +440,16 @@ try {
 
 	}
 
+	// See examples/26-dye-free-surface/'s own hook for why a driver has to be
+	// able to stop this loop. This scene is also the reference scene for
+	// ../../docs/perf-investigation-cg-gpu-resident-alpha-beta.md, whose
+	// measurement methodology needed exactly this and had to monkey-patch
+	// requestAnimationFrame to get it.
+	let driverPaused = false;
+
 	async function animate() {
+
+		if ( driverPaused ) return;
 
 		await solver.onAdvanceTimeStep( dt );
 
@@ -478,6 +491,23 @@ try {
 		if ( ! nanDetected ) requestAnimationFrame( animate );
 
 	}
+
+	window.__fluxflowProbe = {
+		velocityGrid, solver,
+		step: () => solver.onAdvanceTimeStep(),
+		pause: async () => {
+
+			driverPaused = true;
+			await new Promise( ( resolve ) => setTimeout( resolve, 100 ) );
+
+		},
+		resume: () => {
+
+			driverPaused = false;
+			requestAnimationFrame( animate );
+
+		}
+	};
 
 	requestAnimationFrame( animate );
 

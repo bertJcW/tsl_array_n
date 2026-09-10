@@ -46,11 +46,17 @@ describe( 'createGridPressureSolver2', () => {
 
 	} );
 
-	it( 'exposes diagnostics.converged/rejected, starting as null/false before any project() dispatch', () => {
+	it( 'exposes its diagnostics, unset before any project() dispatch', () => {
 
 		const solver = createGridPressureSolver2( { resolution: [ 8, 8 ], gridSpacing: [ 1, 1 ] } );
 
-		expect( solver.diagnostics ).toEqual( { converged: null, rejected: false } );
+		// iterations/stoppedBy are forwarded from the CG solver after each
+		// dispatch -- they are here because the iteration count is what every
+		// performance question about this solver depends on, and it was
+		// guessed at more than once before it was measurable.
+		expect( solver.diagnostics ).toEqual( {
+			converged: null, rejected: false, iterations: null, stoppedBy: null
+		} );
 
 	} );
 

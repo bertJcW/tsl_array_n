@@ -229,3 +229,117 @@ Neutralizing the native rAF loop matters: driving frames manually while the tab 
 lets the browser's own rAF fire concurrently, causing overlapping `animate()` invocations that produce
 a false "stuck" symptom unrelated to actual solver performance (seen once earlier in this project's
 own history, traced via duplicate same-frame console log lines).
+
+---
+
+# Re-measured after the dot product stopped using atomics
+
+The investigation above concluded that its best-supported explanation was
+"the cost is tied to touching the atomic-marked buffer (`dotAccum`, created
+via `.toAtomic()`) as a dependency for a later dispatch", and recommended
+against reattempting the direction without real GPU profiling.
+
+That premise has since expired: `linalg.js`'s dot product is no longer an
+atomic reduction at all. It is a lane-partitioned float reduction into a
+plain storage buffer, with no `.toAtomic()` anywhere in the CG path (see
+`createDotReducer`). So the direction was re-opened, and re-measured from
+scratch on the same reference scene, `examples/15-flow-past-cylinder/`
+(64x64), with the same harness.
+
+## Baseline is no longer 22.2 fps, and the reason matters
+
+**Current: 8.1 fps** (100 frames, 20 warm-up frames discarded), at a mean of
+**12.4 CG iterations per frame, 100% of them converging**, with no guard
+tripping on any frame.
+
+That is 2.7x slower than the 22.2 fps recorded above, and it is not a
+regression to undo. The old number was measured when the dot product was
+still fixed-point, which meant `isDegenerateDot`'s quantization floor
+(`0.5/atomicScale`) aborted CG as soon as `p.Ap` fell below it -- long before
+the solve was done. Roughly half of all frames were returning unconverged,
+leaving real divergence in the velocity field, which is what
+`createDotReducer`'s own comment records and what made a whole free-surface
+scene collapse. The solver is slower now because it finishes.
+
+## A readback costs 3.3 ms here, and does not care how big it is
+
+Measured directly in the page, 50 repetitions each:
+
+| readback | ms |
+|---|---|
+| `b` (one 64x64 field) | 3.29 |
+| `dataU` (a 65x64 face field) | 3.53 |
+
+Pure round-trip latency, essentially independent of payload. There are
+exactly three `toArray()` call sites in the whole solve path -- the two dot
+reducers and the pressure solver's own bad-cell count -- so a 12.4-iteration
+frame is about 26 round trips. At 3.3 ms each that is 86 ms of a 123 ms
+frame, which makes "reduce the number of readbacks" the obvious lever.
+
+## It is not the lever. Fusing two readbacks into one changed nothing.
+
+`r.r` and `r.z` are both read after `updateR`, over the same shape, from
+fields that are final by then. A `createMultiDotReducer` was written to
+compute both in one dispatch and return both from one readback, taking the
+loop from three round trips per iteration to two. The preconditioner had to
+be hoisted above the convergence check to make `z` available in time, which
+costs one wasted V-cycle on the final iteration and nothing otherwise.
+
+**Measured: 8.11 fps, against 8.10 fps before.** Same iteration count, same
+convergence. Removing a third of the loop's synchronisations produced no
+measurable change at all.
+
+That falsifies the naive latency model in the section above it: if 26 round
+trips at 3.3 ms really composed the frame, removing 12 of them could not be
+free. The most likely reconciliation is that a readback inside the loop is
+not paying the standalone 3.3 ms -- it waits on GPU work that is already
+queued, so its cost is `max(queued GPU work, latency)` rather than additive,
+and the queued work is what dominates. The isolated 3.3 ms is a floor
+measured against an idle queue, not the marginal cost of one more readback in
+a busy one.
+
+The fusion was **reverted**: it bought nothing measurable and the hoist costs
+a wasted V-cycle. `state.iterations`/`stoppedBy` and the `?mgLevels=`
+parameter were kept, because without them none of the above is measurable.
+
+## Where the time actually is: dispatches inside the V-cycle
+
+Varying the multigrid depth separates iteration count from per-iteration
+cost:
+
+| `?mgLevels=` | fps | mean iterations | ms per iteration |
+|---|---|---|---|
+| 1 | 6.45 | 22.7 | 6.83 |
+| 2 | 7.10 | 17.4 | 8.07 |
+| 4 | 8.11 | 12.4 | 9.90 |
+
+Deeper is a net win -- the iterations it saves outweigh what each costs --
+but the per-iteration cost climbs with depth, and depth is exactly what
+multiplies the number of small dispatches in the V-cycle (relaxation sweeps,
+restriction, prolongation, per level, twice). Even at one level, where the
+"V-cycle" is plain relaxation, an iteration still costs 6.83 ms.
+
+This lines up with the original investigation's second conclusion -- "every
+extra dispatch costs roughly another 2x, independent of what's inside it" --
+which, unlike its atomic-buffer conclusion, was never invalidated. Dispatch
+count, not synchronisation count and not arithmetic, is the thing to attack.
+
+## What to do next, and what not to
+
+Do not reattempt GPU-resident alpha/beta on the strength of "it removes
+readbacks". That was this round's hypothesis in a cheaper form, it was tested
+directly, and removing readbacks did nothing. GPU-resident alpha/beta would
+also *add* dispatches, which is the one thing both investigations agree is
+expensive.
+
+The promising direction is the opposite one: **fewer, larger dispatches in
+the V-cycle**. Fusing the red and black halves of a relaxation sweep, or a
+whole level's down-sweep, into single kernels attacks the quantity both
+investigations independently identified. That is a real change to
+`multigrid.js` rather than a knob.
+
+And the standing recommendation from the original investigation still holds
+and is still unmet: before another implementation round, add actual GPU-side
+profiling (timestamp queries, or a `chrome://tracing` capture) so that
+"dispatch overhead" stops being an inference from fps deltas and becomes a
+measurement.
