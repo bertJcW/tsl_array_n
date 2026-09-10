@@ -561,6 +561,7 @@ export function createGridFlipSolver2( {
 	dt,
 	gravity = [ 0, -9.81 ],
 	reducedPressure = true,
+	massWeightedTransfer = false,
 	maxDt,
 	flipRatio = 0.97,
 	velocityDamping = 0.02,
@@ -929,6 +930,83 @@ export function createGridFlipSolver2( {
 	const p2gScaleNode = numberOrNode( p2gAtomicScale );
 	const weightEpsilonNode = numberOrNode( weightEpsilon );
 
+	// Allocated here, ahead of the concentration machinery that owns the rest
+	// of it, because P2G below needs to read a particle's own concentration to
+	// weight it by mass. See massWeight()'s own comment.
+	let concentration = null;
+
+	if ( carryConcentration ) {
+
+		concentration = tsl_array_n.arrayN( 'float', maxParticles );
+		concentration.fromArray( new Float32Array( maxParticles ) );
+
+	}
+
+	// ---- particle mass, as a factor of the reference density.
+	//
+	// *** Off by default, and the measurement that says so is the point of
+	// this comment. Do not turn it on expecting an improvement. ***
+	//
+	// The idea, which is correct in its original setting: a finite-volume VOF
+	// solver never advects momentum with the velocity flux. It builds a *mass*
+	// flux from the same limited flux that moved the phase fraction and uses
+	// that for the momentum equation's convection term, so a cell can never
+	// receive momentum that fails to match the mass it received. At a 1:1
+	// density ratio that distinction is invisible; at 1000:1 ignoring it is a
+	// spurious acceleration living exactly on the interface (M. Rudman, Int.
+	// J. Numer. Meth. Fluids 28, 1998).
+	//
+	// The apparent translation to a particle solver is that P2G's
+	// `sum(w v) / sum(w)` -- a *volume*-weighted average -- should become
+	// `sum(m w v) / sum(m w)` once particles stop weighing the same, which is
+	// what `carryConcentration` plus a density ratio creates. That is what
+	// this option does, and it does not work.
+	//
+	// **Measured on real WebGPU**, examples/26-dye-free-surface/ in its
+	// `?layout=layered` configuration with the light component resting on top
+	// of the heavy one -- a stably stratified scene that should barely move:
+	//
+	//     density ratio 1.0 (mass weighting is arithmetically a no-op):
+	//         identical either way, grid max |v| pinned at 0.1635 = g*dt
+	//     density ratio 0.8, volume-weighted (off):
+	//         grid max |v| decays 0.26 -> 0.20 -> 0.16, quiescent
+	//     density ratio 0.8, mass-weighted (on):
+	//         grid max |v| reaches 8.9 and is still 2.5 after 600 frames
+	//
+	// Fifty times more spurious interface motion, from a change that is
+	// supposed to reduce it. The ratio-1.0 row rules out a coding mistake:
+	// the option is exactly the identity there, as the arithmetic requires.
+	//
+	// The reason it does not transfer is structural. A finite-volume solver
+	// has *two* fluxes and uses each where it belongs -- the mass flux carries
+	// momentum, the volumetric flux enforces continuity. A FLIP solver has one
+	// grid velocity doing both jobs, and the pressure projection needs it to
+	// be the volume-averaged one, because incompressibility is a statement
+	// about volume. Mass-weighting it makes `div(u) = 0` constrain the wrong
+	// quantity, and the interface is where the two averages differ most.
+	// Getting the finite-volume benefit here would mean carrying two grid
+	// velocity fields, not reweighting one -- which is a real design, not a
+	// flag, and is not attempted.
+	//
+	// Kept rather than deleted so the experiment can be re-run in one URL
+	// parameter (`?massWeighted=1` in that example) instead of being
+	// rediscovered. Expressed as a factor of the reference density so it is 1
+	// for the reference fluid and the weightEpsilon gate keeps its meaning;
+	// with no density coupling it is exactly 1 and no node is emitted at all.
+	const massWeightingEnabled = massWeightedTransfer && densityCouplingEnabled && carryConcentration;
+
+	function massWeight( p ) {
+
+		if ( ! massWeightingEnabled ) return null;
+
+		const c = clamp( concentration( p ), float( 0 ), float( 1 ) );
+		const rho = densityAtZeroNode.add( densityAtOneNode.sub( densityAtZeroNode ).mul( c ) );
+
+		return rho.div( referenceDensityNode );
+
+	}
+
+
 	// component: 'x' or 'y' -- a plain JS string, branched on once at
 	// kernel-*build* time (not a GPU conditional), producing two
 	// statically-specialized kernels (scatterU only ever reads .x,
@@ -943,8 +1021,14 @@ export function createGridFlipSolver2( {
 				bilinearCoordsAndWeights2( positions( p ), dataOrigin, velocityGrid.gridSpacing, size );
 
 			const corners = [ [ i0c, j0c, w00 ], [ i1c, j0c, w10 ], [ i0c, j1c, w01 ], [ i1c, j1c, w11 ] ];
+			const mass = massWeight( p );
 
-			for ( const [ i, j, w ] of corners ) {
+			for ( const [ i, j, wRaw ] of corners ) {
+
+				// Both accumulators take the same weight, so the finalize
+				// divide is unchanged -- what differs is that the weight is
+				// now a mass rather than a volume. See massWeight().
+				const w = mass ? wRaw.mul( mass ) : wRaw;
 
 				atomicAdd( numerAccum( i, j ), round( value.mul( w ).mul( p2gScaleNode ) ).toInt() );
 				atomicAdd( denomAccum( i, j ), round( w.mul( p2gScaleNode ) ).toInt() );
@@ -1462,15 +1546,12 @@ export function createGridFlipSolver2( {
 	// and predates this feature entirely. The cause was a non-finite
 	// pressure field passing an inert safety check -- see float_guards.js.
 	// Measure before attributing a collapse to a quality knob.
-	let concentration = null;
 	let cellConcentration = null;
 	let concentrationGridPass = null;
 	let concentrationParticlePass = null;
 
 	if ( carryConcentration ) {
 
-		concentration = tsl_array_n.arrayN( 'float', maxParticles );
-		concentration.fromArray( new Float32Array( maxParticles ) );
 
 		cellConcentration = tsl_array_n.arrayN( 'float', cellShape );
 		cellConcentration.fromArray( new Float32Array( cellCount ) );

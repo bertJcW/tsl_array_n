@@ -341,7 +341,7 @@ are specifically about carrying *two fluids*, which is where the remaining
 value is. Same licensing rule throughout: methods only, no source excerpt,
 originals cited where they exist.
 
-## 1. Mass and momentum must be transported by the *same* flux **[open, highest value]**
+## 1. Mass and momentum must be transported by the *same* flux **[tried, rejected by measurement]**
 
 The single most transferable idea in the whole two-phase solver, and the one
 fluxflow currently gets wrong.
@@ -377,6 +377,37 @@ the finalize divides as before.
 This is testable rather than a matter of taste: a density-stratified scene at
 rest should stay at rest, and a volume-weighted P2G will show interface
 velocity that a mass-weighted one does not.
+
+### It was tested, and it is wrong here
+
+Implemented as `massWeightedTransfer` and measured on real WebGPU, using
+`examples/26-dye-free-surface/?layout=layered` with the light component
+resting on the heavy one -- stably stratified, so it should barely move:
+
+| configuration | grid max \|v\| |
+|---|---|
+| ratio 1.0, either setting (mass weighting is arithmetically the identity) | 0.1635 = `g*dt`, flat |
+| ratio 0.8, volume-weighted | decays 0.26 -> 0.20 -> 0.16 |
+| ratio 0.8, mass-weighted | reaches **8.9**, still 2.5 after 600 frames |
+
+Fifty times *more* spurious interface motion, from the change that was
+supposed to remove it. The ratio-1.0 row rules out a coding mistake: the
+option is exactly the identity there, as the arithmetic requires.
+
+The reason the analogy fails is structural, and worth stating because it
+applies to every other finite-volume idea in this document. A finite-volume
+solver has **two** fluxes and uses each where it belongs: the mass flux
+carries momentum, the volumetric flux enforces continuity. A FLIP solver has
+**one** grid velocity doing both jobs, and the pressure projection needs it
+to be the volume-averaged one, because incompressibility is a statement about
+volume. Mass-weighting it makes `div(u) = 0` constrain the wrong quantity,
+and the interface is exactly where the two averages differ most.
+
+Getting the finite-volume benefit in a particle solver would mean carrying
+two grid velocity fields -- one volumetric for the projection, one
+momentum-consistent for the transfer -- which is a real design decision, not
+a flag. Not attempted. The option is kept, defaulting off, so the experiment
+is one URL parameter away rather than something to rediscover.
 
 ## 2. Surface tension, which this port does not have at all **[open]**
 

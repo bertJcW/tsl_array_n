@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>fluxflow — dyed drop into a pool</title>
+	<style>
+		body { margin: 0; font-family: system-ui, sans-serif; background: #16181d; color: #e8e8ea; display: flex; flex-direction: column; align-items: center; gap: 0.75rem; padding: 1.5rem; box-sizing: border-box; }
+		canvas { border: 1px solid #3a3d45; border-radius: 0.25rem; background: #06080c; }
+		#status { font-size: 0.9rem; opacity: 0.85; }
+		.err { color: #f87171; }
+		#perf { font-size: 0.9rem; font-variant-numeric: tabular-nums; background: rgba(20, 21, 24, 0.85); border: 1px solid #3f4148; border-radius: 0.35rem; padding: 0.35rem 0.6rem; }
+		#controls { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; justify-content: center; background: #1f2024; border: 1px solid #3f4148; border-radius: 0.5rem; padding: 0.75rem 1rem; font-size: 0.85rem; }
+		#controls label { display: flex; align-items: center; gap: 0.4rem; white-space: nowrap; }
+		#controls input[type="range"] { width: 130px; }
+		.val { font-variant-numeric: tabular-nums; opacity: 0.8; min-width: 3.2em; }
+		p { max-width: 820px; font-size: 0.85rem; line-height: 1.55; opacity: 0.75; margin: 0; }
+	</style>
+</head>
+<body>
+	<canvas id="out"></canvas>
+	<div id="status">initializing…</div>
+	<div id="perf">fps: --</div>
+	<div id="controls">
+		<label>dye density <input type="range" id="densityRatio" min="0.85" max="1.40" step="0.01" value="1.25" /> <span class="val" id="densityRatioValue">1.25</span></label>
+		<label>mixing <input type="range" id="mixing" min="0" max="0.08" step="0.001" value="0" /> <span class="val" id="mixingValue">0.000</span></label>
+		<button id="reset">reset</button>
+	</div>
+	<p>A dyed drop entering a pool of clear liquid — the classic drop-into-a-liquid
+	experiment, and the reason it is worth having alongside the dam break in
+	<code>examples/26-dye-free-surface/</code>: a dam break is over in about a second and
+	the dye ends as one flat layer, while this keeps producing structure. Three phases,
+	all of them recognisable from the real thing: an <strong>impact crater</strong> with its
+	wall lined in dye, a <strong>Worthington jet</strong> thrown back up as the crater
+	rebounds, and then the dyed mass rolling into a <strong>descending mushroom</strong>.
+	The shape comes from the impact — the drop deposits vorticity and the vorticity rolls
+	the dye up. The slow descent afterwards comes from the density difference alone, acting
+	through the pressure projection; there is no buoyancy force in the solver. Set the dye
+	density to 1.00 and the crater and jet are unchanged while the descent stops, which is
+	the control case.</p>
+	<script type="module" src="./main.js"></script>
+</body>
+</html>

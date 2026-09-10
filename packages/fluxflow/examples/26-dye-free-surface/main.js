@@ -221,6 +221,12 @@ try {
 	// Pressure-solve knobs, overridable per run -- see the `pressure:` option
 	// below for why these two in particular are worth A/B'ing.
 	const densityCouplingOff = new URLSearchParams( location.search ).get( 'nodensity' ) === '1';
+	// `?massWeighted=1` turns on the mass-weighted P2G transfer, which is off
+	// by default because measuring it here is what showed it makes this scene
+	// fifty times *less* quiescent. See grid_flip_solver2.js's massWeight()
+	// for the numbers and for why the finite-volume idea it comes from does
+	// not survive the trip to a particle solver.
+	const massWeightedTransfer = new URLSearchParams( location.search ).get( 'massWeighted' ) === '1';
 	const maxPressureOverride = new URLSearchParams( location.search ).get( 'maxPressure' );
 	const maxIterParam = Number( new URLSearchParams( location.search ).get( 'maxIter' ) ?? 100 );
 	const toleranceParam = Number( new URLSearchParams( location.search ).get( 'tol' ) ?? 1e-5 );
@@ -249,6 +255,7 @@ try {
 		// The largest dt any substep can take, which is what the solver's own
 		// derived pressure bound needs -- see grid_flip_solver2.js's boundDt.
 		maxDt: targetDt,
+		massWeightedTransfer,
 		carryConcentration: true,
 		mixing: mixingUniform(),
 		fade: fadeUniform(),
