@@ -20,6 +20,12 @@ lives in `docs/`.
   two-phase methods read from OpenFOAM, restated as mathematics. OpenFOAM
   is GPL-3.0 and this package is Apache-2.0, so that restatement is a
   licence requirement and not a style choice; see `THIRD-PARTY-NOTICES.md`.
+- [`docs/realtime-fluid-tools-research.md`](docs/realtime-fluid-tools-research.md)
+  -- how TouchDesigner and JangaFX's LiquiGen reach real time, and whether
+  a native GPU API is the reason. It is not: CPU-side command encoding is
+  2.28 ms of an 89.8 ms frame here, so the whole API question is bounded
+  by 2.5%. The gap is ~45 dispatches and no host round trips against ~500
+  and a dozen.
 - [`docs/two-phase-bubbles-research.md`](docs/two-phase-bubbles-research.md)
   -- the earlier bubble research, archived.
 
