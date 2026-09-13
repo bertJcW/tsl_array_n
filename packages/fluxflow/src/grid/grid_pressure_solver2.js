@@ -168,6 +168,12 @@ const DEFAULT_MAX_PLAUSIBLE_PRESSURE = 1e6;
 // own options (e.g. { numberOfLevels: 4 }).
 // options.tolerance/maxIterations/residualCheckInterval: forwarded to the
 // underlying CG solve().
+// options.batchIterations: submit the GPU-resident CG loop's dispatches as one
+// batch per iteration instead of one submission per kernel -- see linalg.js's
+// iteration-batch comment for the measurement (38.8 us per submission, fifteen
+// submissions per iteration before, five after). Mutable at runtime through the
+// returned `settings` object, because a constructor-time choice can only be
+// compared across runs and these scenes drift. Default true.
 // options.atomicScale: accepted and ignored, forwarded only so callers that
 // still pass one keep working. The CG dot product no longer uses a
 // fixed-point encoding at all -- see linalg.js's createDotReducer for why

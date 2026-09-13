@@ -31,6 +31,14 @@ answer, and it is the one that separates these tools from this package:
 | GPU Gems 38 / TouchDesigner-style Jacobi | **~45** | **0** |
 | fluxflow MGPCG (measured) | **502** | 12-14 (was 36-42) |
 
+> **Superseded in part (2026-09-13).** The dispatch count below is an
+> undercount: `profiling.js` only wrapped the kernels built through
+> `buildElementwiseKernel`, and roughly 15% of a frame's dispatches are
+> built with `tsl_array_n.kernel` directly. Counting `renderer.compute()`
+> itself gives ~800 dispatches *and* ~272 submissions per frame, and the
+> closing section of this document has the measurements. The encoding
+> figure stands.
+
 Same hardware, same physics, same API would not close that. It is an
 algorithm difference.
 

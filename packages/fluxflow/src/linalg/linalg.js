@@ -68,6 +68,22 @@
 //    jet/fluid-engine-dev's own `pcg()` as a numerical-robustness
 //    improvement. See RESIDUAL_RECOMPUTE_INTERVAL's own comment below and
 //    ../../THIRD-PARTY-NOTICES.md for the attribution.
+//
+// 7. **One submission per CG iteration.** WebGPU has no equivalent of a
+//    command buffer a caller records many dispatches into at leisure: every
+//    `renderer.compute()` call in three.js's backend is its own command
+//    encoder, its own compute pass and its own queue submit, and one such
+//    call costs about 38.8 us of wall time on the development machine no
+//    matter how much work it carries -- 3 us of that is JavaScript, and 64
+//    dispatches of a real kernel execute on the GPU in 0.052 ms. The
+//    source's per-statement dispatch has no such cost, so the GPU-resident
+//    loop here puts its whole iteration body into one submission and splits
+//    it only where it must: at the readback. Measured 15 submissions per
+//    iteration before, 5 after, dispatch sequence unchanged, worth
+//    1.15x-1.56x per solver step across the four reference scenes. Both
+//    forms (incremental residual and periodic recompute) are resolved at
+//    construction and chosen per call, so the two can be compared inside one
+//    run; the switch is `settings.batchIterations`.
 
 import * as tsl_array_n from 'tsl_array_n';
 import { float, Loop, If } from 'three/tsl';
@@ -75,16 +91,17 @@ import { instrumentDispatch, profileBatch } from '../profiling.js';
 import { isNonFinite, isNonFiniteOrAbove } from '../float_guards.js';
 
 // Fixed-point scale for encoding a float product as an atomically-summable
-// int32 -- see decision 1 above. Too small loses precision (residuals near
-// `tol` can round to the same integer and stall convergence); too large
-// risks int32 overflow once summed over many grid cells (int32 range is
-// about +/-2.1e9). 65536 (2^16) is a reasonable default for O(1)-magnitude
-// fields; tune via the `atomicScale` option for your own problem's actual
-// value range.
-// Exported so other GPU-atomic-reduction primitives (e.g. reduction.js's
-// max-magnitude reducer, used by the CFL/adaptive-timestep module) can
-// share the same default fixed-point scale/tuning convention instead of
-// duplicating it.
+// int32. Too small loses precision; too large risks int32 overflow once
+// summed over many grid cells (int32 range is about +/-2.1e9). 65536 (2^16)
+// is a reasonable default for O(1)-magnitude fields.
+//
+// *** The CG dot product no longer uses this. *** See decision 1 above:
+// createDotReducer is a lane-partitioned float reduction now, so there is no
+// quantization step to tune and the `atomicScale` option is
+// accepted-and-ignored. This constant survives for the reducers that still
+// ride on WebGPU atomics -- reduction.js's max-magnitude reducer, used by the
+// CFL/adaptive-timestep module -- which share its convention instead of
+// duplicating it, and that is why it is exported.
 export const DEFAULT_ATOMIC_DOT_SCALE = 65536;
 
 // jet/fluid-engine-dev's own `pcg()` (include/jet/detail/cg-inl.h, MIT

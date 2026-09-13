@@ -424,7 +424,9 @@ investigations both concluded "dispatch count is what costs" *by inference
 from frame times, never measured*, and both said the next step was real
 instrumentation.
 
-- 502 dispatches per frame on a 64x64 grid.
+- 502 dispatches per frame on a 64x64 grid **-- an undercount; the true figure
+  is ~800 dispatches, and alongside them ~272 `renderer.compute()` calls, which
+  turned out to be the thing that mattered. See the Performance section.**
 - **CPU-side encoding: 2.28 ms of an 89.8 ms frame.** Encoding is not the
   bottleneck, which retires dispatch fusion as a direction.
 - `cg-dot` runs three times per CG iteration -- `pAp` for alpha, `r.r` for

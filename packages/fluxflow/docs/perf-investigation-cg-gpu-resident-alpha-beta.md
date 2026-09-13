@@ -1027,7 +1027,8 @@ problem visible. The grid is 64x64. A V-cycle is about 40 dispatches over
 The profiler, on the uncapped baseline:
 
 - 502 dispatches per frame, 420 of them inside the V-cycle's single batched
-  submission
+  submission **-- an undercount, and the submission count beside it was never
+  taken at all; see the closing section**
 - **CPU-side encoding: 2.28 ms, 2.5% of an 89.8 ms frame**
 
 Encoding is not the bottleneck, which retires dispatch-fusion as a
@@ -1298,7 +1299,9 @@ iteration, and the section above measured what that trade costs: the extra
 iterations give it all back. So this direction is finished at roughly
 1.2x, and the next question is a different one -- the frame still spends
 about 500 dispatches on a 64x64 grid, and at 2.28 ms of CPU encoding for
-all of them, whatever the rest of that time is, it is not the host.
+all of them, whatever the rest of that time is, it is not the host. **The
+closing section answers this: ~800 dispatches and ~272 submissions, ~38.8 us
+per submission, and about 1% of the frame spent on the GPU.**
 
 
 # Re-measuring the two earlier optimisations, paired
