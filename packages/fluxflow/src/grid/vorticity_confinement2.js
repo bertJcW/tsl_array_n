@@ -41,7 +41,7 @@
 // extremum) -- mantaflow's own KnConfForce calls normalize(grad) with no
 // visible zero-check. This port has repeatedly added a guard beyond what
 // a reference does for exactly this class of risk (linalg.js's own
-// isDegenerateDot, grid_math.js's own bilinearGradientAtPosition2 fix,
+// isDegenerateDenominator, grid_math.js's own bilinearGradientAtPosition2 fix,
 // grid_outflow_solver2.js's own EXTRAPOLATED_VELOCITY_CLAMP) -- same
 // treatment here: below GRADIENT_EPSILON, the confinement force is zero
 // at that cell instead of computing a NaN direction (also physically

@@ -373,6 +373,9 @@ try {
 
 	window.__fluxflowProbe = {
 		flip, velocityGrid,
+		// One simulation step, for a driver that has paused the rAF loop --
+		// see examples/16-karman-vortex-street/'s probe comment.
+		step: () => flip.onAdvanceTimeStep(),
 		// Measurement handle only -- see 16-karman-vortex-street's own probe
 		// comment. The pressure solver's runtime settings live at
 		// flip.pressureSolver.settings; the renderer is here so a driver can

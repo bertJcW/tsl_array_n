@@ -179,7 +179,7 @@ const DEFAULT_MAX_PLAUSIBLE_PRESSURE = 1e6;
 // closed-domain test case measured divergence in the 0.01-0.05 range) --
 // too coarse a scale for the actual problem risks the dot products the CG
 // solver depends on quantizing down toward 0 more often than they should,
-// which isDegenerateDot's own guard now catches safely (stopping the solve
+// which isDegenerateDenominator's own guard now catches safely (stopping the solve
 // early) instead of letting it corrupt pressure with Infinity/NaN, but
 // stopping early on every solve still means the pressure never actually
 // converges -- tune this if diagnostics (e.g. examples/14-stable-fluids/'s
@@ -191,7 +191,7 @@ const DEFAULT_MAX_PLAUSIBLE_PRESSURE = 1e6;
 // note on this). diagnostics.converged: boolean, updated after every
 // project()-dispatch call -- see its own declaration below for what a
 // `false` here can mean (not necessarily a bug on its own; see
-// linalg.js's isDegenerateDot). diagnostics.rejected: boolean, true
+// linalg.js's isDegenerateDenominator). diagnostics.rejected: boolean, true
 // whenever this project() call's own circuit breaker discarded a
 // pressure update that looked implausible (see dispatch()'s own use of
 // maxPlausiblePressure) -- pressure keeps its last known-good value on
@@ -301,7 +301,7 @@ export function createGridPressureSolver2( {
 	// dispatcher is void); a caller logging b/pressure each frame (e.g.
 	// examples/14-stable-fluids/'s own summarize()/fmt() readout) can now also
 	// see whether the solve genuinely converged or bailed out early -- either
-	// hitting maxIterations, or via linalg.js's own isDegenerateDot guard
+	// hitting maxIterations, or via linalg.js's own isDegenerateDenominator guard
 	// (see that function's comment: the search direction ran into the
 	// operator's null space, or the atomic dot product's fixed-point
 	// quantization rounded a denominator down to 0 -- both stop the iteration

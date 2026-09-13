@@ -155,7 +155,7 @@ import { createOutflowPressureDirichlet2 } from './sdf_inflow_outflow2.js';
 // fix (this guard alone wouldn't have produced correct *physics*, just
 // stopped it from reaching float32's own overflow range) -- this constant
 // is a second, independent layer, the same spirit as this port's own
-// isDegenerateDot guard in linalg.js: a value this method should never
+// isDegenerateDenominator guard in linalg.js: a value this method should never
 // legitimately produce is far more likely to be a numerical runaway than
 // a real answer, so clamp rather than let it propagate into next frame's
 // pressure divergence and corrupt the entire coupled solve.

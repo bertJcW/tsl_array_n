@@ -637,6 +637,12 @@ try {
 	let simTime = 0;
 	let lastNumSubSteps = 1; // read by updatePerf() below; see animate()'s own adaptive-dt branch
 
+	// See examples/20-flip-dam-break/'s own hook for why a measurement has to
+	// be able to stop this loop: the rAF callbacks are paced by the browser,
+	// which puts a floor under every frame time and hides differences smaller
+	// than a frame.
+	let driverPaused = false;
+
 	// Rolling average over the last N real-world frame times -- answers
 	// "is the flow's apparent slowness a chosen physical speed or a GPU
 	// throughput limit" directly: `targetDt` (the fixed simulated-seconds-
@@ -687,6 +693,8 @@ try {
 	}
 
 	async function animate() {
+
+		if ( driverPaused ) return;
 
 		updatePerf();
 
@@ -788,7 +796,27 @@ try {
 	// CG batching switch lives; the other two scenes already expose their flip
 	// solver, whose own `pressureSolver` is the same object. Nothing here
 	// changes what the scene does -- it is a name, not a behaviour.
-	window.__fluxflowProbe = { solver, velocityGrid, adaptiveTimeStep, renderer };
+	window.__fluxflowProbe = {
+		solver, velocityGrid, adaptiveTimeStep, renderer,
+		// One simulation step, which is `solver.onAdvanceTimeStep()` and not
+		// the whole rAF frame: the frame also runs `adaptiveTimeStep.update()`
+		// (a readback) and the vorticity-confinement pass, and neither is what
+		// a submission-batching comparison is about. Stepping this directly
+		// keeps both arms of such a comparison on the identical sequence.
+		step: () => solver.onAdvanceTimeStep(),
+		pause: async () => {
+
+			driverPaused = true;
+			await new Promise( ( resolve ) => setTimeout( resolve, 100 ) );
+
+		},
+		resume: () => {
+
+			driverPaused = false;
+			requestAnimationFrame( animate );
+
+		}
+	};
 
 	requestAnimationFrame( animate );
 

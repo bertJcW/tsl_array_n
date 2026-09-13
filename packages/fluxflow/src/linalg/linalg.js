@@ -732,7 +732,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	// residual is a direct, *already computed* (no extra GPU work) signal
 	// that x itself likely just got corrupted this call, even in cases
 	// (confirmed on real hardware) where the loop ran to maxiter without
-	// ever tripping isDegenerateDot or either restart guard below --
+	// ever tripping isDegenerateDenominator or either restart guard below --
 	// neither guard is a substitute for a caller-side check on the actual
 	// outcome. See grid_pressure_solver2.js's own use of this for exactly
 	// that: reverting a frame's pressure update entirely if this comes

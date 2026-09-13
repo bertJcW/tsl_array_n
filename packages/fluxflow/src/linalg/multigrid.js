@@ -995,7 +995,7 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 		// whether pre- or post-smoothing, ran color 0 then color 1, always
 		// the same order. An asymmetric preconditioner doesn't announce
 		// itself as "wrong" the way a singular operator does (no exact
-		// zero anywhere for isDegenerateDot to catch) -- it just
+		// zero anywhere for isDegenerateDenominator to catch) -- it just
 		// occasionally produces a `z` misaligned enough with `r` to flip
 		// oldRZ's sign relative to its usual (consistently negative, for
 		// this file's own negative-semi-definite `A`) behavior, and once
