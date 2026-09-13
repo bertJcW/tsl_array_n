@@ -765,13 +765,27 @@ compared across runs, and these scenes drift enough that only an in-run paired
 comparison means anything. `settings.batchIterations` on the pressure solver is
 the switch; it is on by default.
 
-What that is *worth* is a separate question, and the honest answer so far is
-"fewer submissions, no measurable frame time": removing ~20 submissions per
-frame did not show up above the noise on any of the four scenes measured, and
-in a real frame most of that 38.8 us overlaps with GPU work already queued
-rather than adding to the frame. The criterion for this change is therefore
-"same dispatches, half the submissions, frame time within noise", not a
-speedup. The performance document's closing section has the numbers.
+What that is *worth* is a separate question, and the first attempt to answer it
+got the answer wrong. Removing ~20 submissions per frame did not show up above
+the noise on any of the four scenes measured, so this section originally said
+"same dispatches, half the submissions, frame time within noise, not a speedup".
+
+**That was a measurement artifact, and the correction runs the other way.** The
+frames being measured are not the unit this library owns: in these drivers a
+rendered frame carries a fraction of a solver step (example 28: roughly 27
+submissions per frame against 359 per step), and the frame time sat on the
+60 Hz floor regardless. Measuring the *step* instead -- driver paused, arms
+alternating every step so both walk the identical sequence -- gives:
+
+| scene | batched ms/step | unbatched ms/step | speedup |
+| --- | --- | --- | --- |
+| 15 flow-past-cylinder | 16.06 | 24.75 | **1.54x** |
+| 16 karman-vortex-street | 24.53 | 28.32 | **1.15x** |
+| 20 flip-dam-break | 21.81 | 34.00 | **1.56x** |
+| 28 drop-into-pool | 55.14 | 82.87 | **1.50x** |
+
+The performance document's closing section has the method, the per-dispatch
+normalisation and the caveats.
 
 ### `isDegenerateDenominator` -- guarding against a degenerate CG denominator
 

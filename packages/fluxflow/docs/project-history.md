@@ -465,15 +465,27 @@ dispatch count unchanged, and submissions per dispatch halved on examples
 which is Debugging #11 above: that one was a correctness bug, not a performance
 one.
 
-**The frame-time payoff is not established, and that is the result.** Removing
-~20 submissions per frame did not show up above the noise on any of the four
-scenes measured (means differing by +-3%, in both directions). The likely
-reason is that 38.8 us is the cost of a submission on an *idle* queue, and in a
-real frame most of it overlaps with GPU work already queued. So the criterion
-for this change is "same dispatches, half the submissions, frame time within
-noise" rather than a speedup, and a frozen-workload measurement -- driver
-paused, both arms stepping an identical sequence, GPU timestamps per arm -- is
-what would settle it either way.
+**The frame-time payoff was reported as not established, and that report was
+wrong.** Removing ~20 submissions per frame did not show up above the noise on
+any of the four scenes measured (means differing by +-3%, in both directions),
+and the conclusion drawn was "same dispatches, half the submissions, frame time
+within noise".
+
+A frozen-workload measurement -- driver paused, arms alternating every *step*
+so both walk the identical sequence -- says otherwise:
+
+| scene | batched ms/step | unbatched ms/step | speedup | submissions removed/step |
+| --- | --- | --- | --- | --- |
+| 15 flow-past-cylinder | 16.06 | 24.75 | **1.54x** | 232 |
+| 16 karman-vortex-street | 24.53 | 28.32 | **1.15x** | 169 |
+| 20 flip-dam-break | 21.81 | 34.00 | **1.56x** | 284 |
+| 28 drop-into-pool | 55.14 | 82.87 | **1.50x** | 764 |
+
+The earlier number was a measurement artifact of two things at once: a rendered
+frame is not a solver step in these drivers (example 28's frame carries ~27
+submissions where its step carries 359), and the frame time was pinned to the
+60 Hz floor. **The criterion belongs on the step**, which is the unit the
+library owns.
 
 ## Testing
 

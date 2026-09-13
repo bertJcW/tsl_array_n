@@ -1448,3 +1448,51 @@ submissions, frame time within noise"**, and it passes that. Settling the
 frame-time question needs a frozen-workload measurement: driver paused, both
 arms stepping an identical sequence, GPU timestamps per arm rather than wall
 time. That is the next measurement, not the next implementation.
+
+# That measurement, done: 1.15x - 1.56x per solver step
+
+It changes the conclusion, so the previous section is left standing above and
+corrected here rather than rewritten.
+
+`measure_frozen.js`: the driver loop is paused (no rAF pacing, no drawing, no
+second stepper), and the two arms **alternate every step** rather than every
+block. Per-step alternation is what makes this valid -- the two forms are
+numerically identical, so alternating every step puts both arms on the *same*
+state sequence and therefore on the same workload, which the per-arm dispatch
+and CG-iteration counts then confirm. `renderer.compute` is counted per arm.
+
+| scene | method | batched ms/step | unbatched ms/step | speedup | submissions removed/step | dispatches/step |
+| --- | --- | --- | --- | --- | --- | --- |
+| 15 flow-past-cylinder | FLIP | 16.06 | 24.75 | **1.54x** | 232 | 1416 / 1434 |
+| 16 karman-vortex-street | grid | 24.53 | 28.32 | **1.15x** | 169 | 2416 / 2430 |
+| 20 flip-dam-break | FLIP | 21.81 | 34.00 | **1.56x** | 284 | 1800 / 1746 |
+| 28 drop-into-pool | two-phase FLIP | 55.14 | 82.87 | **1.50x** | 764 | 3934 / 4159 |
+
+Normalised per dispatch, which removes the residual workload drift: 1.52x,
+1.15x, 1.61x, 1.42x -- the same picture.
+
+## Why the frame harness could not see it
+
+Because a *frame* is not a *step* in these drivers, and the frames were on the
+vsync floor. Example 28: 16.6 ms per rendered frame carrying ~27 submissions,
+against 359 submissions per solver step taking 55 ms -- so a frame held roughly
+a thirteenth of a step's work and the median was the 60 Hz floor either way.
+The change is a large fraction of the solver step and a small fraction of the
+rendered frame, and the frame harness could only see the second.
+
+That also repairs the interpretation two sections above: "no measurable frame
+time" was true of the frames that were measured and was not evidence about the
+solver. It is also why the 38.8 us figure from the submission microbenchmark had
+appeared not to transfer -- it does, per step; the frame simply contained too
+little of the step for it to show.
+
+## One caveat: the workload matched to within 6%, not exactly
+
+Dispatch counts differ between arms by 0.6-5.7% and CG iterations by up to 3%,
+because the dot products are GPU atomic reductions whose summation order is
+non-deterministic: `newRTr > oldRTr` occasionally takes a different branch in
+one arm than the other, so the arms' iteration counts drift. The drift goes both
+ways (example 20's batched arm did 3% *more* work and still won 1.56x; example
+28's did 5.7% *less*), and the per-dispatch normalisation agrees with the raw
+ratio, so the conclusion holds -- but "identical sequence" is exact only up to
+that reordering.
