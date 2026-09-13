@@ -5,19 +5,28 @@
 // for why a plain update(dt) call alone doesn't move a collider that's
 // already been baked into a built kernel graph.
 //
-// SDFRigidBodyCollider2.velocityAt(point) bakes currentPosition/currentAngle
-// into the returned TSL graph at kernel-*build* time -- so every frame here,
-// *before* calling flip.onAdvanceTimeStep(), this example calls
-// rigidCollider.update(dt) (moves the JS-side position/angle, re-rasterizes
-// the SDF texture) and then flip.boundarySolver.setCollider(rigidCollider,
-// ...) (forces every collider-dependent kernel to rebuild against the new
-// pose -- grid_blocked_boundary_condition_solver2.js's own pre-existing
-// mechanism, built for occasional collider swaps, never before exercised for
-// *continuous* every-frame motion in this project). This is the specific new
-// risk this example exists to test on real hardware -- both correctness
-// (does the paddle actually behave right frame to frame) and the absence of
-// a performance regression from rebuilding kernel graphs every single frame
-// over an extended run (watch the fps counter, not just the visuals).
+// *** This example is why the collider's pose became live data. ***
+//
+// SDFRigidBodyCollider2.velocityAt(point) used to bake currentPosition/
+// currentAngle into the returned TSL graph at kernel-*build* time, so a collider
+// that moved needed every collider-dependent kernel rebuilt against the new pose
+// every frame -- grid_blocked_boundary_condition_solver2.js's pre-existing
+// mechanism, built for occasional collider swaps and never before exercised for
+// *continuous* motion. Measured here, that rebuild meant 28 freshly compiled
+// compute pipelines per step and 351.5 ms per step, against 36.1 ms once the
+// kernels are kept: 93% of the frame, in a scene the browser could therefore only
+// run at about 2.5 fps.
+//
+// The fix is the one sdf_collider2.js's own header comment had already
+// prescribed -- position/velocity as tsl_array_n array0 fields written by
+// update() -- so a kernel built once reads the current pose per dispatch. This
+// example now moves the collider (update(dt), which re-rasterises the SDF and
+// publishes the pose) and then calls colliderMoved(), which keeps the kernels
+// and re-derives the block marker.
+//
+// `colliderRebuildEveryStep` on __fluxflowProbe restores the old
+// setCollider()-every-frame call, as the control arm of the measurement that
+// established those numbers.
 //
 // *** Confirmed directly: the every-frame kernel rebuild above, not particle
 // count or grid resolution, is what dominates this scene's own per-frame
@@ -404,8 +413,17 @@ try {
 		updatePerf();
 
 		// The genuinely new part -- see this file's own header comment.
+		//
+		// The collider only *moved*: its own update() re-rasterises the SDF and
+		// publishes the new pose, so the boundary solver keeps the kernels it
+		// already has and re-derives the block marker. This used to be
+		// setCollider() every frame purely because velocityAt() baked the pose
+		// into the graph at build time -- now that the pose is live (sdf_collider2.js's
+		// own pose comment), that rebuild is not needed, and it was worth
+		// 351.5 -> 36.1 ms per step plus 28 compute pipelines compiled per step
+		// down to none.
 		rigidCollider.update( dt );
-		flip.boundarySolver.setCollider( rigidCollider, [ NX, NY ], [ 1, 1 ], [ 0, 0 ] );
+		flip.boundarySolver.colliderMoved();
 
 		await flip.onAdvanceTimeStep();
 
@@ -457,12 +475,13 @@ try {
 		// boundary solver runs the collider branch of constrainVelocity().
 		renderer,
 		// `true` hands the solver the collider again every step -- the
-		// general-case call, which rebuilds every collider-dependent kernel and
-		// (measured) costs 351.5 ms per step here against 44.3 ms for the call
-		// below, because three.js caches compute pipelines by node and a rebuild
-		// produces new ones. Kept as the control arm of that measurement, and as
-		// the reminder of what the general call is for: it is what a scene must
-		// use when the collider it passes is a *different* collider.
+		// general-case call, which rebuilds every collider-dependent kernel:
+		// measured 351.5 ms per step against 36.1 ms for the call below, because
+		// three.js caches compute pipelines by node and a rebuild produces new
+		// ones. Kept as the control arm of that measurement, and as the reminder
+		// of what the general call is for: it is what a scene must use when the
+		// collider it passes is a *different* collider, or when anything the
+		// kernels capture at build time has changed.
 		colliderRebuildEveryStep: false,
 		step: async () => {
 

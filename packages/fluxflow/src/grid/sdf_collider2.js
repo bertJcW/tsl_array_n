@@ -10,6 +10,7 @@
 // there's no shapely or any "geometry object" involved at all -- just plain
 // vertex arrays).
 
+import * as tsl_array_n from 'tsl_array_n';
 import { vec2 } from 'three/tsl';
 import { createCellCenteredScalarGrid2 } from './grid_data2.js';
 import { collocatedValueAtPosition2, bilinearGradientAtPosition2 } from './grid_math.js';
@@ -154,22 +155,28 @@ export function createSDFStaticCollider2( resolutionX, resolutionY, gridSpacingX
 // (updating currentPosition/currentAngle) is a plain per-frame CPU
 // accumulation, where a node would serve no purpose.
 //
-// A known architectural limitation (not a new problem introduced by this
-// port -- a boundary shared by both Taichi's and TSL's "build the graph
-// once, dispatch repeatedly" execution model): if some future kernel (e.g.
-// grid_blocked_boundary_condition_solver2.js's _markAndProjectU or similar)
-// calls this velocityAt(point) while it's being built, the resulting TSL
-// node graph bakes in whatever currentPosition/currentAngle/linearVelocity
-// were at that moment as constants -- a later update(dt) that changes those
-// values will not be picked up by a kernel that's already been built. If
-// collider motion that genuinely changes every frame (without rebuilding
-// the kernel) is ever actually needed, position/velocity should become a
-// tsl_array_n array0/uniform (updated via .fromArray()/.value=) instead of
-// being captured as a plain JS closure variable the way it is now -- the
-// current implementation is a faithful port of this same limitation that
-// exists on both the Python/Taichi side of the source, not a new defect,
-// but it's the piece that would need redesigning if a genuinely
-// frame-by-frame moving collider is built on top of this later.
+// *** The pose is live data. It used to be a build-time constant. ***
+//
+// velocityAt(point) read currentPosition/currentAngle -- plain JS closure
+// variables -- while a kernel was being *built*, so the returned TSL graph baked
+// that moment's pose in as constants and any kernel built before a later
+// update(dt) kept the old pose for good. That was the limitation this comment
+// used to describe: a boundary shared with the Python/Taichi side of the source
+// and with any "build the graph once, dispatch repeatedly" model. It mattered
+// as soon as a collider actually moved every frame -- the one user of that
+// pattern had to rebuild every collider-dependent kernel per frame, which cost
+// 28 freshly compiled compute pipelines per step.
+//
+// Fixed exactly the way this comment prescribed: pose and velocities live in
+// tsl_array_n array0 fields, update() publishes them with fromArray(), and
+// velocityAt() reads them per dispatch. A kernel built once therefore sees the
+// current pose, and a collider that merely *moved* needs no rebuild --
+// grid_blocked_boundary_condition_solver2.js's colliderMoved() keeps the kernels
+// and re-derives only the block marker. Measured on
+// examples/23-flip-moving-collider/ (a collider moving every frame): 351.5 ms per
+// step against 36.1 ms, 28 pipelines per step against none, and the page's own
+// fps readout 2.5 -> 29.5. Kernels kept and kernels rebuilt were then compared
+// directly and are bit-identical.
 export function createSDFRigidBodyCollider2(
 	geometryPolygon,
 	resolutionX, resolutionY, gridSpacingX, gridSpacingY, originX, originY,
@@ -183,6 +190,49 @@ export function createSDFRigidBodyCollider2(
 
 	let currentPosition = polygonCentroid( geometryPolygon );
 	let currentAngle = 0;
+
+	// *** The pose is live data, not a build-time constant. ***
+	//
+	// velocityAt() used to read `currentPosition`/`currentAngle` -- plain JS
+	// closure variables -- while a kernel was being *built*, so the returned TSL
+	// graph carried that moment's pose as constants. Every kernel built before a
+	// later update(dt) kept the old pose for good, which forced anyone using a
+	// *moving* collider to rebuild its kernels every frame.
+	// examples/23-flip-moving-collider/ did exactly that, and it cost 28 freshly
+	// compiled compute pipelines per step: measured 351.5 ms per step against
+	// 36.1 ms with the kernels kept.
+	//
+	// This file's own header comment prescribed the fix before any of that was
+	// measured: "position/velocity should become a tsl_array_n array0/uniform
+	// (updated via .fromArray()) instead of being captured as a plain JS closure
+	// variable". These are that. update() publishes them, velocityAt() reads them
+	// per dispatch, so a kernel built once sees the current pose -- and
+	// grid_blocked_boundary_condition_solver2.js's colliderMoved() is then
+	// correct rather than merely fast.
+	//
+	// The JS numbers stay the source of truth (update() does plain arithmetic on
+	// them and re-rasterises the SDF from them); these five scalars are the copy
+	// the GPU reads. The collider's returned `linearVelocity` / `angularVelocity`
+	// properties are unchanged and are still build-time values -- they are
+	// constructor arguments, so they only vary if a caller mutates its own array
+	// afterwards, which was never a supported pattern.
+	const poseX = tsl_array_n.array0( 'float' );
+	const poseY = tsl_array_n.array0( 'float' );
+	const linVelX = tsl_array_n.array0( 'float' );
+	const linVelY = tsl_array_n.array0( 'float' );
+	const angularVel = tsl_array_n.array0( 'float' );
+
+	function publishPose() {
+
+		poseX.fromArray( new Float32Array( [ currentPosition[ 0 ] ] ) );
+		poseY.fromArray( new Float32Array( [ currentPosition[ 1 ] ] ) );
+		linVelX.fromArray( new Float32Array( [ linearVelocityXY[ 0 ] ] ) );
+		linVelY.fromArray( new Float32Array( [ linearVelocityXY[ 1 ] ] ) );
+		angularVel.fromArray( new Float32Array( [ angularVelocity ] ) );
+
+	}
+
+	publishPose();
 
 	collider.addPolygon( geometryPolygon );
 
@@ -209,14 +259,21 @@ export function createSDFRigidBodyCollider2(
 
 		collider.addPolygon( posed );
 
+		// Published together with the re-rasterised SDF: a kernel built once
+		// reads the pose at dispatch time, so this is what makes the move
+		// visible without rebuilding anything. Both are pending uploads, and a
+		// pending upload lands before the next dispatch that begins a pass.
+		publishPose();
+
 	}
 
 	// Rigid-body kinematics: v(point) = linearVelocity + angularVelocity x (point - currentPosition)
 	// In 2D, the cross product angularVelocity x r is just angularVelocity * (-r.y, r.x)
 	function velocityAt( point ) {
 
-		const r = point.sub( vec2( currentPosition[ 0 ], currentPosition[ 1 ] ) );
-		return linearVelocityNode.add( vec2( r.y.negate(), r.x ).mul( angularVelocity ) );
+		// Read per dispatch, from the published pose -- see its own comment.
+		const r = point.sub( vec2( poseX(), poseY() ) );
+		return vec2( linVelX(), linVelY() ).add( vec2( r.y.negate(), r.x ).mul( angularVel() ) );
 
 	}
 

@@ -41,17 +41,16 @@
 	<div id="controls">
 		<label>velocity damping <input type="range" id="velocityDamping" min="0" max="0.1" step="0.002" value="0.02" /> <span id="velocityDampingValue">0.020</span></label>
 	</div>
-	<p>grid.createGridFlipSolver2's new options.collider, tested against a <em>moving</em> collider: one
+	<p>grid.createGridFlipSolver2's options.collider, tested against a <em>moving</em> collider: one
 	SDFRigidBodyCollider2 (sdf_collider2.js) translating and rotating through an initially-resting pool
-	of fluid. SDFRigidBodyCollider2.velocityAt() bakes its own position/angle into the built kernel
-	graph at *build* time (a documented limitation) -- so each frame this example calls
-	rigidCollider.update(dt) then flip.boundarySolver.setCollider(rigidCollider, ...) *before*
-	flip.onAdvanceTimeStep(), forcing a fresh rebuild of every collider-dependent kernel with the
-	now-current pose. This exact per-frame-rebuild pattern already existed in
-	grid_blocked_boundary_condition_solver2.js (built for occasional collider swaps) but had never
-	before been exercised for continuous every-frame motion in this project -- watch the fps counter
-	for any stability regression over an extended run, not just whether the paddle visibly displaces
-	the fluid without tunneling through it.</p>
+	of fluid. Each frame this example calls rigidCollider.update(dt) -- which moves the pose, re-rasterizes
+	the SDF and publishes the pose as live data -- and then flip.boundarySolver.colliderMoved(), which
+	re-derives the block marker and keeps the kernels it already has. It used to call setCollider()
+	instead, rebuilding every collider-dependent kernel every frame, because velocityAt() baked the
+	collider's pose into the graph at kernel-*build* time; that pose is live now (tsl_array_n array0
+	fields published by update()), so the rebuild is no longer needed -- and it was worth 351.5 ms per
+	step against 36.1 ms, i.e. 28 freshly compiled compute pipelines per step down to none. The page's
+	own fps counter is the number to watch.</p>
 	<script type="module" src="./main.js"></script>
 </body>
 </html>

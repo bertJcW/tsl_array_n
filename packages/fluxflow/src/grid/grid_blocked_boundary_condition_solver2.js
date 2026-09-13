@@ -472,6 +472,15 @@ export function createGridBlockedBoundaryConditionSolver2(
 
 	}
 
+	// *** Precondition: nothing the kernels captured at build time has changed. ***
+	//
+	// Motion satisfies that now: the collider's pose is live data
+	// (sdf_collider2.js's own comment on it), so kernels built earlier read the
+	// current pose per dispatch. What does *not* satisfy it is a different
+	// collider object, a change to the collider's own construction parameters
+	// (its linear or angular velocity), or different grid parameters -- those
+	// need setCollider(), which rebuilds.
+	//
 	// The collider already bound has changed its own data -- it moved, or its
 	// shape was re-added -- without changing identity or the grid parameters.
 	// Re-derives the block marker and keeps the kernels; see setCollider's own

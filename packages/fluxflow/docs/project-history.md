@@ -349,7 +349,26 @@ parameters, and still rebuilds the block marker (which does depend on where the
 collider is now). Which of the two calls a scene uses is the scene's decision,
 because only it knows whether it is re-binding the same collider
 (`colliderMoved()`) or a different one (`setCollider()`, which always rebuilds);
-a library that guesses has to guess wrong on one of the two. The two were then
+a library that guesses has to guess wrong on one of the two. > **Correction, same session, after the pose went live.** The claim above is
+> too strong and the measurement behind it was blind in a specific way.
+> `SDFRigidBodyCollider2.velocityAt()` baked `currentPosition`/`currentAngle` into
+> the graph at *build* time, and the boundary solver calls `velocityAt` in eight
+> places -- so keeping the kernels gave a moved collider a **stale velocity**.
+> Example 23 rebuilds every frame for exactly that reason, which is why it was
+> the one scene that must not have used `colliderMoved()` as it then stood. The
+> test above missed it because it ran a `setCollider()` rebuild *before* taking
+> the "old kernels" snapshot, so both sides carried the same pose.
+>
+> Fixed at the source instead: the pose is live data now (`tsl_array_n.array0`
+> fields published by `update()`), which is what `sdf_collider2.js`'s own
+> `createSDFRigidBodyCollider2` comment had prescribed from the start. Re-measured
+> with the ordering corrected, kernels kept and kernels rebuilt are bit-identical
+> **for a translating collider too** (a translating *and* rotating move, then
+> `colliderMoved()` before any rebuild against `setCollider()`: 0 difference on
+> both velocity components), and example 23's page went from **2.5 fps to
+> 29.5 fps** on the very page a user opens.
+
+The two were then
 measured against each other -- snapshot the velocity field, run one call, restore
 the input, run the other, compare -- with each call at the same position in its
 own sequence: **bit-identical, 0 difference**. (An earlier version of that test

@@ -1613,6 +1613,25 @@ that leftover scratch state cannot masquerade as a difference:
 | `setCollider()` twice in a row | **0** |
 | `colliderMoved()` against `setCollider()` | **0** |
 
+> **Correction, same session, after the pose went live.** The claim above is
+> too strong and the measurement behind it was blind in a specific way.
+> `SDFRigidBodyCollider2.velocityAt()` baked `currentPosition`/`currentAngle` into
+> the graph at *build* time, and the boundary solver calls `velocityAt` in eight
+> places -- so keeping the kernels gave a moved collider a **stale velocity**.
+> Example 23 rebuilds every frame for exactly that reason, which is why it was
+> the one scene that must not have used `colliderMoved()` as it then stood. The
+> test above missed it because it ran a `setCollider()` rebuild *before* taking
+> the "old kernels" snapshot, so both sides carried the same pose.
+>
+> Fixed at the source instead: the pose is live data now (`tsl_array_n.array0`
+> fields published by `update()`), which is what `sdf_collider2.js`'s own
+> `createSDFRigidBodyCollider2` comment had prescribed from the start. Re-measured
+> with the ordering corrected, kernels kept and kernels rebuilt are bit-identical
+> **for a translating collider too** (a translating *and* rotating move, then
+> `colliderMoved()` before any rebuild against `setCollider()`: 0 difference on
+> both velocity components), and example 23's page went from **2.5 fps to
+> 29.5 fps** on the very page a user opens.
+
 Bit-identical. An earlier version of that test compared the two calls at
 different positions in the sequence and reported differences of 0.5-0.76 -- which
 was `constrainVelocity`'s own scratch state (its `uTemp`/`validA` fields), not
