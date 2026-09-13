@@ -24,11 +24,23 @@
 //   3. **How much GPU time does the work actually take?** three.js exposes
 //      WebGPU timestamp queries; the difference between that and the frame's
 //      wall time is what is being lost to encoding and synchronisation.
+//   4. **How many *submissions* is it made of?** Added later, and it turned
+//      out to be the question that mattered most. Every `renderer.compute()`
+//      call is its own command buffer, its own compute pass and its own queue
+//      submit, and on this hardware one submission costs **38.8 us of wall
+//      time regardless of how much work it carries** -- measured by holding
+//      the dispatch count fixed at 64 and varying only the number of
+//      submits, with the JavaScript side of it costing 3 us and the GPU
+//      executing all 64 dispatches in 0.052 ms. Example 15 measured 272
+//      submissions and ~800 dispatches per frame, so roughly a third of that
+//      frame was the submit path. `dispatches` alone hides this completely:
+//      fourteen one-dispatch submissions and one fourteen-dispatch
+//      submission are the same number and not remotely the same cost.
 //
 // Question 2 is the one that decides the next piece of work, and it is
 // cheap: no GPU features required, no browser flags, works on any backend.
-// Question 3 needs `trackTimestamp` and is best-effort -- see
-// readComputeTimestampMs.
+// Questions 3 and 4 need different care -- see readComputeTimestampMs and
+// the report's own `submissionsPerFrame`.
 //
 // *** Cost when off ***
 //
@@ -44,6 +56,9 @@
 const state = {
 	enabled: false,
 	dispatches: 0,
+	// Submissions, counted alongside dispatches because they turned out to be
+	// two different costs -- see the file header's "submissions" note.
+	submissions: 0,
 	cpuMs: 0,
 	byLabel: new Map()
 };
@@ -82,6 +97,9 @@ export function instrumentDispatch( label, dispatch ) {
 
 		const t0 = performance.now();
 		const result = dispatch( ...args );
+		// One dispatcher call is one renderer.compute(): one command buffer,
+		// one compute pass, one queue submit.
+		state.submissions ++;
 		record( label, performance.now() - t0 );
 
 		return result;
@@ -116,6 +134,8 @@ export function profileBatch( label, count, run ) {
 	if ( ! state.enabled ) return run();
 
 	const t0 = performance.now();
+	// A batch is one renderer.compute() carrying `count` dispatches.
+	state.submissions ++;
 	const result = run();
 	const cpuMs = performance.now() - t0;
 
@@ -146,6 +166,7 @@ export function stopProfiling() {
 export function resetProfiling() {
 
 	state.dispatches = 0;
+	state.submissions = 0;
 	state.cpuMs = 0;
 	state.byLabel.clear();
 
@@ -184,6 +205,13 @@ export function profilingReport( frames = 1 ) {
 		frames,
 		dispatches: state.dispatches,
 		dispatchesPerFrame: state.dispatches / frames,
+		submissions: state.submissions,
+		submissionsPerFrame: state.submissions / frames,
+		// How much work each submission carries. The number to raise: measured
+		// on example 15, a submission costs ~38.8 us of wall time whether it
+		// carries one dispatch or sixty-four, and the GPU executes all 64 in
+		// 0.052 ms.
+		dispatchesPerSubmission: state.submissions > 0 ? state.dispatches / state.submissions : 0,
 		cpuMs: state.cpuMs,
 		cpuMsPerFrame: state.cpuMs / frames,
 		labels
@@ -199,6 +227,19 @@ export function profilingReport( frames = 1 ) {
  * (tsl_array_n's `init()` forwards its options straight to the
  * WebGPURenderer constructor, so `init({ canvas, trackTimestamp: true })` is
  * all it takes) *and* the adapter to support the `timestamp-query` feature.
+ *
+ * *** Call this every frame, or the number will be null. ***
+ *
+ * Both conditions above do hold on the development machine this was measured
+ * on (verified directly: `backend.hasFeature('timestamp-query')` is true),
+ * and the first rounds of this investigation still recorded null, because
+ * three's compute query pool is 2048 queries = 1024 timestamped passes while
+ * a frame is ~272 passes, and its pool allocates a fresh uid per frame
+ * (`updateTimeStampUID` keys off `info.compute.frameCalls`). Left unresolved,
+ * the pool saturates after about four frames, prints
+ * "Maximum number of queries exceeded" once, and returns null from then on.
+ * Resolving per frame keeps it inside its budget; that is what the examples'
+ * probes now do.
  * Neither is guaranteed, which is why this returns null rather than throwing
  * -- the CPU-side numbers above are the ones the decision rests on, and they
  * always work.

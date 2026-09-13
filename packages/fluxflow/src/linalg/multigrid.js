@@ -149,7 +149,7 @@
 import * as tsl_array_n from 'tsl_array_n';
 import { float, If, Loop, storageBarrier } from 'three/tsl';
 import { buildElementwiseKernel } from './linalg.js';
-import { profileBatch } from '../profiling.js';
+import { instrumentDispatch, profileBatch } from '../profiling.js';
 
 function validateShape( shape ) {
 
@@ -521,7 +521,7 @@ function buildCoarseSweepKernel( shape, spacing, sorFactor, sweeps, x, b, dirich
 	const [ nx ] = shape;
 	const cells = shape[ 0 ] * shape[ 1 ];
 
-	return tsl_array_n.kernel( [ cells ], ( flat ) => {
+	const sweep = tsl_array_n.kernel( [ cells ], ( flat ) => {
 
 		// Same unflattening idiom tsl_array_n's own kernel() uses.
 		const i = flat.mod( nx );
@@ -556,6 +556,11 @@ function buildCoarseSweepKernel( shape, spacing, sorFactor, sweeps, x, b, dirich
 		} );
 
 	}, { workgroupSize: [ cells ] } );
+
+	// Labelled for the same reason linalg.js's scalar reductions are: this is
+	// built with tsl_array_n.kernel directly, so profiling.js cannot see it
+	// otherwise -- and while the V-cycle stays batched it reports as one entry.
+	return instrumentDispatch( 'mg-coarse', sweep );
 
 }
 

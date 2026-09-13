@@ -75,6 +75,11 @@
 //   ?resX=64 ?resY=96  grid resolution
 //   ?targetDt=0.016  per-frame simulated time
 
+// Measurement handle only: `window.__fluxflowProbe` exposes the renderer and the
+// solver so a driver can count `renderer.compute()` calls per frame and flip
+// the pressure solver's runtime switches (`settings.batchIterations`) inside a
+// single run. Nothing here changes what the scene does.
+
 import * as tsl_array_n from 'tsl_array_n';
 import { grid } from 'fluxflow';
 
@@ -717,6 +722,9 @@ try {
 
 	window.__fluxflowProbe = {
 		flip, velocityGrid, stats, seedScene, step, adaptiveTimeStep,
+		// Measurement handle only -- see 16-karman-vortex-street's own probe
+		// comment. flip.pressureSolver.settings carries the runtime switches.
+		renderer,
 		// Exposed so a driver that has paused the rAF loop can still render
 		// -- which is the only way to check the panels are not blank when
 		// the page is not the foreground tab and rAF never fires.

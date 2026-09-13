@@ -7,6 +7,17 @@ measured on real WebGPU hardware, why all three were slower than the baseline th
 replace, and the evidence for where the cost actually comes from. Kept so nobody re-attempts the
 same direction without seeing this data first.
 
+> **This document is now a record of five rounds, and the paragraph above
+> describes only the first one.** Round 1 (option 5: alpha/beta computed on the
+> GPU with no host readback) was indeed abandoned and reverted. A later round
+> revisited the same target with the guards moved *into* the kernels, and that
+> one landed -- 1.24x/1.13x paired -- alongside V-cycle dispatch batching
+> (1.53x/1.74x) and a single-workgroup coarse solve (1.09x/1.10x): 3.10x/2.63x
+> with all three on, all three on by default. The closing section is the most
+> recent round -- what a submission costs, and why the CG iteration now goes out
+> as one batch. The retractions are part of the record and are marked in place
+> rather than edited away.
+
 ## Motivation
 
 Among a list of options for improving `examples/16-karman-vortex-street/`'s (256x128) pressure-solve
@@ -1335,3 +1346,105 @@ The compound is larger than the product of the three individual figures
 (about 2.1x). That is an interaction, not an error: each one was measured
 with the other two *on*, and removing a single optimisation from an
 already-fast configuration costs less than removing it from a slow one.
+
+
+---
+
+# What a submission costs, and batching the CG iteration (2026-09-13)
+
+Every earlier round of this document inferred dispatch cost from frame-time
+deltas. This one measured it, and the measurement turned one question into two.
+
+## A dispatch and a submission are not the same thing
+
+`tsl_array_n`'s `kernel.js` has said since it was written that every
+`renderer.compute()` call is its own command buffer, its own compute pass and
+its own queue submit, and that batching several kernels into one call measured
+9.3x cheaper *per dispatch*. What nobody had done is price one submission on
+its own, with the work held fixed so that only the number of submits varies.
+
+`submit_cost_probe.html`, 64 dispatches of one real kernel, medians of 11
+rounds, on the machine this port is developed against:
+
+| submits | 1 | 8 | 16 | 32 | 64 |
+| --- | --- | --- | --- | --- | --- |
+| CPU ms (JS only) | 0 | 0 | 0.1 | 0.1 | 0.2 |
+| wall ms | 2.8 | 3.1 | 3.2 | 4.2 | 5.0 |
+
+Least squares gives **38.79 us per submission** with a fixed term of 2.65 ms,
+and a timestamp pair around the batched case says the GPU executes all 64
+dispatches in **0.052 ms**. So the cost is neither the JavaScript (3 us per
+submission) nor the GPU work: it is the submit path itself.
+
+## The frame, measured
+
+Example 15, 64x64, driver loop paused so this is the simulation without
+drawing, `renderer.compute` patched in the live page:
+
+| quantity | value |
+| --- | --- |
+| wall per frame | **31.8 - 35.9 ms** |
+| `renderer.compute()` calls per frame | **259 - 278** |
+| dispatches per frame | **740 - 813** |
+| dispatches per submission | 2.92 |
+| **GPU compute time per frame** | **0.21 - 0.40 ms (~1%)** |
+
+Three things follow. The recorded figure of 502 dispatches per frame was an
+undercount, because the profiler only wraps the kernels built through
+`buildElementwiseKernel` (~15% of them are built with `tsl_array_n.kernel`
+directly and were invisible). At 38.8 us each, 272 submissions is **~10.6 ms,
+about a third of the frame** -- and the GPU is idle for all but 1% of it. And
+the earlier puzzle -- why batching the V-cycle was worth 1.53x when CPU
+encoding is only 2.5% of a frame -- has an answer: batching was never saving
+*encoding*. It was saving submissions.
+
+## The change: one submission per CG iteration
+
+The GPU-resident loop made fourteen `renderer.compute()` calls per iteration,
+one per kernel, and only the final readback needed to break the submission. The
+whole iteration body now goes out as one batch, with the preconditioner as the
+single entry that has no `computeNode` -- so `planBatch` calls it in place,
+preserving exactly the ordering the loop needs. Both variants (the incremental
+residual update and the periodic true-residual recompute) are resolved at
+construction and selected per call, so the two can be compared inside one run;
+`settings.batchIterations` is the switch, on by default.
+
+Sandbox harness (fake renderer, dispatch count held fixed): **15 submissions
+per iteration before, 5 after**, dispatch count unchanged at 64.3. On the real
+machine, submissions per dispatch -- the workload-independent number, because
+these scenes keep evolving while they are being measured:
+
+| example | submissions/frame (before -> after) | dispatches/submission |
+| --- | --- | --- |
+| 15 flow-past-cylinder | 49.9 -> 31.4 | 0.345 -> 0.193 |
+| 16 karman-vortex-street | 43.9 -> 23.6 | 0.140 -> 0.083 |
+| 20 flip-dam-break | 53.5 -> 28.3 | 0.279 -> 0.149 |
+| 28 drop-into-pool | 48.1 -> 27.4 | 0.267 -> 0.129 |
+
+## And the part that did not work: the frame time did not move
+
+| example | median ms/frame (before -> after) | mean ms/frame |
+| --- | --- | --- |
+| 15 | 17.4 -> 17.3 | 13.11 -> 13.61 |
+| 16 | 17.5 -> 17.3 | 14.41 -> 13.93 |
+| 20 | 16.6 -> 16.6 | 13.14 -> 12.82 |
+| 28 | 16.6 -> 16.6 | 14.11 -> 14.38 |
+
+Removing ~20 submissions per frame produced nothing above the noise, and two of
+the four mean figures are slightly *worse* for the batched arm. Read naively
+that is a regression; read with the workload difference between arms in mind
+(the arms run at different simulation times, so they do not execute the same
+number of dispatches) it is "no effect either way".
+
+The explanation that fits both this and the 1.53x from V-cycle batching:
+**38.8 us is the cost of a submission on an idle queue.** In a real frame the
+submissions are issued while the GPU still has work queued, so most of that cost
+overlaps with GPU execution instead of adding to the frame. Batching the
+V-cycle removed 37 submissions per iteration out of ~50 and showed up; this
+change removes 10 of the remaining ~13 and does not.
+
+So the acceptance criterion for this change is **"same dispatches, half the
+submissions, frame time within noise"**, and it passes that. Settling the
+frame-time question needs a frozen-workload measurement: driver paused, both
+arms stepping an identical sequence, GPU timestamps per arm rather than wall
+time. That is the next measurement, not the next implementation.

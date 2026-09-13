@@ -26,6 +26,13 @@ lives in `docs/`.
   2.28 ms of an 89.8 ms frame here, so the whole API question is bounded
   by 2.5%. The gap is ~45 dispatches and no host round trips against ~500
   and a dozen.
+
+  > **Superseded in part (2026-09-13).** The 2.5% encoding figure stands. The
+  > dispatch counts do not: instrumenting `renderer.compute()` directly shows
+  > ~800 dispatches *and* ~272 submissions per frame, and it is the
+  > submissions -- the command buffers, not the kernels -- that carry about a
+  > third of the frame. The profiler's own figure of 502 was an undercount,
+  > for the reason given in the profiling section above.
 - [`docs/two-phase-bubbles-research.md`](docs/two-phase-bubbles-research.md)
   -- the earlier bubble research, archived.
 
@@ -743,6 +750,26 @@ Verified with 9 vitest structural/validation tests, plus a live check. This proj
 
 Verified with 9 vitest structural/validation tests, plus a live check. `examples/05-preconditioned-conjugate-gradient/` pairs the same `A = diag(1..8)` operator with its own *exact* Jacobi preconditioner (`M^-1 = diag(1, 1/2, ..., 1/8)`, i.e. `M = A` exactly for this diagonal system) -- a deliberately strong test case, since a perfect preconditioner makes CG converge to the exact answer in a single iteration, so any bug in how `r.z` (as opposed to `r.r`) drives `alpha`/`beta`/`p` would very likely show up as stagnation or divergence well before the 20-iteration cap. Running it in this dev sandbox confirms the exact same fallback-only shader compile failure as the plain-CG example (now for two distinct atomic-dot kernels, `r.r` and `r.z`). **Run by the user on real WebGPU hardware, it converges to an exact match** (`x = [1.0000, 0.5000, 0.3333, 0.2500, 0.2000, 0.1667, 0.1429, 0.1250]`, matching the expected answer to all 4 reported decimal places) -- even tighter than the plain-CG example's ~1e-4 deviation, consistent with this test case's single-iteration convergence accumulating far less atomic quantization noise. Both the preconditioning logic and the underlying GPU-atomic reduction are confirmed correct on real WebGPU.
 
+### The GPU-resident loop submits its whole iteration as one batch
+
+The dispatches between one readback and the next are a fixed sequence with no
+host decision anywhere in it, so they go out as a single submission: measured
+**15 submissions per iteration before, 5 after**, with the dispatch count
+unchanged. Both forms (the incremental-residual update and the periodic
+true-residual recompute) are resolved at construction and selected per call, so
+the two can be compared inside one run -- a constructor-time choice can only be
+compared across runs, and these scenes drift enough that only an in-run paired
+comparison means anything. `settings.batchIterations` on the pressure solver is
+the switch; it is on by default.
+
+What that is *worth* is a separate question, and the honest answer so far is
+"fewer submissions, no measurable frame time": removing ~20 submissions per
+frame did not show up above the noise on any of the four scenes measured, and
+in a real frame most of that 38.8 us overlaps with GPU work already queued
+rather than adding to the frame. The criterion for this change is therefore
+"same dispatches, half the submissions, frame time within noise", not a
+speedup. The performance document's closing section has the numbers.
+
 ### `isDegenerateDot` -- guarding against a degenerate CG denominator
 
 Added while root-causing a real-hardware failure in `examples/14-stable-fluids/`: pressure came back 100% non-finite from the very first `project()` call, despite that call's own divergence RHS (`b`) being completely finite and well-posed. Root cause: that scene's domain has no `dirichlet` option at all (a deliberate pure-closed-box test, see that example's own section below), so the Laplacian CG solves against is a pure Neumann operator -- singular, with the constant field in its null space. CG never reduces a residual's null-space component (`A@constant=0` exactly, invisible to every dot product CG computes), so the search direction `p` can drift to be dominated by it over enough iterations -- at which point `Ap` collapses toward 0 everywhere, and `p.Ap` (`alpha`'s own denominator) heads toward an exact zero. jet's own reference `pcg()` (`cg-inl.h`, plain double-precision CPU arithmetic, no equivalent guard) would only hit a *truly* exact zero here in a rare floating-point coincidence -- but this port's own GPU-atomic dot product quantizes every dot product to a fixed-point integer before summing (see `atomicScale` above), so a small-but-nonzero `p.Ap` can round all the way down to the integer 0 well before `p` is anywhere near purely null-space-aligned: a second, much easier way to hit the same exact-zero division, unique to this port's own reduction strategy.
@@ -770,6 +797,46 @@ The V-cycle itself (relax/restrict/correct/residual) is all local-stencil kernel
 Verified with 8 vitest structural tests (mirroring the CG solvers' style, including one that actually builds every level's kernels for a multi-level 2D shape), plus live checks. Verification here was unusually involved -- worth documenting the full picture:
 - `examples/06-multigrid-preconditioner/` (standalone, no CG wrapper) needs no atomics at all, so it doesn't hit this project's atomic/WebGL2-fallback wall -- but the GPU dispatch pattern didn't reliably match the proven-correct JS reference above in this dev sandbox, most likely another instance of this project's well-established WebGL2-fallback unreliability (a different specific mechanism than the atomics one). **Run by the user on real WebGPU hardware**, the residual ratio after one V-cycle is `0.0256` for `numberOfLevels:1` (plain relax) versus `0.0135` for `numberOfLevels:4` (the full V-cycle) -- the multi-level version genuinely outperforming plain relaxation on this low-frequency test case confirms `restrict()`/`correct()`/the recursion itself are working, not just `relax()`.
 - `examples/07-multigrid-preconditioned-cg/` (the full pipeline, a real 2D Poisson problem with a manufactured known solution rather than the 1D diagonal toy case) hits the atomic wall the same way `examples/04-`/`05-` do in this sandbox. Running it here also surfaced a genuine bug in the example's *own* verification code, worth remembering generally: `x.toArray()` came back empty (0 elements) in this sandbox, and `[].every(...)` is vacuously `true` in JavaScript regardless of the predicate -- the original check silently reported a false "converged" pass instead of the empty-readback failure it actually was. Fixed here (and defensively in `examples/04-`/`05-` too, which had the same latent issue) by checking the array length before `.every()`. **Run by the user on real WebGPU hardware, it converges to the expected exact answer** (`succeeded=true`, max deviation from `xExpected` under `1e-2`) -- the full pipeline (GPU-atomic CG reduction + multigrid preconditioner together) is confirmed correct, not just each piece in isolation.
+
+## Current state: `profiling`
+
+### `profiling.js` -- dispatches, submissions and GPU time
+
+`src/profiling.js` is the instrument the pressure-solve work kept needing and
+never had. It wraps the dispatch path and reports three things that
+frames-per-second cannot separate:
+
+- **`dispatchesPerFrame`** -- how many kernels a frame is made of, attributed
+  by label. Every kernel in `linalg.js` and `multigrid.js` is built through one
+  function, `buildElementwiseKernel`, so wrapping that catches the whole hot
+  path. Kernels built directly with `tsl_array_n.kernel` (the scalar
+  reductions, the alpha/beta coefficient kernels, the coarse solve) have to be
+  wrapped individually or they are invisible -- that gap was ~15% of a frame's
+  dispatches when it was found.
+- **`submissionsPerFrame`** -- how many `renderer.compute()` calls those
+  dispatches were sent in. This is a *separate* cost from the dispatch count,
+  and for a long time it was the one nobody had measured: every
+  `renderer.compute()` call is its own command buffer, its own compute pass and
+  its own queue submit, and holding the work fixed while varying only the
+  number of submits puts one submission at **38.8 us of wall time on this
+  hardware** -- 3 us of it JavaScript, the rest in the submit path -- while the
+  GPU executes 64 dispatches of a real kernel in 0.052 ms. Example 15 measured
+  272 submissions and ~800 dispatches per frame, with about **1% of the frame
+  spent on the GPU**.
+- **`cpuMsPerFrame`** -- CPU-side encoding, which turned out to be ~2.5% of a
+  frame and therefore not the thing to optimise.
+
+`readComputeTimestampMs(renderer)` returns the GPU time actually spent in
+compute, or null. It needs `trackTimestamp: true` at renderer construction
+(`?profile=1` in the examples that support it) *and* it must be called **every
+frame**: three's compute query pool holds 1024 timestamped passes and keys its
+allocation off the frame counter, so a caller that resolves once every sixty
+frames finds the pool saturated, gets a single `Maximum number of queries
+exceeded` warning, and null from then on. That is what happened to the first
+rounds of this investigation -- the number was reported as "the adapter does
+not expose timestamp-query" when the feature was present the whole time.
+
+Cost when off: one boolean test per dispatch.
 
 ## Current state: `time`
 

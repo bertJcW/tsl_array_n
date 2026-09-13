@@ -291,6 +291,41 @@ described.
 
 ---
 
+### 11. The device was running on WebGPU's downlevel default limits
+
+Found while trying to measure example 16, which turned out not to run at all in
+a headless Chrome session -- the console filled with `Compute pipeline creation
+failed: [Invalid BindGroupLayout] ... While validating binding counts`.
+
+WebGPU's *default* device limits are downlevel values, not what the adapter
+offers, and `requestDevice()` with no `requiredLimits` silently gets the
+defaults. On this machine the adapter reports
+`maxStorageBuffersPerShaderStage = 16` and `maxComputeInvocationsPerWorkgroup =
+1024`, while the device three.js built had **8** and **256**. A kernel binding
+nine storage buffers therefore failed at pipeline creation -- and WebGPU
+reports a pipeline-creation failure as an *uncaptured* error on the first
+dispatch that uses it, so the pass was silently never executed with nothing
+visible from the JavaScript side.
+
+Instrumenting `createBindGroupLayout` over the live page, after the fix:
+
+| example | largest bind group layout | GPU errors before the fix |
+| --- | --- | --- |
+| 15 flow-past-cylinder | 2 entries | none |
+| 16 karman-vortex-street | 8 entries (the one that failed predates the instrumentation) | many |
+| 20 flip-dam-break | 8 entries | none |
+| 28 drop-into-pool | **9 entries** | not checked, but over the limit |
+
+So it was not one broken example: **example 28 was dropping a compute pass too**,
+and example 20 was sitting exactly on the limit. Nothing on the JavaScript side
+said so, and nothing in the test suite could -- the structural tests build node
+graphs without a device, so a binding-count limit is invisible to them.
+
+Fixed in `tsl_array_n`'s `init()`, which now requests the adapter and builds the
+device itself with every limit at the adapter's own value, falling back to
+three.js's own device if anything in that path throws. All four scenes run with
+zero GPU errors afterwards.
+
 ## Performance
 
 The full arc is in `docs/perf-investigation-cg-gpu-resident-alpha-beta.md`,
@@ -409,6 +444,36 @@ the scalar as exactly 0**, making the update it feeds a no-op, so x cannot
 be corrupted even for the one iteration before the host sees the flag.
 
 ---
+
+### The submission path: what one dispatch actually costs
+
+Recorded in full at the end of
+`docs/perf-investigation-cg-gpu-resident-alpha-beta.md`. The measurements:
+
+| quantity | value |
+| --- | --- |
+| wall time per `renderer.compute()` call, work held fixed | **38.8 us** |
+| of which JavaScript encoding | 3 us |
+| GPU execution of 64 dispatches in one submission | 0.052 ms |
+| example 15 per frame | **272 submissions**, ~800 dispatches, **~1% GPU** |
+| adapter `maxStorageBuffersPerShaderStage` vs device default | 16 vs **8** |
+
+Two changes came out of it. The GPU-resident CG loop now submits its whole
+iteration body as one batch -- **15 submissions per iteration before, 5 after**,
+dispatch count unchanged, and submissions per dispatch halved on examples
+15/16/20/28. And `tsl_array_n.init()` now asks for the adapter's own limits,
+which is Debugging #11 above: that one was a correctness bug, not a performance
+one.
+
+**The frame-time payoff is not established, and that is the result.** Removing
+~20 submissions per frame did not show up above the noise on any of the four
+scenes measured (means differing by +-3%, in both directions). The likely
+reason is that 38.8 us is the cost of a submission on an *idle* queue, and in a
+real frame most of it overlaps with GPU work already queued. So the criterion
+for this change is "same dispatches, half the submissions, frame time within
+noise" rather than a speedup, and a frozen-workload measurement -- driver
+paused, both arms stepping an identical sequence, GPU timestamps per arm -- is
+what would settle it either way.
 
 ## Testing
 
@@ -540,7 +605,18 @@ have said the same thing sooner.
 - **One GPU-to-CPU round trip per CG iteration remains**, the stop test,
   which genuinely has to be on the host. Removing it means asking less
   often, and that trade has been measured to be worth nothing.
-- **What the frame is actually spending its time on is again an open
-  question.** ~500 dispatches on a 64x64 grid, 2.28 ms of CPU encoding for
-  all of them, and round trips now down to one per iteration. Whatever the
-  rest is, it is not the host.
+- **The frame is submission-bound, not compute-bound, and the numbers are in.**
+  ~800 dispatches *and* ~272 `renderer.compute()` calls per frame on a 64x64
+  grid, one submission costing 38.8 us, the GPU busy for ~1% of the frame. The
+  earlier figure of 502 dispatches was an undercount: the profiler saw only the
+  kernels built through `buildElementwiseKernel`.
+- **Still open: whether removing submissions buys frame time.** ~20 submissions
+  per frame removed, nothing measurable -- the Performance section above has
+  why the synthetic slope does not transfer, and the frozen-workload
+  measurement that would settle it.
+- **The documentation backlog in `fluxflow-rules.md` section 8 is still
+  outstanding** and was deliberately not folded into the submission commit:
+  the stale `isDegenerateDot` name in README, `atomicScale` documented as live
+  although deleted, the grid table's missing rows, examples 22/27/28/29 absent
+  from the README index, and the perf document's own top Status (annotated in
+  that file, not rewritten).

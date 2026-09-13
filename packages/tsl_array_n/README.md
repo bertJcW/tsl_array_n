@@ -45,6 +45,29 @@ await tsl_array_n.init( { canvas: myCanvas } );
 await tsl_array_n.init( { renderer: myExistingWebGPURenderer } );
 ```
 
+### `init()` asks for the adapter's own device limits
+
+WebGPU's **default** device limits are downlevel values rather than what the
+adapter offers, and `requestDevice()` with no `requiredLimits` silently gets
+the defaults. Measured on an RTX 5060 Ti through Chrome 152: the adapter
+reports `maxStorageBuffersPerShaderStage = 16` and
+`maxComputeInvocationsPerWorkgroup = 1024`, while the device three.js builds
+gets **8** and **256**.
+
+That is not a theoretical concern. A kernel binding nine storage buffers fails
+at pipeline creation with `Invalid BindGroupLayout ... While validating binding
+counts`, and WebGPU reports a pipeline-creation failure as an *uncaptured*
+error on the first dispatch that uses it: the pass is silently never executed
+and nothing is visible from JavaScript. Two of fluxflow's shipped examples were
+doing exactly that before this was found.
+
+So `init()` now requests the adapter and builds the device itself, asking for
+every limit at the value the adapter reports and for all of its features --
+which makes the request satisfiable by construction, since nothing is asked for
+that the machine has not got. `init( { adapterLimits: false } )` restores
+three.js's own device, and anything that throws on the way falls back to it as
+well, so the behaviour is never worse than it was.
+
 ## Current state: data
 
 `arrayN(type, shape)` declares a block of GPU-resident storage data. `shape` can be a number (1D), an array of any length (2D/3D/higher dimensions, internally flattened with a unified strides algorithm, no special-casing per dimension), or an empty array `[]` (0-D, see below). `array0`/`array2`/`array3` are sugar for a few common shapes:

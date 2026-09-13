@@ -71,7 +71,7 @@
 
 import * as tsl_array_n from 'tsl_array_n';
 import { float, Loop, If } from 'three/tsl';
-import { instrumentDispatch } from '../profiling.js';
+import { instrumentDispatch, profileBatch } from '../profiling.js';
 import { isNonFinite, isNonFiniteOrAbove } from '../float_guards.js';
 
 // Fixed-point scale for encoding a float product as an atomically-summable
@@ -855,7 +855,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	// tree-reduction stage would cost more dispatches than it saves work.
 	function buildScalarReduction( reducer, slot ) {
 
-		return tsl_array_n.kernel( [ 1 ], ( _thread ) => {
+		const reduction = tsl_array_n.kernel( [ 1 ], ( _thread ) => {
 
 			const total = float( 0 ).toVar();
 
@@ -868,6 +868,13 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 			scalars( slot ).assign( total );
 
 		} );
+
+		// Labelled here rather than built through buildElementwiseKernel: the
+		// profiler wraps that one function, so anything built with
+		// tsl_array_n.kernel directly is invisible to it. Measured on example
+		// 15, this plus alpha/beta and the coarse solve were ~15% of every
+		// dispatch in the frame, and none of them were counted.
+		return instrumentDispatch( 'cg-reduce', reduction );
 
 	}
 
@@ -883,7 +890,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	// The tests below are the same set the host loop applies, in the same
 	// order: isDegenerateDenominator's (non-finite or exactly zero), then
 	// the growth bound, then the magnitude bound.
-	const alphaKernel = tsl_array_n.kernel( [ 1 ], ( _thread ) => {
+	const alphaKernelRaw = tsl_array_n.kernel( [ 1 ], ( _thread ) => {
 
 		const pAp = scalars( SLOT_PAP ).toVar();
 		const rzOld = scalars( SLOT_RZ_OLD ).toVar();
@@ -914,7 +921,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 	} );
 
-	const betaKernel = tsl_array_n.kernel( [ 1 ], ( _thread ) => {
+	const betaKernelRaw = tsl_array_n.kernel( [ 1 ], ( _thread ) => {
 
 		const rzNew = scalars( SLOT_RZ ).toVar();
 		const rzOld = scalars( SLOT_RZ_OLD ).toVar();
@@ -949,9 +956,96 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 	} );
 
+	const alphaKernel = instrumentDispatch( 'cg-alpha', alphaKernelRaw );
+	const betaKernel = instrumentDispatch( 'cg-beta', betaKernelRaw );
+
 	const reducePAp = buildScalarReduction( dotPAp, SLOT_PAP );
 	const reduceRR = buildScalarReduction( dotRR, SLOT_RR );
 	const reduceRZ = buildScalarReduction( dotRZ, SLOT_RZ );
+
+	// *** One submission per iteration instead of fourteen. ***
+	//
+	// Every `renderer.compute()` call is its own command buffer, its own
+	// compute pass and its own queue submit -- tsl_array_n's kernel.js says so
+	// and measures it at 62.2 us per dispatch unbatched against 6.7 us batched.
+	// Measured on this machine afterwards, holding the dispatch count fixed at
+	// 64 and varying only the number of submits: **38.8 us of wall time per
+	// submission, of which 3 us is JavaScript** (the rest is the submit/queue
+	// path itself), while the GPU executes all 64 dispatches in 0.052 ms.
+	//
+	// The GPU-resident loop below used to make fourteen of those calls per
+	// iteration -- one per kernel -- and only the final readback needs to break
+	// the submission. Fourteen submissions is 0.54 ms of a ~4 ms iteration,
+	// and the loop runs about twelve times a frame.
+	//
+	// So the whole iteration body goes out as one batch. The preconditioner is
+	// the one entry with no `computeNode` (it is a plain function that submits
+	// its own V-cycle), and tsl_array_n's planBatch calls such an entry in
+	// place, which is what keeps the ordering -- everything after it must see
+	// its output -- exactly what calling the list one by one would have given.
+	// Three submissions per iteration, then: pre-V-cycle group, V-cycle,
+	// post-V-cycle group.
+	//
+	// Both forms are built here, at construction, for the same reason
+	// multigrid.js builds its two coarse-level forms here: a constructor-time
+	// choice can only be compared across runs, and this project's scenes drift
+	// enough that only an in-run paired comparison means anything. The
+	// recompute variant exists because the loop refreshes the true residual
+	// every RESIDUAL_RECOMPUTE_INTERVAL iterations instead of updating it
+	// incrementally, which is a different sequence of dispatches.
+	const iterationCore = [
+		applyToP, dotPAp.dispatch, reducePAp, alphaKernel, updateX, updateR,
+		dotRR.dispatch, reduceRR, applyPreconditionerToR,
+		dotRZ.dispatch, reduceRZ, betaKernel, updateP
+	];
+	const iterationRecompute = [
+		applyToP, dotPAp.dispatch, reducePAp, alphaKernel, updateX, applyToX, recomputeR,
+		dotRR.dispatch, reduceRR, applyPreconditionerToR,
+		dotRZ.dispatch, reduceRZ, betaKernel, updateP
+	];
+
+	// `length - 1`: the preconditioner reports its own dispatches, either as a
+	// batch or one per kernel, and double-counting them here would make the
+	// profiler's dispatch total disagree between the two settings.
+	const iterationBatch = {
+		core: () => profileBatch( 'pcg-iteration', iterationCore.length - 1, iterationBatchCore ),
+		recompute: () => profileBatch( 'pcg-iteration', iterationRecompute.length - 1, iterationBatchRecompute )
+	};
+
+	function runIterationUnbatched( recompute ) {
+
+		applyToP(); // Ap = A @ p
+		dotPAp.dispatch();
+		reducePAp();
+		alphaKernel(); // alpha = rz / pAp, guarded, or 0
+
+		updateX();
+
+		if ( recompute ) {
+
+			applyToX(); // Ax = A @ x (refresh -- x just changed)
+			recomputeR(); // r = b - Ax, correcting drift from past incremental updates
+
+		} else {
+
+			updateR(); // r -= alpha * Ap
+
+		}
+
+		dotRR.dispatch();
+		reduceRR();
+
+		applyPreconditionerToR(); // z = M^-1 @ r
+		dotRZ.dispatch();
+		reduceRZ();
+		betaKernel(); // beta = rz_i+1 / rz_i, guarded, or 0 to restart
+
+		updateP();
+
+	}
+
+	const iterationBatchCore = tsl_array_n.createBatch( iterationCore );
+	const iterationBatchRecompute = tsl_array_n.createBatch( iterationRecompute );
 
 	/**
 	 * The same algorithm as solve() below, with alpha and beta computed on
@@ -965,7 +1059,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	 * preconditioner apply more than it strictly needs, and a guarded solve
 	 * finishes an iteration whose updates are all no-ops.
 	 */
-	async function solveWithGpuResidentScalars( tol, maxiter ) {
+	async function solveWithGpuResidentScalars( tol, maxiter, batchIterations ) {
 
 		applyToX(); // Ax = A @ x
 		init(); // r = b - Ax, p = 0, Ap = 0
@@ -1003,34 +1097,20 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 			state.iterations = iter + 1;
 
-			applyToP(); // Ap = A @ p
-			dotPAp.dispatch();
-			reducePAp();
-			alphaKernel(); // alpha = rz / pAp, guarded, or 0
+			// Decided here so that both forms run the same sequence; the flag
+			// itself has to be cleared in both, exactly as before.
+			const recompute = forceResidualRecompute || ( iter % RESIDUAL_RECOMPUTE_INTERVAL === 0 && iter > 0 );
+			if ( recompute ) forceResidualRecompute = false;
 
-			updateX();
+			if ( batchIterations ) {
 
-			if ( forceResidualRecompute || ( iter % RESIDUAL_RECOMPUTE_INTERVAL === 0 && iter > 0 ) ) {
-
-				applyToX(); // Ax = A @ x (refresh -- x just changed)
-				recomputeR(); // r = b - Ax, correcting drift from past incremental updates
-				forceResidualRecompute = false;
+				( recompute ? iterationBatch.recompute : iterationBatch.core )();
 
 			} else {
 
-				updateR(); // r -= alpha * Ap
+				runIterationUnbatched( recompute );
 
 			}
-
-			dotRR.dispatch();
-			reduceRR();
-
-			applyPreconditionerToR(); // z = M^-1 @ r
-			dotRZ.dispatch();
-			reduceRZ();
-			betaKernel(); // beta = rz_i+1 / rz_i, guarded, or 0 to restart
-
-			updateP();
 
 			// The only round trip in the iteration. Everything the host has
 			// to decide comes back in it.
@@ -1059,11 +1139,15 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 	}
 
-	async function solve( tol, maxiter, residualCheckInterval = 1, gpuResidentScalars = false ) {
+	async function solve( tol, maxiter, residualCheckInterval = 1, gpuResidentScalars = false, batchIterations = true ) {
 
 		state.stoppedBy = 'none';
 
-		if ( gpuResidentScalars ) return solveWithGpuResidentScalars( tol, maxiter );
+		// Only the GPU-resident loop has a batched form: the host loop below
+		// reads three scalars back per iteration, so its dispatches cannot be
+		// submitted ahead of the decisions that consume them. `batchIterations`
+		// is ignored there rather than half-applied.
+		if ( gpuResidentScalars ) return solveWithGpuResidentScalars( tol, maxiter, batchIterations );
 
 		applyToX(); // Ax = A @ x
 		init(); // r = b - Ax, p = 0, Ap = 0

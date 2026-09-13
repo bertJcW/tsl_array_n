@@ -47,6 +47,11 @@
 // grid_pressure_solver2.js's own header comment on why a "safe" pressure-
 // solve magnitude does not transfer between differently-scaled scenes.
 
+// Measurement handle only: `window.__fluxflowProbe` exposes the renderer and the
+// solver so a driver can count `renderer.compute()` calls per frame and flip
+// the pressure solver's runtime switches (`settings.batchIterations`) inside a
+// single run. Nothing here changes what the scene does.
+
 import * as tsl_array_n from 'tsl_array_n';
 import { grid } from 'fluxflow';
 
@@ -368,6 +373,11 @@ try {
 
 	window.__fluxflowProbe = {
 		flip, velocityGrid,
+		// Measurement handle only -- see 16-karman-vortex-street's own probe
+		// comment. The pressure solver's runtime settings live at
+		// flip.pressureSolver.settings; the renderer is here so a driver can
+		// count submissions per frame.
+		renderer,
 		pause: async () => {
 
 			driverPaused = true;

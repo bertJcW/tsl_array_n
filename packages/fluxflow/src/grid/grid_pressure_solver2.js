@@ -228,6 +228,13 @@ export function createGridPressureSolver2( {
 	// below, because comparing the two across separate runs of an unsteady
 	// scene compares the scene to itself.
 	gpuResidentScalars = true,
+	// Submit the CG iteration's dispatches as one batch instead of one
+	// submission per kernel. See linalg.js's iteration-batch comment for the
+	// measurement: 38.8 us per submission on this hardware, fourteen
+	// submissions per iteration before this, three after. Mutable at runtime
+	// through `settings` so the two forms can be compared inside one run --
+	// paired measurement is the only kind that means anything on these scenes.
+	batchIterations = true,
 	atomicScale,
 	maxPlausiblePressure = DEFAULT_MAX_PLAUSIBLE_PRESSURE
 } = {} ) {
@@ -246,7 +253,7 @@ export function createGridPressureSolver2( {
 	// drift under sustained load). Alternating the policy *within* one run
 	// makes the comparison paired, and paired is the only kind that means
 	// anything here.
-	const settings = { residualCheckInterval, gpuResidentScalars };
+	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations };
 
 	const [ resolutionX, resolutionY ] = resolution;
 	const [ gridSpacingX, gridSpacingY ] = gridSpacing;
@@ -577,7 +584,10 @@ export function createGridPressureSolver2( {
 			// -- a minor, bounded inaccuracy, never a divergent one.
 			if ( updateDirichletFields ) updateDirichletFields();
 			dispatchBuildSystem();
-			diagnostics.converged = await cg.solve( tolerance, maxIterations, settings.residualCheckInterval, settings.gpuResidentScalars );
+			diagnostics.converged = await cg.solve(
+				tolerance, maxIterations,
+				settings.residualCheckInterval, settings.gpuResidentScalars, settings.batchIterations
+			);
 
 			// Forwarded from the CG solver so a caller can see *why* a frame
 			// was expensive without reaching into linalg.js -- the iteration

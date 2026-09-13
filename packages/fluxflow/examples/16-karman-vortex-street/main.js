@@ -127,6 +127,11 @@
 // canvas alone can't -- red/blue banding alternating downstream of the
 // cylinder is what to look for.
 
+// Measurement handle only: `window.__fluxflowProbe` exposes the renderer and the
+// solver so a driver can count `renderer.compute()` calls per frame and flip
+// the pressure solver's runtime switches (`settings.batchIterations`) inside a
+// single run. Nothing here changes what the scene does.
+
 import * as tsl_array_n from 'tsl_array_n';
 import { vec2, float, max, sin, length } from 'three/tsl';
 import { grid } from 'fluxflow';
@@ -776,6 +781,14 @@ try {
 		if ( ! nanDetected ) requestAnimationFrame( animate );
 
 	}
+
+	// Exposed for performance measurement only -- the grid-method half of the
+	// three scenes the submission-batching work is verified against. `solver`
+	// is the handle to `solver.pressureSolver.settings`, which is where the
+	// CG batching switch lives; the other two scenes already expose their flip
+	// solver, whose own `pressureSolver` is the same object. Nothing here
+	// changes what the scene does -- it is a name, not a behaviour.
+	window.__fluxflowProbe = { solver, velocityGrid, adaptiveTimeStep, renderer };
 
 	requestAnimationFrame( animate );
 
