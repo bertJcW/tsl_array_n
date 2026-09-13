@@ -1544,3 +1544,68 @@ The change is kept because it is numerically identical -- same dispatches, same
 order -- it is a prerequisite for that deeper version, and it is neutral rather
 than negative. On its own it does not earn its complexity, and saying so is the
 point.
+
+
+---
+
+# The collider rebuild, and why a scene was running at 3 fps
+
+The largest win found in this whole effort, and it was not in the solver.
+
+## How it surfaced
+
+Example 23 (`23-flip-moving-collider`) was measured as the collider case for the
+step-2b decision. Its step turned out to cost **367 ms** -- against 24.3 ms for
+`onAdvanceTimeStep()` alone and 0.5 ms for `setCollider()` alone, which do not
+add up. `rigidCollider.update(dt)` was the obvious suspect and the obvious
+suspect was wrong: timed inside the real step it is **0.43 ms**, 0.1%. The
+missing ~335 ms is an *interaction* between two cheap calls.
+
+## What it is
+
+`setCollider()` calls `rebuildColliderKernels()`, which builds about fifteen new
+TSL kernels, and three.js's pipeline cache is keyed on the compute node. Kernels
+built a moment ago therefore miss the cache, and the next solve compiles them:
+
+| measurement | value |
+| --- | --- |
+| step, rebuild every call (the old behaviour) | **351.5 ms** |
+| step, rebuild skipped | **44.3 ms** |
+| compute pipelines created per step, old | **28** |
+| compute pipelines created per step, new | **0** |
+| submissions per step, both arms | 328 / 327 |
+| dispatches per step, both arms | 1594 / 1583 |
+
+**7.94x** as the paired mean (351.5 / 44.3) and 8.46x as the paired median
+(362.1 / 42.8). The dispatch and submission counts are the control: the *work* is
+identical, only the compilation is gone. The isolated run below, which does not
+interleave with an arm that allocates 28 pipelines a step, measured 33.5 ms per
+step -- about 11x against the 367 ms the same scene measured before the fix, but
+that comparison is across runs and only indicative.
+
+## Why skipping the rebuild is correct
+
+A collider that moved does not need new kernels.
+`createSDFRigidBodyCollider2`'s `update()` re-rasterises the posed polygon
+through `collider.addPolygon()`, which computes the SDF on the CPU and writes it
+with `grid.data.fromArray(hostSdf)` -- **the same field object, new contents**.
+Every kernel built here reads that field through
+`collider.sample()`/`gradient()`/`isInside()`, so the field's *identity* is what
+they hold, and no geometry is baked into them. The existing kernels read the new
+geometry on the next dispatch by construction.
+
+So `setCollider()` now skips `rebuildColliderKernels()` when it is handed the
+same collider object with the same grid parameters, and still runs
+`buildBlockMarker()` every call -- which cells are solid *does* depend on where
+the collider is now. `solver.reuseColliderKernels = false` restores the old
+behaviour and is the control arm.
+
+## Verification
+
+- The paired run above: identical submissions and dispatches, CG iterations
+  within the usual drift (11.75 against 11.55).
+- 200 steps of the moving collider with the skip on: **zero non-finite values**,
+  peak speed 46.3, 33.5 ms per step in isolation (faster than the 44.3 ms
+  measured while alternating with an arm that was allocating 28 pipelines per
+  step).
+- `fluxflow` 347 tests, `tsl_array_n` 23, all pass.

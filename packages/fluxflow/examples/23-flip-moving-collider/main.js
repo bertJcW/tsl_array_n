@@ -448,6 +448,14 @@ try {
 	// solve, so an automated run exercises the same physics the page does.
 	window.__fluxflowProbe = {
 		flip, velocityGrid,
+		// Measurement handle only -- see examples/16-karman-vortex-street/'s
+		// probe comment. The renderer is here so a driver can count
+		// renderer.compute() calls per step and flip the solvers' runtime
+		// switches (flip.settings.batchStages,
+		// flip.pressureSolver.settings.batchIterations) inside one run. This
+		// scene is the collider case: it passes options.collider, so its
+		// boundary solver runs the collider branch of constrainVelocity().
+		renderer,
 		step: async () => {
 
 			rigidCollider.update( dt );

@@ -142,6 +142,14 @@ export function createGridBlockedBoundaryConditionSolver2(
 	const solver = {
 		uMarker, vMarker, uTemp, vTemp, blockMarker,
 		closedDomainBoundaryFlag: DIRECTION_ALL, // plain mutable property, same effect as the source's setClosedDomainBoundaryFlag
+
+		// Plain mutable property. `true` (the default) skips rebuilding the
+		// collider kernels when setCollider() is handed the same collider
+		// object with the same grid parameters -- see setCollider's own
+		// comment for the measurement that justified it. Set it to `false` for
+		// the previous always-rebuild behaviour, which is the control arm of
+		// that measurement.
+		reuseColliderKernels: true,
 		collider: null
 	};
 
@@ -425,14 +433,57 @@ export function createGridBlockedBoundaryConditionSolver2(
 	// gridOrigin are stored purely to match the source -- checked that
 	// nothing in this file actually reads them (possibly a placeholder for
 	// code outside grid/), this isn't a missed piece of logic.
+	// Element-wise array compare for the grid parameters below. Plain `===`
+	// is wrong for arrays, and these arrive as (possibly different) array
+	// literals on every call.
+	function sameNumbers( a, b ) {
+
+		if ( a === undefined || b === undefined || a === null || b === null ) return a === b;
+		if ( a.length !== b.length ) return false;
+
+		for ( let i = 0; i < a.length; i ++ ) if ( a[ i ] !== b[ i ] ) return false;
+
+		return true;
+
+	}
+
+	// *** Only rebuild the collider kernels when the collider itself changes. ***
+	//
+	// rebuildColliderKernels() builds about fifteen new TSL kernels, and
+	// three.js's pipeline cache is keyed on the compute node -- so kernels
+	// built a moment ago miss it and the next solve pays to compile them.
+	// Measured on examples/23-flip-moving-collider/, which re-sets its collider
+	// every step: a step costs 367 ms, of which `onAdvanceTimeStep()` alone is
+	// 24 ms and `setCollider()` alone is 0.5 ms. The other ~335 ms -- 93% of the
+	// frame -- is the *interaction*: a fresh rebuild followed by a solve that
+	// has to bring fifteen new pipelines up.
+	//
+	// A collider that merely *moved* does not need new kernels.
+	// createSDFRigidBodyCollider2's update() re-rasterises the posed polygon
+	// through collider.addPolygon(), which writes into the same `grid.data`
+	// field with fromArray -- and every kernel built here reads that field
+	// through collider.sample()/isInside()/gradient(). The field's *contents*
+	// change; its identity does not, and no geometry is baked into a kernel.
+	// So re-setting the same collider object with the same grid parameters
+	// keeps the existing kernels valid, and they will read the new geometry on
+	// the next dispatch by construction.
+	//
+	// The block marker is still rebuilt on every call, because which cells are
+	// solid *does* depend on where the collider is now.
 	function setCollider( newCollider, gridSize, gridSpacingXY, gridOrigin ) {
+
+		const unchanged = solver.reuseColliderKernels !== false
+			&& newCollider === solver.collider
+			&& sameNumbers( gridSize, solver.gridSize )
+			&& sameNumbers( gridSpacingXY, solver.gridSpacing )
+			&& sameNumbers( gridOrigin, solver.gridOrigin );
 
 		solver.collider = newCollider;
 		solver.gridSize = gridSize;
 		solver.gridSpacing = gridSpacingXY;
 		solver.gridOrigin = gridOrigin;
 
-		rebuildColliderKernels();
+		if ( ! unchanged ) rebuildColliderKernels();
 
 		if ( ! newCollider ) {
 

@@ -571,6 +571,21 @@ removed on `examples/20-flip-dam-break/`, ~17 of 364 on
 `examples/28-drop-into-pool/`, with no measurable time effect -- the remaining
 submissions are inside those composites. `settings.batchStages` is the switch.
 
+**A collider that only *moved* does not rebuild its kernels.** `setCollider()`
+used to rebuild every collider-dependent kernel on every call, and a scene whose
+collider moves calls it every step -- which meant ~15 fresh compute nodes
+followed by a solve that had to compile 28 pipelines from scratch. Measured on
+`examples/23-flip-moving-collider/`: **351.5 ms per step against 44.3 ms**, at
+identical submissions (328 vs 327) and dispatches (1594 vs 1583), with the
+pipeline counter at 28 per step against 0. Skipping the rebuild is correct
+because `createSDFRigidBodyCollider2`'s `update()` re-rasterises through
+`addPolygon()`, which writes into the same `grid.data` field rather than
+replacing it -- and no geometry is baked into a kernel, so the existing kernels
+read the new shape on the next dispatch by construction. The block marker is
+still rebuilt every call, because which cells are solid does depend on where the
+collider is now. `boundarySolver.reuseColliderKernels = false` restores the old
+behaviour.
+
 ### `grid_flip_solver2.js` -- `carryConcentration`, a dye carried on the particles
 
 An optional per-particle scalar -- dye, ink, a tracer, a second miscible liquid's mixing fraction --

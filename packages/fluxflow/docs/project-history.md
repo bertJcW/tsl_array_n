@@ -326,6 +326,38 @@ device itself with every limit at the adapter's own value, falling back to
 three.js's own device if anything in that path throws. All four scenes run with
 zero GPU errors afterwards.
 
+### 12. A scene running at 3 fps because a moving collider rebuilt its kernels
+
+Found by measuring example 23 (`23-flip-moving-collider`) as the collider case
+for a different optimisation question. Its step cost **367 ms**; its fluid solve
+alone costs 24.3 ms and its `setCollider()` call alone costs 0.5 ms. The obvious
+suspect -- the moving collider's own `update(dt)` -- measured **0.43 ms**, 0.1%,
+by timing it inside the real step. The missing 93% was an interaction between two
+cheap calls.
+
+`setCollider()` rebuilt every collider-dependent kernel on every call (~15 new
+TSL kernels), and three.js caches compute pipelines by node, so the next solve
+compiled them: **28 pipelines per step**, every step.
+
+A collider that merely *moved* does not need new kernels.
+`createSDFRigidBodyCollider2`'s `update()` re-rasterises the posed polygon
+through `addPolygon()`, which writes into the same `grid.data` field with
+`fromArray` -- and no geometry is baked into a kernel, so kernels built earlier
+read the new shape on the next dispatch by construction. `setCollider()` now
+skips the rebuild when handed the same collider object with the same grid
+parameters, and still rebuilds the block marker (which does depend on where the
+collider is now). `solver.reuseColliderKernels = false` restores the old
+behaviour and is the measurement's control arm.
+
+Paired, per-step alternation, arms swapped inside one run: **351.5 ms against
+44.3 ms per step (7.94x mean, 8.46x median)**, at identical submissions (328 vs
+327) and dispatches (1594 vs 1583), with the pipeline counter at 28 against 0.
+200 steps of the moving collider afterwards produced zero non-finite values.
+
+The general lesson is the one this project keeps re-learning: the expensive thing
+was not the work, it was *preparing* to do the work, and it was invisible from
+every counter except a pipeline-creation hook.
+
 ## Performance
 
 The full arc is in `docs/perf-investigation-cg-gpu-resident-alpha-beta.md`,
