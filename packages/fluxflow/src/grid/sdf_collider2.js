@@ -105,13 +105,13 @@ export function createSDFStaticCollider2( resolutionX, resolutionY, gridSpacingX
 		// sample()/gradient()/isInside() and holds a reference to *this* field,
 		// so new contents written into it are picked up without rebuilding
 		// anything. That invariant is load-bearing:
-		// grid_blocked_boundary_condition_solver2.js's setCollider() skips its
-		// kernel rebuild when it is handed the same collider object again, which
-		// is what makes a *moving* collider cheap -- measured 351.5 -> 44.3 ms
-		// per step on examples/23-flip-moving-collider/, with 28 compute
-		// pipelines compiled per step against 0. Replacing the field here
-		// instead of writing into it would silently resurrect the old geometry
-		// in every already-built kernel.
+		// grid_blocked_boundary_condition_solver2.js's colliderMoved() keeps the
+		// kernels and re-derives only the block marker, which is what makes a
+		// *moving* collider cheap -- measured 351.5 -> 44.3 ms per step on
+		// examples/23-flip-moving-collider/, with 28 compute pipelines compiled
+		// per step against 0. Replacing the field here instead of writing into
+		// it would silently resurrect the old geometry in every already-built
+		// kernel.
 
 	}
 

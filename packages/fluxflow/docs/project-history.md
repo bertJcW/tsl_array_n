@@ -346,8 +346,17 @@ through `addPolygon()`, which writes into the same `grid.data` field with
 read the new shape on the next dispatch by construction. `setCollider()` now
 skips the rebuild when handed the same collider object with the same grid
 parameters, and still rebuilds the block marker (which does depend on where the
-collider is now). `solver.reuseColliderKernels = false` restores the old
-behaviour and is the measurement's control arm.
+collider is now). Which of the two calls a scene uses is the scene's decision,
+because only it knows whether it is re-binding the same collider
+(`colliderMoved()`) or a different one (`setCollider()`, which always rebuilds);
+a library that guesses has to guess wrong on one of the two. The two were then
+measured against each other -- snapshot the velocity field, run one call, restore
+the input, run the other, compare -- with each call at the same position in its
+own sequence: **bit-identical, 0 difference**. (An earlier version of that test
+compared them at different positions and reported 0.5-0.76 differences, which
+turned out to be `constrainVelocity`'s own scratch state rather than anything to
+do with the collider -- visible because the difference survived holding the
+collider stationary.)
 
 Paired, per-step alternation, arms swapped inside one run: **351.5 ms against
 44.3 ms per step (7.94x mean, 8.46x median)**, at identical submissions (328 vs

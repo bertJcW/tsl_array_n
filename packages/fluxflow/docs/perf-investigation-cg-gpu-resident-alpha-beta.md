@@ -1597,8 +1597,27 @@ geometry on the next dispatch by construction.
 So `setCollider()` now skips `rebuildColliderKernels()` when it is handed the
 same collider object with the same grid parameters, and still runs
 `buildBlockMarker()` every call -- which cells are solid *does* depend on where
-the collider is now. `solver.reuseColliderKernels = false` restores the old
-behaviour and is the control arm.
+the collider is now. The decision belongs to the caller, not to this file: only
+the caller knows whether it is re-binding the same collider or a different one,
+and a library that guesses has to guess wrong on one of the two.
+The two calls were then checked against each other directly, because "the kernels
+still read the same field" is an argument and not a measurement. The test holds
+the input still -- it snapshots the velocity field, runs one pass, restores the
+input with `fromArray`, runs the other pass -- and compares the two outputs
+element by element, with each call at the *same* position in its own sequence so
+that leftover scratch state cannot masquerade as a difference:
+
+| pair | max abs difference in the resulting velocity |
+| --- | --- |
+| `colliderMoved()` twice in a row | **0** |
+| `setCollider()` twice in a row | **0** |
+| `colliderMoved()` against `setCollider()` | **0** |
+
+Bit-identical. An earlier version of that test compared the two calls at
+different positions in the sequence and reported differences of 0.5-0.76 -- which
+was `constrainVelocity`'s own scratch state (its `uTemp`/`validA` fields), not
+the collider, and the tell was that the difference persisted with the collider
+held stationary.
 
 ## Verification
 

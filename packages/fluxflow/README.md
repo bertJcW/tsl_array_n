@@ -583,8 +583,30 @@ because `createSDFRigidBodyCollider2`'s `update()` re-rasterises through
 replacing it -- and no geometry is baked into a kernel, so the existing kernels
 read the new shape on the next dispatch by construction. The block marker is
 still rebuilt every call, because which cells are solid does depend on where the
-collider is now. `boundarySolver.reuseColliderKernels = false` restores the old
-behaviour.
+collider is now. Which call to use is the *caller's* decision, because the caller
+is the only party that knows whether the collider it is handing over is the same
+one again (`colliderMoved()`) or a different one (`setCollider()`, which always
+rebuilds) -- a library that guesses has to guess wrong on one of the two.
+Verified bit-identical: one pass of each call against a restored input produces
+the same velocity field to the last bit.
+The two calls were then checked against each other directly, because "the kernels
+still read the same field" is an argument and not a measurement. The test holds
+the input still -- it snapshots the velocity field, runs one pass, restores the
+input with `fromArray`, runs the other pass -- and compares the two outputs
+element by element, with each call at the *same* position in its own sequence so
+that leftover scratch state cannot masquerade as a difference:
+
+| pair | max abs difference in the resulting velocity |
+| --- | --- |
+| `colliderMoved()` twice in a row | **0** |
+| `setCollider()` twice in a row | **0** |
+| `colliderMoved()` against `setCollider()` | **0** |
+
+Bit-identical. An earlier version of that test compared the two calls at
+different positions in the sequence and reported differences of 0.5-0.76 -- which
+was `constrainVelocity`'s own scratch state (its `uTemp`/`validA` fields), not
+the collider, and the tell was that the difference persisted with the collider
+held stationary.
 
 ### `grid_flip_solver2.js` -- `carryConcentration`, a dye carried on the particles
 

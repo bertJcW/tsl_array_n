@@ -446,7 +446,7 @@ try {
 	// `step` is what a driver should call, not onAdvanceTimeStep directly:
 	// it carries whatever per-frame scene work this example does around the
 	// solve, so an automated run exercises the same physics the page does.
-	window.__fluxflowProbe = {
+	const probe = {
 		flip, velocityGrid,
 		// Measurement handle only -- see examples/16-karman-vortex-street/'s
 		// probe comment. The renderer is here so a driver can count
@@ -456,11 +456,32 @@ try {
 		// scene is the collider case: it passes options.collider, so its
 		// boundary solver runs the collider branch of constrainVelocity().
 		renderer,
+		// `true` hands the solver the collider again every step -- the
+		// general-case call, which rebuilds every collider-dependent kernel and
+		// (measured) costs 351.5 ms per step here against 44.3 ms for the call
+		// below, because three.js caches compute pipelines by node and a rebuild
+		// produces new ones. Kept as the control arm of that measurement, and as
+		// the reminder of what the general call is for: it is what a scene must
+		// use when the collider it passes is a *different* collider.
+		colliderRebuildEveryStep: false,
 		step: async () => {
 
 			rigidCollider.update( dt );
-			flip.boundarySolver.setCollider( rigidCollider, [ NX, NY ], [ 1, 1 ], [ 0, 0 ] );
+
+			if ( probe.colliderRebuildEveryStep ) {
+
+				flip.boundarySolver.setCollider( rigidCollider, [ NX, NY ], [ 1, 1 ], [ 0, 0 ] );
+
+			} else {
+
+				// What this scene actually knows: the same collider, moved. The
+				// solver keeps its kernels and re-derives only the block marker.
+				flip.boundarySolver.colliderMoved();
+
+			}
+
 			await flip.onAdvanceTimeStep();
+
 		},
 		pause: async () => {
 
@@ -475,6 +496,8 @@ try {
 
 		}
 	};
+
+	window.__fluxflowProbe = probe;
 
 	requestAnimationFrame( animate );
 

@@ -143,13 +143,6 @@ export function createGridBlockedBoundaryConditionSolver2(
 		uMarker, vMarker, uTemp, vTemp, blockMarker,
 		closedDomainBoundaryFlag: DIRECTION_ALL, // plain mutable property, same effect as the source's setClosedDomainBoundaryFlag
 
-		// Plain mutable property. `true` (the default) skips rebuilding the
-		// collider kernels when setCollider() is handed the same collider
-		// object with the same grid parameters -- see setCollider's own
-		// comment for the measurement that justified it. Set it to `false` for
-		// the previous always-rebuild behaviour, which is the control arm of
-		// that measurement.
-		reuseColliderKernels: true,
 		collider: null
 	};
 
@@ -433,57 +426,39 @@ export function createGridBlockedBoundaryConditionSolver2(
 	// gridOrigin are stored purely to match the source -- checked that
 	// nothing in this file actually reads them (possibly a placeholder for
 	// code outside grid/), this isn't a missed piece of logic.
-	// Element-wise array compare for the grid parameters below. Plain `===`
-	// is wrong for arrays, and these arrive as (possibly different) array
-	// literals on every call.
-	function sameNumbers( a, b ) {
-
-		if ( a === undefined || b === undefined || a === null || b === null ) return a === b;
-		if ( a.length !== b.length ) return false;
-
-		for ( let i = 0; i < a.length; i ++ ) if ( a[ i ] !== b[ i ] ) return false;
-
-		return true;
-
-	}
-
-	// *** Only rebuild the collider kernels when the collider itself changes. ***
+	// *** Two verbs, because the scene knows and the library does not. ***
 	//
-	// rebuildColliderKernels() builds about fifteen new TSL kernels, and
-	// three.js's pipeline cache is keyed on the compute node -- so kernels
-	// built a moment ago miss it and the next solve pays to compile them.
-	// Measured on examples/23-flip-moving-collider/, which re-sets its collider
-	// every step: a step costs 367 ms, of which `onAdvanceTimeStep()` alone is
-	// 24 ms and `setCollider()` alone is 0.5 ms. The other ~335 ms -- 93% of the
-	// frame -- is the *interaction*: a fresh rebuild followed by a solve that
-	// has to bring fifteen new pipelines up.
+	// `setCollider()` binds a collider -- or a new set of grid parameters for it
+	// -- and rebuilds every collider-dependent kernel. That is the general-case
+	// call: the collider it is handed may be a different one, with different
+	// geometry behind the markers, the no-flux projection, the extrapolation and
+	// the blocked-boundary treatment, and those kernels hold references to it.
 	//
-	// A collider that merely *moved* does not need new kernels.
-	// createSDFRigidBodyCollider2's update() re-rasterises the posed polygon
-	// through collider.addPolygon(), which writes into the same `grid.data`
-	// field with fromArray -- and every kernel built here reads that field
-	// through collider.sample()/isInside()/gradient(). The field's *contents*
-	// change; its identity does not, and no geometry is baked into a kernel.
-	// So re-setting the same collider object with the same grid parameters
-	// keeps the existing kernels valid, and they will read the new geometry on
-	// the next dispatch by construction.
+	// A collider that merely *moved* needs none of that. Its own update()
+	// re-rasterises through addPolygon(), which writes into the same `grid.data`
+	// field with fromArray -- the field's *contents* change, its identity does
+	// not -- and every kernel built here reads that field through
+	// collider.sample()/gradient()/isInside(). So the kernels already in hand see
+	// the new shape on the next dispatch by construction, and all that has to be
+	// redone is the block marker, which does depend on where the collider is now.
+	// `colliderMoved()` says exactly that.
 	//
-	// The block marker is still rebuilt on every call, because which cells are
-	// solid *does* depend on where the collider is now.
+	// Keeping them as two calls leaves the decision with the caller, which is the
+	// only party that knows whether the collider it is handing over is the same
+	// one again or a different one -- a library that guesses has to guess wrong
+	// on one of the two. Measured on examples/23-flip-moving-collider/, which
+	// moves its collider every step: `setCollider()` every step costs 351.5 ms
+	// per step against 44.3 ms for `colliderMoved()`, a difference of 28 compute
+	// pipelines compiled per step -- three.js caches pipelines by node, and a
+	// rebuild hands it new nodes every time.
 	function setCollider( newCollider, gridSize, gridSpacingXY, gridOrigin ) {
-
-		const unchanged = solver.reuseColliderKernels !== false
-			&& newCollider === solver.collider
-			&& sameNumbers( gridSize, solver.gridSize )
-			&& sameNumbers( gridSpacingXY, solver.gridSpacing )
-			&& sameNumbers( gridOrigin, solver.gridOrigin );
 
 		solver.collider = newCollider;
 		solver.gridSize = gridSize;
 		solver.gridSpacing = gridSpacingXY;
 		solver.gridOrigin = gridOrigin;
 
-		if ( ! unchanged ) rebuildColliderKernels();
+		rebuildColliderKernels();
 
 		if ( ! newCollider ) {
 
@@ -494,6 +469,30 @@ export function createGridBlockedBoundaryConditionSolver2(
 			buildBlockMarker();
 
 		}
+
+	}
+
+	// The collider already bound has changed its own data -- it moved, or its
+	// shape was re-added -- without changing identity or the grid parameters.
+	// Re-derives the block marker and keeps the kernels; see setCollider's own
+	// comment for what that is worth and why the decision lives here rather than
+	// in this file.
+	//
+	// Throws when nothing is bound: calling this after a collider *swap* would
+	// silently keep simulating the old shape, and a loud error beats a scene that
+	// quietly runs the wrong wall.
+	function colliderMoved() {
+
+		if ( ! solver.collider ) {
+
+			throw new Error(
+				'grid_blocked_boundary_condition_solver2: colliderMoved() called with no collider bound. ' +
+				'Use setCollider( collider, gridSize, gridSpacing, gridOrigin ) to bind one, or to replace the one bound.'
+			);
+
+		}
+
+		buildBlockMarker();
 
 	}
 
@@ -548,6 +547,7 @@ export function createGridBlockedBoundaryConditionSolver2(
 	solver.setCollider = setCollider;
 	solver.setInflows = setInflows;
 	solver.constrainVelocity = constrainVelocity;
+	solver.colliderMoved = colliderMoved;
 
 	setCollider( colliderSDF, [ resolutionX, resolutionY ], [ gridSpacingX, gridSpacingY ], [ originX, originY ] );
 	setInflows( inflows );
