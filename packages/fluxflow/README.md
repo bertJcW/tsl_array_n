@@ -560,6 +560,17 @@ a live node in place of a plain number (this port's own "number or node" convent
 on interaction, no reload or kernel rebuild needed -- the same already-established live-uniform pattern
 `interaction/pointer.js`/`keyboard.js` and `examples/16-karman-vortex-street/`'s own force controls use.
 
+**Stage submissions are batched.** The step's stages go out as one submission
+per group rather than one per stage -- the same change the CG iteration got, for
+the same reason, with the only *required* break being the readback at the
+projection. Composite entries (`boundarySolver.constrainVelocity()`, the
+optional passes, a caller-supplied force) are batch breaks by construction, and
+the accumulator resets are kept outside the batches because they are buffer
+uploads rather than dispatches. Measured: ~15 of a step's 239 submissions
+removed on `examples/20-flip-dam-break/`, ~17 of 364 on
+`examples/28-drop-into-pool/`, with no measurable time effect -- the remaining
+submissions are inside those composites. `settings.batchStages` is the switch.
+
 ### `grid_flip_solver2.js` -- `carryConcentration`, a dye carried on the particles
 
 An optional per-particle scalar -- dye, ink, a tracer, a second miscible liquid's mixing fraction --

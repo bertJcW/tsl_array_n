@@ -489,6 +489,23 @@ submissions where its step carries 359), and the frame time was pinned to the
 60 Hz floor. **The criterion belongs on the step**, which is the unit the
 library owns.
 
+### Step 2: batching the FLIP stages (measured, and much smaller than estimated)
+
+The same submission batching applied to the FLIP solvers' own stage sequences,
+with the accumulator resets deliberately left outside the batches (they are
+CPU->GPU uploads, and a pending upload only lands before a dispatch that begins
+a pass). Frozen-workload measurement, `which=stages`, CG batching on in both
+arms: **15.2 of 239 submissions removed per step on example 20 (0.998x in
+time), 17.0 of 364 on example 28 (1.062x)**.
+
+So roughly 6% of the submissions and nothing measurable, against an estimate of
+~10% of the frame. Batching the top-level stage entries can only reach 15-17 of
+them; the other ~140 per step live inside composites -- `constrainVelocity()`
+(three calls per step), the P2G scatter and its finalize, the resets. Those
+builders have to expose their dispatchers before they can join a batch, which
+is the version of this step that would be worth measuring. The change is kept:
+numerically identical, neutral in time, and a prerequisite for that.
+
 ## Testing
 
 Three layers, because no one of them is sufficient here.

@@ -1436,25 +1436,54 @@ export function createGridTwoPhaseFlipSolver2( {
 
 	// ---------------------------------------------------------------- frame
 
+	// Runtime-switchable and exposed on the returned object, for the same reason
+	// the pressure solver's settings are: an in-run paired comparison is the only
+	// kind that means anything on a scene that drifts while it is measured.
+	const settings = { batchStages: true };
+
 	async function onAdvanceTimeStep() {
 
-		advectParticles();
-		if ( pushOutOfCollider ) pushOutOfCollider();
+		// *** One submission per stage group, not one per stage. ***
+		//
+		// Same change, and the same reasoning, as grid_flip_solver2.js's own
+		// step: about twenty-five stages here, and only the readback at
+		// `projectDispatch()` actually needs to break the submission. Every
+		// `renderer.compute()` call is its own command buffer, pass and submit,
+		// at ~38.8 us each on the development machine regardless of the work it
+		// carries (3 us of that JavaScript; 64 dispatches execute on the GPU in
+		// 0.052 ms).
+		//
+		// Plain dispatchers are collected into one `renderer.compute(array)`;
+		// composite entries -- `boundarySolver.constrainVelocity()`, the
+		// optional passes -- have no `computeNode`, so tsl_array_n's planBatch
+		// calls them in place and the ordering stays exactly what calling the
+		// list one by one would have given.
+		//
+		// The two reset functions stay *outside* the batches: they are CPU->GPU
+		// buffer uploads rather than dispatches, and a pending upload is only
+		// guaranteed to land before a dispatch that begins a pass -- so keeping
+		// them between batches is what makes the counts provably zero before
+		// countPhasesKernel reads them. `settings.batchStages` is the runtime
+		// switch, for an in-run paired comparison.
+		runStages( [
+			advectParticles,
+			pushOutOfCollider
+		] );
 
 		// Counts first: the density field they feed has to describe where the
 		// particles are NOW, i.e. after advection, not where they were when
 		// last frame's pressure was solved.
 		resetCellCounts();
-		countPhasesKernel();
-		computeDensityKernel();
-		computeBetaU();
-		computeBetaV();
+
+		runStages( [
+			countPhasesKernel,
+			computeDensityKernel,
+			computeBetaU,
+			computeBetaV
+		] );
 
 		resetAccumulators();
-		scatterU();
-		scatterV();
-		finalizeU();
-		finalizeV();
+
 		// Snapshot order is grid_flip_solver2.js's, deliberately unchanged:
 		// the FLIP delta baseline is taken straight after P2G and BEFORE
 		// extrapolation and the wall constraint. Everything the grid does
@@ -1464,34 +1493,59 @@ export function createGridTwoPhaseFlipSolver2( {
 		// must not be handed to particles as though the fluid had produced
 		// them. That ordering is real-hardware-validated in the single-phase
 		// solver and is not the place to improvise.
-		snapshotOldU();
-		snapshotOldV();
+		runStages( [
+			scatterU,
+			scatterV,
+			finalizeU,
+			finalizeV,
+			snapshotOldU,
+			snapshotOldV,
 
-		extrapolateWeightU();
-		extrapolateWeightV();
+			extrapolateWeightU,
+			extrapolateWeightV,
 
-		boundarySolver.constrainVelocity();
+			boundarySolver.constrainVelocity,
 
-		applyGravityU();
-		applyGravityV();
-		boundarySolver.constrainVelocity();
+			applyGravityU,
+			applyGravityV,
+			boundarySolver.constrainVelocity
+		] );
 
 		await projectDispatch();
-		boundarySolver.constrainVelocity();
 
-		g2pUpdate();
+		runStages( [
+			boundarySolver.constrainVelocity,
 
-		// After g2p, before resampling: the concentration field this reads was
-		// built from the same particle positions still in effect, and resampling
-		// is what would move particles out from under it.
-		if ( concentrationPassEnabled ) mixConcentration();
+			g2pUpdate,
 
-		if ( resamplePass ) resamplePass();
+			// After g2p, before resampling: the concentration field this reads
+			// was built from the same particle positions still in effect, and
+			// resampling is what would move particles out from under it.
+			concentrationPassEnabled ? mixConcentration : null,
+
+			resamplePass
+		] );
+
+	}
+
+	// `null`/`undefined` entries are stages this scene did not configure;
+	// planBatch skips them, and the unbatched path has to as well.
+	function runStages( stages ) {
+
+		if ( settings.batchStages ) {
+
+			tsl_array_n.dispatchBatch( stages );
+			return;
+
+		}
+
+		for ( const stage of stages ) if ( stage ) stage();
 
 	}
 
 	return {
 		onAdvanceTimeStep,
+		settings,
 		positions, velocities, phase,
 		// `concentration` is the same array as `phase`, under the name that
 		// actually describes it once the value is continuous. Both are exposed

@@ -1690,47 +1690,85 @@ export function createGridFlipSolver2( {
 
 	}
 
+	// Runtime-switchable, and exposed on the returned object, for the same
+	// reason the pressure solver's own settings are: a constructor-time choice
+	// can only be compared across runs, and these scenes drift enough that only
+	// an in-run paired comparison means anything.
+	const settings = { batchStages: true };
+
 	async function onAdvanceTimeStep() {
 
-		advectParticles();
-		if ( pushOutOfCollider ) pushOutOfCollider();
+		// *** One submission per stage group, not one per stage. ***
+		//
+		// Every `renderer.compute()` call is its own command buffer, pass and
+		// queue submit, and one of them costs ~38.8 us of wall time on the
+		// development machine no matter how much work it carries (3 us of that
+		// JavaScript; 64 dispatches execute on the GPU in 0.052 ms). This step
+		// used to make about thirty of them, and only one break in the whole
+		// sequence is *required*: the readback at `projectDispatch()`, where
+		// the host has to see the CG result before deciding anything.
+		//
+		// So the stages between readbacks go out as batches. Stage entries that
+		// are plain dispatchers (most of them) are collected into one
+		// `renderer.compute(array)`; entries that are composite functions --
+		// `boundarySolver.constrainVelocity()`, the optional passes, a
+		// caller-supplied force -- have no `computeNode`, and tsl_array_n's
+		// planBatch calls those *in place*, which keeps the ordering exactly
+		// what calling the list one by one would have given.
+		//
+		// `resetAccumulators()` stays outside the batch deliberately: it is
+		// four CPU->GPU buffer uploads rather than dispatches, and a pending
+		// upload is only guaranteed to land before a dispatch that *begins* a
+		// pass. Keeping it between two batches is what makes the accumulators
+		// provably zero before `scatterU` reads them.
+		//
+		// `settings.batchStages` is the runtime switch (it lives on the
+		// returned object) so a paired measurement can compare both forms
+		// inside one run -- a constructor-time choice can only be compared
+		// across runs, and these scenes drift.
+		runStages( [
+			advectParticles,
+			pushOutOfCollider
+		] );
 
 		resetAccumulators();
-		scatterU();
-		scatterV();
-		finalizeU();
-		finalizeV();
 
-		snapshotOldU();
-		snapshotOldV();
+		const afterP2G = [
+			scatterU,
+			scatterV,
+			finalizeU,
+			finalizeV,
 
-		extrapolateWeightU();
-		extrapolateWeightV();
-		boundarySolver.constrainVelocity();
+			snapshotOldU,
+			snapshotOldV,
 
-		clearFluidMask();
-		markFluidCellsKernel();
-		computeUFluidAdjacent();
-		computeVFluidAdjacent();
+			extrapolateWeightU,
+			extrapolateWeightV,
+			boundarySolver.constrainVelocity,
 
-		if ( resamplePass ) resamplePass();
+			clearFluidMask,
+			markFluidCellsKernel,
+			computeUFluidAdjacent,
+			computeVFluidAdjacent,
 
-		// After resampling (which can move particles) and before the projection,
-		// because this is what builds the density field beta is derived from.
-		if ( concentrationGridPass ) concentrationGridPass();
+			resamplePass,
+
+			// After resampling (which can move particles) and before the
+			// projection, because this is what builds the density field beta is
+			// derived from.
+			concentrationGridPass
+		];
 
 		if ( reducedPressureEnabled ) {
 
 			// Gravity itself is carried by the pressure system's own boundary
 			// condition -- see dirichlet() -- so nothing is added here unless
 			// the density varies.
-			if ( applyReducedGravityU ) applyReducedGravityU();
-			if ( applyReducedGravityV ) applyReducedGravityV();
+			afterP2G.push( applyReducedGravityU, applyReducedGravityV );
 
 		} else {
 
-			applyGravityU();
-			applyGravityV();
+			afterP2G.push( applyGravityU, applyGravityV );
 
 		}
 
@@ -1743,25 +1781,48 @@ export function createGridFlipSolver2( {
 		// Called rather than bound at construction so a force that needs one
 		// of this factory's own fields -- surface tension needs
 		// cellConcentration, which does not exist until this returns -- can
-		// be built afterwards and picked up by the closure.
-		if ( applyForces ) applyForces();
-		boundarySolver.constrainVelocity();
+		// be built afterwards and picked up by the closure. Being a plain
+		// function, it is a batch break rather than a batch member.
+		afterP2G.push( applyForces, boundarySolver.constrainVelocity );
+
+		runStages( afterP2G );
 
 		await projectDispatch();
-		boundarySolver.constrainVelocity();
 
-		extrapolatePressureU();
-		extrapolatePressureV();
+		runStages( [
+			boundarySolver.constrainVelocity,
 
-		g2pUpdate();
+			extrapolatePressureU,
+			extrapolatePressureV,
 
-		// After g2p: this changes what the particles carry, not how they move.
-		if ( concentrationParticlePass ) concentrationParticlePass();
+			g2pUpdate,
+
+			// After g2p: this changes what the particles carry, not how they
+			// move.
+			concentrationParticlePass
+		] );
+
+	}
+
+	// `null`/`undefined` entries are stage hooks this scene did not configure;
+	// tsl_array_n's planBatch skips them, and the unbatched path below has to
+	// as well.
+	function runStages( stages ) {
+
+		if ( settings.batchStages ) {
+
+			tsl_array_n.dispatchBatch( stages );
+			return;
+
+		}
+
+		for ( const stage of stages ) if ( stage ) stage();
 
 	}
 
 	return {
 		onAdvanceTimeStep,
+		settings,
 		positions, velocities, fluidMask,
 		concentration, cellConcentration, cellDensity,
 		pressure: pressureSolver.pressure,

@@ -1499,3 +1499,48 @@ ways (example 20's batched arm did 3% *more* work and still won 1.56x; example
 28's did 5.7% *less*), and the per-dispatch normalisation agrees with the raw
 ratio, so the conclusion holds -- but "identical sequence" is exact only up to
 that reordering.
+
+
+---
+
+# Step 2, measured: the stage batching is worth 6%, not the 10% estimated
+
+`grid_flip_solver2.js` and `grid_two_phase_flip_solver2.js` now submit their
+stage groups as batches instead of one submission per stage -- the same change
+the CG iteration already got, and with the same shape: everything between two
+readbacks goes out together, and the entries that are composite functions
+rather than plain dispatchers (`boundarySolver.constrainVelocity()`, the
+optional passes, a caller-supplied force) become batch breaks, because
+tsl_array_n's planBatch calls those in place. The accumulator resets stay
+*outside* the batches deliberately: they are CPU->GPU uploads rather than
+dispatches, and a pending upload is only guaranteed to land before a dispatch
+that *begins* a pass, so keeping them between batches is what makes the
+accumulators provably zero before the scatter reads them.
+
+Measured with the frozen harness (`which=stages`, per-step alternation, CG
+batching left on in both arms):
+
+| scene | batched ms/step | unbatched ms/step | speedup | submissions removed/step |
+| --- | --- | --- | --- | --- |
+| 20 flip-dam-break | 32.72 | 32.67 | 0.998x | 15.2 of 239 |
+| 28 drop-into-pool | 43.38 | 46.09 | 1.062x | 17.0 of 364 |
+
+**About 6% of the submissions, and nothing measurable in time** -- against an
+estimate of roughly 10% of the frame. The estimate was wrong for a reason worth
+recording: it assumed the FLIP step's submissions sit at its top level. They do
+not. Batching the top-level entries removes 15-17 of them, so the other ~140
+per step are *inside* composites:
+
+- `boundarySolver.constrainVelocity()`, called three times per step, which runs
+  the collider blocks and the domain boundary as its own dispatches;
+- the P2G scatter and its finalize, built by `buildScatter`/`buildFinalize`;
+- the accumulator/count resets.
+
+Those have to expose their dispatchers before they can join a batch. That is a
+change to the boundary solver and the scatter builders rather than a call-site
+edit, and it is the version of this step that would be worth measuring.
+
+The change is kept because it is numerically identical -- same dispatches, same
+order -- it is a prerequisite for that deeper version, and it is neutral rather
+than negative. On its own it does not earn its complexity, and saying so is the
+point.
