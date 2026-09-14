@@ -279,7 +279,7 @@ export function createGridPressureSolver2( {
 	// this measurement does not work and the interventional one needs the
 	// cap to move inside a single run. A capped solve does not converge and
 	// is not a correctness configuration; see the tolerance note above.
-	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations, checkBadCells: true };
+	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations, tolerance, checkBadCells: true };
 
 	const [ resolutionX, resolutionY ] = resolution;
 	const [ gridSpacingX, gridSpacingY ] = gridSpacing;
@@ -656,7 +656,7 @@ export function createGridPressureSolver2( {
 			if ( updateDirichletFields ) updateDirichletFields();
 			dispatchBuildSystem();
 			diagnostics.converged = await timePhase( 'pressure-cg-solve', () => cg.solve(
-				tolerance, settings.maxIterations,
+				settings.tolerance, settings.maxIterations,
 				settings.residualCheckInterval, settings.gpuResidentScalars, settings.batchIterations
 			) );
 

@@ -120,6 +120,89 @@ try {
 
 	log( 'multigrid-preconditioned CG — 2D Poisson, 16x16, zero-flux boundary', succeeded && matches, detail );
 
+	// *** Are restriction and prolongation an adjoint pair? ***
+	//
+	// A V-cycle is a symmetric operator only if they are, and PCG requires
+	// a symmetric preconditioner -- multigrid.js's relax() comment records
+	// what this project already suffered when the V-cycle was not
+	// symmetric (beta running away, pressure to 1e30 in one dispatch).
+	// Restriction R and prolongation P are adjoint when
+	//
+	//     ( R u, v ) == ( u, P v )
+	//
+	// for every fine u and coarse v. This measures it on the real kernels
+	// rather than on a transcription of them, with random fields, and
+	// reports the *relative* mismatch -- an absolute one says nothing
+	// without knowing the magnitude of the inner products.
+	{
+		const fineShape = [ N, N ];
+		const coarseShape = [ N / 2, N / 2 ];
+
+		const u = tsl_array_n.arrayN( 'float', fineShape ); // fine
+		const v = tsl_array_n.arrayN( 'float', coarseShape ); // coarse
+		const Ru = tsl_array_n.arrayN( 'float', coarseShape );
+		const Pv = tsl_array_n.arrayN( 'float', fineShape );
+
+		const restrict = linalg.buildRestrictKernel( u, Ru, coarseShape, undefined );
+		const prolong = linalg.buildCorrectKernel( v, Pv, fineShape, undefined );
+
+		// A fixed generator, so a result is reproducible rather than a
+		// different random draw every reload.
+		let seed = 12345;
+		const rand = () => {
+
+			seed = ( seed * 1103515245 + 12345 ) & 0x7fffffff;
+			return seed / 0x7fffffff - 0.5;
+
+		};
+
+		async function adjointRatio() {
+
+			u.fromArray( Float32Array.from( { length: N * N }, rand ) );
+			v.fromArray( Float32Array.from( { length: ( N / 2 ) * ( N / 2 ) }, rand ) );
+			Pv.fromArray( new Float32Array( N * N ) ); // buildCorrectKernel ADDS, so start at zero
+
+			restrict();
+			prolong();
+
+			const [ ruData, vData, uData, pvData ] = await Promise.all( [
+				Ru.toArray(), v.toArray(), u.toArray(), Pv.toArray()
+			] );
+
+			let left = 0, right = 0;
+			for ( let i = 0; i < ruData.length; i ++ ) left += ruData[ i ] * vData[ i ];
+			for ( let i = 0; i < uData.length; i ++ ) right += uData[ i ] * pvData[ i ];
+
+			return { left, right, ratio: left !== 0 ? right / left : NaN };
+
+		}
+
+		// *** Why the ratio, and not the difference ***
+		//
+		// They are not equal, and the interesting question is whether the
+		// mismatch is a CONSTANT. If R = c * P^T for some fixed c > 0, the
+		// coarse-grid correction P A_c^-1 R = c * (P A_c^-1 P^T) is still
+		// symmetric, and the V-cycle is still a legitimate PCG
+		// preconditioner -- a scale factor is absorbed, it does not break
+		// the property PCG needs. A ratio that WANDERS between draws is the
+		// case that would break it.
+		const draws = [ await adjointRatio(), await adjointRatio(), await adjointRatio() ];
+		const ratios = draws.map( ( d ) => d.ratio );
+		const spread = Math.max( ...ratios ) - Math.min( ...ratios );
+		const constant = spread / Math.abs( ratios[ 0 ] ) < 1e-4;
+
+		log(
+			'restriction and prolongation differ by a constant — (u,Pv) / (Ru,v)',
+			constant,
+			`ratios over three random draws: ${ ratios.map( ( r ) => r.toFixed( 6 ) ).join( ', ' ) } ` +
+			`(spread ${ spread.toExponential( 2 ) }). ` +
+			( constant
+				? `A constant factor of ${ ratios[ 0 ].toFixed( 4 ) } does not break the V-cycle's symmetry -- see the comment above.`
+				: 'A wandering ratio WOULD break it: R is not a scalar multiple of P^T.' )
+		);
+
+	}
+
 } catch ( error ) {
 
 	log( 'failed', false, error.message );

@@ -1909,3 +1909,99 @@ where the knob was inert.
 **Next: make the GPU-resident loop's readback conditional, then re-run the
 interval sweep.** That is the one change the accounting points at, and
 it is worth more than steps 3-5 combined.
+
+## Testing steps 3 and 5 rather than rejecting them by inference
+
+The accounting above rejected all three queued V-cycle directions on the
+grounds that a V-cycle is 0.2 ms. That figure came from a difference of
+medians (10.6 - 10.4) on a base of 10.5 ms, which is 2% -- **inside the
+noise floor**, so it did not establish anything. Re-measured properly, and
+then two of the three built and run.
+
+### The gate: what a V-cycle actually costs
+
+`tolerance` moved onto the runtime settings so a solve can be made never
+to converge, which pins both arms to exactly the same iteration count and
+multiplies the signal by that count. At `tolerance: 0`, cap 40,
+preconditioner `multigrid` against `none` (whose apply is a single copy):
+
+| | ms/step | iterations |
+| --- | --- | --- |
+| multigrid | 45.10 | 40 |
+| none | 38.90 | 40 |
+| difference | 6.20 over 40 cycles | |
+
+**0.155 ms per V-cycle**, now with 40x amplification and matched iteration
+counts. The earlier 0.2 ms was right, but it was not measured; this is.
+
+Against 0.861 ms for a whole CG iteration, a V-cycle is under a fifth of
+one. That bounds step 3 at ~0.6% of a step and step 4 at ~3.5%.
+
+### Step 5: the premise is wrong
+
+Restriction and prolongation are not an adjoint pair, and
+`examples/07-multigrid-preconditioned-cg/` now measures it on the real
+kernels: `(Ru, v) = -0.149227` against `(u, Pv) = -0.596909`, a relative
+mismatch of 75%.
+
+But the mismatch is **exactly a factor of 4**, and that is the whole
+question. Over three random draws the ratio is **4.000000, 3.999999,
+4.000003** -- spread 3.79e-6, i.e. constant to float32 round-off. 4 is
+2^d for d = 2.
+
+If `R = c P^T` for a fixed c, the coarse-grid correction
+`P A_c^-1 R = c (P A_c^-1 P^T)` is still symmetric. **A constant scale
+factor does not break the property PCG needs.** A ratio that wandered
+between draws would; this one does not.
+
+So step 5 is not the cause of anything, and the "more likely true cause of
+V-cycle asymmetry" it was filed under is not a cause at all. The check
+stays in example 07 as a regression test, phrased as "differ by a
+constant" rather than "are adjoint", because the constant is the finding.
+
+### Step 3: correct, and worth nothing measurable
+
+`buildRestrictKernel` can now write the coarse level's zeroed `x` from the
+same dispatch that restricts into its `b`
+(`settings.multigrid.foldClearIntoRestrict`, off by default). Different
+arrays, same shape, no aliasing.
+
+**Bit-identical, confirmed rather than argued**: same restored input, one
+step each way, max absolute difference **0** on both velocity components,
+100% of cells exactly equal, 12 iterations either way.
+
+Paired timing, twice, phase swapped:
+
+| run | fold off | fold on | delta |
+| --- | --- | --- | --- |
+| 1 | 21.9 ms | 24.3 ms | fold **2.4 ms slower** |
+| 2 (phase swapped) | 16.2 ms | 15.9 ms | fold **0.3 ms faster** |
+
+The direction flips, so it is noise -- which is what the 0.155 ms V-cycle
+predicts: three dispatches out of ~36 is ~0.013 ms per cycle, ~0.15 ms per
+step, an order of magnitude below what this harness can resolve. The
+absolute step time also moved from ~22 ms to ~16 ms between the two runs,
+which is the usual reminder that only within-run pairs compare.
+
+Kept behind a default-off flag: it is numerically free and it is a
+prerequisite for anything that fuses more of the V-cycle. It is not a
+speedup.
+
+### Step 4: not tested, and why it is a bigger change than the other two
+
+Damped Jacobi cannot update in place. Red-black is safe as two dispatches
+precisely because a cell's neighbours are the other colour; a Jacobi sweep
+reads every neighbour from the *old* iterate, so writing into the array it
+is reading is a race. Doing it properly needs a second `x` per level and
+ping-pong bookkeeping through the cycle -- with an even number of sweeps
+each way (2 down, 2 up) it lands back in the original buffer, so no copy
+is needed, but it is a structural change to the level state rather than a
+flag.
+
+Its ceiling, from the measured V-cycle cost: halving 0.155 ms across ~12
+iterations is **~0.9 ms of a ~20 ms step, about 4%** -- and only if the
+sandbox's iteration-count pricing (29-31 against 30) survives contact with
+the real operator, whose diagonal varies by 4x between masked and interior
+rows. The damping factor is also a constant with 7x leverage on the result
+(omega = 1 gives 204 iterations against 29 at 2/3), which is the shape of
+number this project has twice removed rather than tuned.

@@ -822,7 +822,14 @@ function restrictionTapsForAxis( coarseIdx, coarseCount ) {
 // dirichletMask: only ever meaningful restricting *from* level 0 (see
 // createMultigridPreconditioner's own construction loop) -- matches the
 // "finest level only" scope already established throughout this file.
-function buildRestrictKernel( finer, coarser, coarseShape, dirichletMask ) {
+// Exported for one measurement only: whether restriction and prolongation
+// are an adjoint pair. A V-cycle is a symmetric operator only if they are
+// -- `(Ru, v)` must equal `(u, Pv)` -- and PCG requires a symmetric
+// preconditioner (this file's relax() comment records what happens when it
+// is not). Nothing in the library calls these from outside; they are
+// exported so the property can be measured on the real kernels rather than
+// on a transcription of them.
+export function buildRestrictKernel( finer, coarser, coarseShape, dirichletMask, coarseX ) {
 
 	return buildElementwiseKernel( coarseShape, ( I ) => {
 
@@ -859,6 +866,14 @@ function buildRestrictKernel( finer, coarser, coarseShape, dirichletMask ) {
 		}
 
 		coarser( ...I ).assign( sum );
+
+		// Optionally zero the coarse level's x in the same dispatch. The
+		// V-cycle always clears x immediately after restricting into b, and
+		// the two write different arrays of the same shape with no aliasing
+		// between them, so folding the clear in here is bit-identical to
+		// running it as its own dispatch -- it just costs one dispatch
+		// fewer per level per cycle. See `foldClearIntoRestrict`.
+		if ( coarseX ) coarseX( ...I ).assign( 0 );
 
 	}, 'mg-restrict' );
 
@@ -935,7 +950,10 @@ function correctionTapsForAxis( fineIdx, coarseCount ) {
 // createMultigridPreconditioner, where `correctDispatchers[0]` is the
 // only one built with a mask -- every coarser-to-coarser correction has
 // no mask concept to begin with, per decision 3's own scope).
-function buildCorrectKernel( coarser, finer, fineShape, dirichletMask ) {
+// Exported alongside buildRestrictKernel, for the same measurement. Note
+// this ADDS the interpolated correction to `finer`, so applying it to a
+// zeroed fine field yields exactly P*coarser.
+export function buildCorrectKernel( coarser, finer, fineShape, dirichletMask ) {
 
 	return buildElementwiseKernel( fineShape, ( I ) => {
 
@@ -1040,7 +1058,12 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 	// storageBarrier() between colours, instead of a dispatch per colour.
 	const settings = {
 		batchDispatches: options.batchDispatches !== false,
-		coarseSingleGroup: options.coarseSingleGroup !== false
+		coarseSingleGroup: options.coarseSingleGroup !== false,
+		// foldClearIntoRestrict: write the coarse level's zeroed x from the
+		// same dispatch that restricts into its b, instead of a separate
+		// clear right after. Bit-identical -- different arrays, same shape,
+		// no aliasing -- and one dispatch fewer per level per cycle.
+		foldClearIntoRestrict: options.foldClearIntoRestrict === true
 	};
 	const numberOfFinalIterations = options.numberOfFinalIterations ?? 2;
 	const sorFactor = options.sorFactor ?? 1.0;
@@ -1088,6 +1111,7 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 		}
 
 		const restrictDispatchers = [];
+		const restrictAndClearDispatchers = [];
 		const correctDispatchers = [];
 
 		for ( let level = 0; level < numberOfLevels - 1; level ++ ) {
@@ -1097,6 +1121,7 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 			// (see buildRestrictKernel's and buildCorrectKernel's own header
 			// comments for why each needs it).
 			restrictDispatchers.push( buildRestrictKernel( levels[ level ].buffer, levels[ level + 1 ].b, levelShapes[ level + 1 ], level === 0 ? dirichletMask : undefined ) );
+			restrictAndClearDispatchers.push( buildRestrictKernel( levels[ level ].buffer, levels[ level + 1 ].b, levelShapes[ level + 1 ], level === 0 ? dirichletMask : undefined, levels[ level + 1 ].x ) );
 			correctDispatchers.push( buildCorrectKernel( levels[ level + 1 ].x, levels[ level ].x, levelShapes[ level ], level === 0 ? dirichletMask : undefined ) );
 
 		}
@@ -1201,7 +1226,7 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 
 		}
 
-		function vCycle( queue, level, useSingleGroupCoarse ) {
+		function vCycle( queue, level, useSingleGroupCoarse, foldClear ) {
 
 			if ( level === numberOfLevels - 1 ) {
 
@@ -1217,10 +1242,18 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 			relax( queue, level, numberOfSmoothingIterationsDown );
 
 			queue.push( levels[ level ].residual );
-			queue.push( restrictDispatchers[ level ] );
-			queue.push( levels[ level + 1 ].zeroX );
+			if ( foldClear ) {
 
-			vCycle( queue, level + 1, useSingleGroupCoarse );
+				queue.push( restrictAndClearDispatchers[ level ] );
+
+			} else {
+
+				queue.push( restrictDispatchers[ level ] );
+				queue.push( levels[ level + 1 ].zeroX );
+
+			}
+
+			vCycle( queue, level + 1, useSingleGroupCoarse, foldClear );
 
 			queue.push( correctDispatchers[ level ] );
 
@@ -1267,11 +1300,14 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 		// the same list every iteration; and building all four up front is
 		// what lets settings above be a runtime choice rather than a
 		// constructor argument that can only be compared across runs.
-		function buildForm( useSingleGroupCoarse ) {
+		function buildForm( useSingleGroupCoarse, foldClear ) {
 
 			const queue = [];
+			// Level 0's clear has no restriction in front of it to fold
+			// into -- it is the entry to the cycle -- so it stays a
+			// dispatch either way.
 			queue.push( levels[ 0 ].zeroX );
-			vCycle( queue, 0, useSingleGroupCoarse );
+			vCycle( queue, 0, useSingleGroupCoarse, foldClear );
 
 			const dispatchBatched = tsl_array_n.createBatch( queue );
 
@@ -1286,12 +1322,14 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 
 		}
 
-		const singleGroupForm = buildForm( true );
-		const perColourForm = buildForm( false );
+		const forms = {
+			true: { true: buildForm( true, true ), false: buildForm( true, false ) },
+			false: { true: buildForm( false, true ), false: buildForm( false, false ) }
+		};
 
 		return function dispatch() {
 
-			const form = settings.coarseSingleGroup ? singleGroupForm : perColourForm;
+			const form = forms[ !! settings.coarseSingleGroup ][ !! settings.foldClearIntoRestrict ];
 
 			( settings.batchDispatches ? form.batched : form.unbatched )();
 
