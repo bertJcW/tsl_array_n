@@ -2158,3 +2158,55 @@ the GPU-resident loop and that loop ignored the interval entirely. The
 fixed interval is the simpler thing and it works. The predictor is still
 not worth rebuilding -- 4 is one constant with measured behaviour at 1, 2,
 4 and 8 on three scenes, against a rate estimator with a safety factor.
+
+## The setup round trips (2026-09-15)
+
+Two of the three reads outside the CG loop were moving numbers from one
+place on the GPU to another by way of the host:
+
+- `dotRZ.read()` produced `initRZ`, whose only use was `seed[SLOT_RZ_OLD]`.
+  `reduceRZ` had already written that value into `SLOT_RZ`.
+- `dotRR.read()` produced `initRTr`, used for `SLOT_PAP_BASELINE` (a GPU
+  slot), for the drift detector's seed, and -- the one genuinely host-side
+  use -- for the early exit when a solve arrives already converged.
+
+`seedScalarsKernel` does the first two on the GPU. The early exit is gone;
+an already-converged solve now runs one iteration and stops at the first
+check, which is iteration 0. That case trips `degenerate-pAp` on the way
+(p is ~0, so p.Ap is ~0) and alpha is forced to 0, leaving x exactly where
+it belonged -- so the loop now reports a guard name only when the residual
+is still above tolerance, because a guard tripping on a converged residual
+is not a failure.
+
+**Bit-identical**: same restored input, max absolute difference **0** on
+both velocity components, same 13 iterations, same `converged`, same
+`stoppedBy`. Which is what should happen -- the values are the same, they
+just stop going round the houses.
+
+Paired, twice, phase swapped: **1.144x** (30.2 -> 26.4 ms) and **1.297x**
+(19.2 -> 14.8 ms). The phase report confirms the mechanism rather than
+inferring it -- `solve-setup-readRR` and `solve-setup-readRZ` are simply
+absent afterwards, leaving `solve-iteration-read` and the circuit
+breaker's 0.73 ms.
+
+On by default. Verified on the new defaults (`gpuResidentSetup` on,
+interval 4): example 26 converges 250/250 with peak pressure 10.382, its
+historical value to every digit, and example 28 249/250 -- both with zero
+rejections and zero non-finite pressures.
+
+### A default that was being overridden
+
+Example 15 passed `residualCheckInterval: 1` explicitly, which silently
+opted the scene every performance measurement runs on out of the library
+default that had just been changed to 4. It now passes the option only
+when `?checkEvery=` is given. Worth noting as a hazard: a default is not
+in force anywhere a caller names the option, and the caller here was the
+benchmark.
+
+### What is left of the fixed cost
+
+Of the ~9 ms of per-solve fixed cost the accounting found, the two setup
+reads were ~6.4 ms and are gone. The circuit breaker's read is 0.73 ms
+and stays -- it is the guard this project shipped broken twice, and
+making it periodic is a change in safety posture rather than a free win.
+The remaining in-loop reads are now the whole story again.

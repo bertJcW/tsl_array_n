@@ -850,6 +850,11 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	const SLOT_PAP_BASELINE = 5;
 	const SCALAR_SLOT_COUNT = 6;
 
+	// Defensive floor for the pAp growth baseline: a literal 0 baseline
+	// would make the first legitimate nonzero pAp look like infinite
+	// growth. Matches the host path's own `Math.max( ..., 1e-12 )`.
+	const PAP_BASELINE_FLOOR = 1e-12;
+
 	// Stop codes written by the kernels, read back as floats. 0 means the
 	// iteration was clean.
 	const STOP_NONE = 0;
@@ -988,6 +993,28 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	const alphaKernel = instrumentDispatch( 'cg-alpha', alphaKernelRaw );
 	const betaKernel = instrumentDispatch( 'cg-beta', betaKernelRaw );
 
+	// *** Seeding the loop without coming back to the host ***
+	//
+	// The setup used to read r.r and r.z back purely to write them into
+	// GPU slots again -- the baseline for the pAp growth guard is
+	// max(|r.r|, floor), and rz_old is r.z verbatim. Both are already in
+	// `scalars` by the time the reductions have run, so the host was
+	// waiting on two round trips to move numbers from one place on the GPU
+	// to another. Measured, those two waits were 6.4 ms of a 26.7 ms
+	// solver step, because the first of them also drains everything queued
+	// behind it.
+	//
+	// What genuinely needed the host was the early exit -- "is this solve
+	// already converged before it starts?" -- and that is handled by the
+	// loop's own first check instead; see the `gpuResidentSetup` branch.
+	const seedScalarsKernel = tsl_array_n.kernel( [ 1 ], ( _thread ) => {
+
+		scalars( SLOT_RZ_OLD ).assign( scalars( SLOT_RZ ) );
+		scalars( SLOT_PAP_BASELINE ).assign( scalars( SLOT_RR ).abs().max( float( PAP_BASELINE_FLOOR ) ) );
+		scalars( SLOT_STOP ).assign( float( STOP_NONE ) );
+
+	} );
+
 	const reducePAp = buildScalarReduction( dotPAp, SLOT_PAP );
 	const reduceRR = buildScalarReduction( dotRR, SLOT_RR );
 	const reduceRZ = buildScalarReduction( dotRZ, SLOT_RZ );
@@ -1088,42 +1115,73 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	 * preconditioner apply more than it strictly needs, and a guarded solve
 	 * finishes an iteration whose updates are all no-ops.
 	 */
-	async function solveWithGpuResidentScalars( tol, maxiter, residualCheckInterval, batchIterations ) {
+	async function solveWithGpuResidentScalars( tol, maxiter, residualCheckInterval, batchIterations, gpuResidentSetup ) {
 
 		applyToX(); // Ax = A @ x
 		init(); // r = b - Ax, p = 0, Ap = 0
 
-		// Two host reads to seed the loop. Unlike the ones inside it, these
-		// happen once per solve, not once per iteration.
-		const initRTr = await timePhase( 'solve-setup-readRR', () => dotRR.read() );
-		let newRTr = initRTr;
-		let oldRTr = initRTr;
+		let newRTr;
+		let oldRTr;
 
-		if ( Math.sqrt( Math.abs( initRTr ) ) < tol ) {
+		if ( gpuResidentSetup ) {
 
-			state.residualSquared = initRTr;
-			return true;
+			// No host read anywhere in the setup. The reductions put r.r
+			// and r.z in their slots and seedScalarsKernel derives the
+			// rest there -- see that kernel for what the two reads were
+			// actually costing.
+			dotRR.dispatch();
+			reduceRR();
+
+			applyPreconditionerToR(); // z0 = M^-1 @ r0
+
+			dotRZ.dispatch();
+			reduceRZ();
+
+			updateP(); // p0 = z0 (p was 0, so beta cannot matter here)
+
+			seedScalarsKernel();
+
+			// Nothing is known about the residual yet. Infinity makes the
+			// first check's "did the residual grow?" test pass rather than
+			// fire against a value that was never measured.
+			newRTr = NaN;
+			oldRTr = Infinity;
+
+		} else {
+
+			// Two host reads to seed the loop. Unlike the ones inside it,
+			// these happen once per solve, not once per iteration.
+			const initRTr = await timePhase( 'solve-setup-readRR', () => dotRR.read() );
+			newRTr = initRTr;
+			oldRTr = initRTr;
+
+			if ( Math.sqrt( Math.abs( initRTr ) ) < tol ) {
+
+				state.residualSquared = initRTr;
+				return true;
+
+			}
+
+			applyPreconditionerToR(); // z0 = M^-1 @ r0
+			const initRZ = await timePhase( 'solve-setup-readRZ', () => dotRZ.read() );
+
+			updateP(); // p0 = z0 (p was 0, so beta cannot matter here)
+
+			// Seed the buffer the kernels work out of. pApBaseline matches
+			// the host loop's own: this solve's starting energy scale, with
+			// the same defensive floor.
+			const seed = new Float32Array( SCALAR_SLOT_COUNT );
+			seed[ SLOT_RZ_OLD ] = initRZ;
+			seed[ SLOT_PAP_BASELINE ] = Math.max( Math.abs( initRTr ), PAP_BASELINE_FLOOR );
+			seed[ SLOT_STOP ] = STOP_NONE;
+			scalars.fromArray( seed );
 
 		}
-
-		applyPreconditionerToR(); // z0 = M^-1 @ r0
-		const initRZ = await timePhase( 'solve-setup-readRZ', () => dotRZ.read() );
-
-		updateP(); // p0 = z0 (p was 0, so beta cannot matter here)
-
-		// Seed the buffer the kernels work out of. pApBaseline matches the
-		// host loop's own: this solve's starting energy scale, with the same
-		// defensive floor.
-		const seed = new Float32Array( SCALAR_SLOT_COUNT );
-		seed[ SLOT_RZ_OLD ] = initRZ;
-		seed[ SLOT_PAP_BASELINE ] = Math.max( Math.abs( initRTr ), 1e-12 );
-		seed[ SLOT_STOP ] = STOP_NONE;
-		scalars.fromArray( seed );
 
 		let forceResidualRecompute = false;
 		// Whether newRTr and the stop code reflect the current x. Only
 		// meaningful once the read starts being skipped.
-		let residualIsCurrent = true;
+		let residualIsCurrent = ! gpuResidentSetup;
 
 		for ( let iter = 0; iter < maxiter; iter ++ ) {
 
@@ -1177,7 +1235,18 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 				if ( stopCode !== STOP_NONE ) {
 
-					state.stoppedBy = STOP_REASONS[ stopCode ] ?? 'unknown';
+					// A guard tripping on an already-converged residual is
+					// not a failure: there is nothing left to solve, p is
+					// ~0 so p.Ap is ~0, and alpha being forced to 0 leaves
+					// x exactly where it belongs. Without the pre-loop read
+					// that case now reaches the loop, and calling it
+					// 'degenerate-pAp' would be alarming and wrong.
+					if ( Math.sqrt( Math.abs( newRTr ) ) >= tol ) {
+
+						state.stoppedBy = STOP_REASONS[ stopCode ] ?? 'unknown';
+
+					}
+
 					break;
 
 				}
@@ -1213,7 +1282,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 	}
 
-	async function solve( tol, maxiter, residualCheckInterval = 1, gpuResidentScalars = false, batchIterations = true ) {
+	async function solve( tol, maxiter, residualCheckInterval = 1, gpuResidentScalars = false, batchIterations = true, gpuResidentSetup = false ) {
 
 		state.stoppedBy = 'none';
 
@@ -1221,7 +1290,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		// reads three scalars back per iteration, so its dispatches cannot be
 		// submitted ahead of the decisions that consume them. `batchIterations`
 		// is ignored there rather than half-applied.
-		if ( gpuResidentScalars ) return solveWithGpuResidentScalars( tol, maxiter, residualCheckInterval, batchIterations );
+		if ( gpuResidentScalars ) return solveWithGpuResidentScalars( tol, maxiter, residualCheckInterval, batchIterations, gpuResidentSetup );
 
 		applyToX(); // Ax = A @ x
 		init(); // r = b - Ax, p = 0, Ap = 0

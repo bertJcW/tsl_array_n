@@ -256,6 +256,13 @@ export function createGridPressureSolver2( {
 	// This is a global constant, not a per-scene one, and the mechanism it
 	// prices is hardware (round trip against iteration), not scene shape.
 	// 1 restores asking every iteration.
+	// Seed the CG loop's scalars on the GPU instead of reading r.r and r.z
+	// back to derive them on the host. Bit-identical -- same values, moved
+	// from one place on the GPU to another instead of round-tripping --
+	// and measured at 1.14x and 1.30x paired on example 15, because the
+	// first of those two reads also drained everything queued behind it.
+	// See seedScalarsKernel in linalg.js.
+	gpuResidentSetup = true,
 	residualCheckInterval = 4,
 	// Compute alpha and beta on the GPU and read the loop's scalars back in
 	// one trip per iteration instead of three -- see
@@ -302,7 +309,7 @@ export function createGridPressureSolver2( {
 	// this measurement does not work and the interventional one needs the
 	// cap to move inside a single run. A capped solve does not converge and
 	// is not a correctness configuration; see the tolerance note above.
-	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations, tolerance, checkBadCells: true };
+	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations, tolerance, checkBadCells: true, gpuResidentSetup };
 
 	const [ resolutionX, resolutionY ] = resolution;
 	const [ gridSpacingX, gridSpacingY ] = gridSpacing;
@@ -680,7 +687,8 @@ export function createGridPressureSolver2( {
 			dispatchBuildSystem();
 			diagnostics.converged = await timePhase( 'pressure-cg-solve', () => cg.solve(
 				settings.tolerance, settings.maxIterations,
-				settings.residualCheckInterval, settings.gpuResidentScalars, settings.batchIterations
+				settings.residualCheckInterval, settings.gpuResidentScalars, settings.batchIterations,
+				settings.gpuResidentSetup
 			) );
 
 			// Forwarded from the CG solver so a caller can see *why* a frame
