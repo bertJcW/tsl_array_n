@@ -175,6 +175,9 @@ const DEFAULT_MAX_PLAUSIBLE_PRESSURE = 1e6;
 // multigrid.js carries the numbers. Mutable at runtime through the
 // returned `settings`, which is what the paired comparison needs.
 // options.tolerance/maxIterations/residualCheckInterval: forwarded to the
+// underlying CG solve(). maxIterations is also mutable at runtime through
+// `settings`, which is what pricing a CG iteration needs -- see its own
+// comment there.
 // underlying CG solve().
 // options.batchIterations: submit the GPU-resident CG loop's dispatches as one
 // batch per iteration instead of one submission per kernel -- see linalg.js's
@@ -268,7 +271,15 @@ export function createGridPressureSolver2( {
 	// drift under sustained load). Alternating the policy *within* one run
 	// makes the comparison paired, and paired is the only kind that means
 	// anything here.
-	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner };
+	// maxIterations is here rather than only a constructor value because
+	// capping the iteration count is the only way to vary it over a range
+	// wide enough to price one. Its natural spread on a settled scene is
+	// 8-12, and regressing step time on that gave an R-squared of 0.009 --
+	// the noise is larger than the signal, so the observational form of
+	// this measurement does not work and the interventional one needs the
+	// cap to move inside a single run. A capped solve does not converge and
+	// is not a correctness configuration; see the tolerance note above.
+	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations, checkBadCells: true };
 
 	const [ resolutionX, resolutionY ] = resolution;
 	const [ gridSpacingX, gridSpacingY ] = gridSpacing;
@@ -645,7 +656,7 @@ export function createGridPressureSolver2( {
 			if ( updateDirichletFields ) updateDirichletFields();
 			dispatchBuildSystem();
 			diagnostics.converged = await cg.solve(
-				tolerance, maxIterations,
+				tolerance, settings.maxIterations,
 				settings.residualCheckInterval, settings.gpuResidentScalars, settings.batchIterations
 			);
 
@@ -656,7 +667,25 @@ export function createGridPressureSolver2( {
 			diagnostics.iterations = cg.state ? cg.state.iterations : null;
 			diagnostics.stoppedBy = cg.state ? cg.state.stoppedBy : null;
 
-			diagnostics.rejected = ( await countBadPressureCellsNow() ) > 0;
+			// *** Measurement instrument, not a feature ***
+			//
+			// This is a host round trip on every solve, outside the CG
+			// loop, and the fixed cost of a solve turns out to be about as
+			// expensive as all of its iterations put together (~9 ms
+			// against ~10 ms on example 15), so the pieces of that fixed
+			// cost are worth pricing individually.
+			//
+			// Setting this false disables the circuit breaker, which is
+			// the guard that stops a NaN solve from reaching velocity --
+			// see project-history.md, Debugging #2 and #4, for the two
+			// separate occasions this project shipped a liquid that
+			// collapsed because that guard was not working. It exists to
+			// answer "what does the check cost?", and the answer may
+			// justify checking periodically rather than every solve. It
+			// does not justify not checking.
+			diagnostics.rejected = settings.checkBadCells
+				? ( await countBadPressureCellsNow() ) > 0
+				: false;
 
 			// Restore the last known-good field, or -- this solve having
 			// just been checked and passed -- become the last known-good

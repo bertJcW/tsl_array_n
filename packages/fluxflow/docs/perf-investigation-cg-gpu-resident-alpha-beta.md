@@ -1731,3 +1731,109 @@ one of three suggestions there; measured, it is the wrong axis. The other
 two -- making the V-cycle itself cheaper in dispatches, and a fixed
 iteration count with a rare convergence check -- are untouched by this
 result, because neither of them gives up the V-cycle's factor of twenty.
+
+
+# Step 0: what a solver step is actually made of (2026-09-14)
+
+Three optimisation directions were queued off the back of the submission
+work -- fold `mg-clear` into `restrict`, swap red-black for damped Jacobi,
+make the transfer operators exact transposes -- and all three target the
+V-cycle. Before building any of them, this prices the step they live in.
+
+## The observational form does not work
+
+Regressing step time on the iteration count over 70 consecutive steps, no
+intervention: **R-squared 0.009**. The natural spread of the iteration
+count on a settled scene is 8-12, and the timing noise is larger than the
+signal across that range. `maxIterations` therefore moved onto the runtime
+`settings` object so the cap can be varied inside one run.
+
+## Interventional, paired, 20 rounds, medians
+
+State (u, v, pressure) restored before every arm so each solves the
+identical problem:
+
+| iteration cap | iterations | median ms |
+| --- | --- | --- |
+| **0** | 0 | **10.5** |
+| 1 | 1 | 11.5 |
+| 2 | 2 | 12.3 |
+| 4 | 4 | 14.1 |
+| 8 | 8 | 17.2 |
+| 16 | 9 (natural) | 18.6 |
+
+**0.861 ms per CG iteration**, intercept 10.61 ms, **R-squared 0.996**. The
+intercept agrees with the directly measured zero-iteration point (10.5 ms)
+to 1%, which is the cross-check that makes the fit believable.
+
+## Splitting the intercept
+
+The zero-iteration point is *not* "everything except the pressure solve" --
+it still runs the solve's whole setup. Timing the projection on its own
+against the full step, alternating, same restored state:
+
+| | ms | iterations |
+| --- | --- | --- |
+| full solver step | 22.4 | 12 |
+| pressure projection alone | 21.0 | 13 |
+| **everything else** | **1.4** | -- |
+
+The model checks out: at 13 iterations it predicts 10.5 + 13 x 0.861 =
+21.7 ms against 21.0 measured, within 3%.
+
+## The accounting
+
+| component | ms | share |
+| --- | --- | --- |
+| non-pressure stages (advection, forces, dye, boundary) | 1.4 | **6%** |
+| CG iterations (0.861 x 12) | 10.3 | **46%** |
+| pressure-solve fixed cost | ~9.1 | **~40%** |
+
+Two things follow, and both reorder the queue.
+
+**The non-pressure half of the solver is 6% of it.** Everything left to win
+is inside the pressure solve.
+
+**The fixed cost of one solve is about as expensive as all of its
+iterations.** Nothing has ever targeted it -- every optimisation in this
+document attacks per-iteration cost -- and all three queued directions
+attack the V-cycle, which lives inside the 46%. Halving the V-cycle's
+dispatches cannot touch the 40%.
+
+## Inside the fixed cost
+
+Per solve, outside the CG loop: `updateDirichletFields`,
+`dispatchBuildSystem`, then inside `solve()` an `applyToX`, an `init`, a
+`dotRR` read, **a full V-cycle** (the initial preconditioner apply), a
+`dotRZ` read, an `updateP` and a closing residual read; then
+`countBadPressureCellsNow`, the snapshot or restore, and the two velocity
+corrections. That is roughly four host round trips and one V-cycle.
+
+One of them is now priced. `settings.checkBadCells` (a measurement
+instrument, guarded by a comment that says so) turns off the circuit
+breaker's readback:
+
+| | median ms | iterations |
+| --- | --- | --- |
+| check on | 29.9 | 11 |
+| check off | 28.8 | 11 |
+
+**1.1 ms**, about 12% of the fixed cost. That also corrects an earlier
+figure in this document: a host round trip was estimated at 0.2-0.4 ms
+from the GPU-resident alpha/beta work; measured directly on an equivalent
+one it is **1.1 ms**.
+
+The remaining ~8 ms is unattributed. The candidates are the three other
+round trips and the initial V-cycle, but four round trips at 1.1 ms plus a
+V-cycle at 0.9 ms only reaches ~5 ms, so something in
+`dispatchBuildSystem` / the corrections / the snapshot is unaccounted for.
+That is the next measurement, and it is worth more than any of steps 3-5.
+
+## A correction to this session's own earlier number
+
+The preconditioner comparison above reports 32.5 ms for a multigrid step.
+That was measured in a three-way round-robin whose other two arms take 385
+and 698 ms per step, which moves the GPU's clocks. A clean natural step is
+**18.6-22.4 ms** depending on warm-up. The preconditioner *ratios* stand --
+both arms of each comparison sat in the same thermal environment -- but the
+absolute figure does not.
