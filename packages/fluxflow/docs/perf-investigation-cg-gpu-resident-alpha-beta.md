@@ -1647,3 +1647,87 @@ held stationary.
   measured while alternating with an arm that was allocating 28 pipelines per
   step).
 - `fluxflow` 347 tests, `tsl_array_n` 23, all pass.
+
+
+# What the V-cycle is worth: Jacobi and no preconditioner, measured (2026-09-14)
+
+MGPCG issues ~64 dispatches per CG iteration against a grid of 4096 cells,
+and a dispatch on that grid is almost entirely fixed overhead. That ratio
+raises an obvious question -- would a preconditioner that needs more
+iterations but issues *one* dispatch win? -- and the honest position was
+that nobody knew, because there was nothing in the package to compare
+against. `createJacobiPreconditioner` (z = r / diag(A)) and
+`createIdentityPreconditioner` (z = r, making PCG plain CG) exist so the
+question has an answer.
+
+## Correctness first
+
+All three must reach the same solution; a preconditioner changes the path,
+not the answer. From an identical warmed state on example 15, restoring
+the velocity and pressure fields before each arm and running one step:
+
+| comparison | max abs difference, u | v |
+| --- | --- | --- |
+| multigrid vs jacobi | 1.9e-5 | 1.4e-5 |
+| jacobi vs none | **4e-6** | **4e-6** |
+
+against a peak velocity of 3.545. The second row is the self-check the
+code predicted before the run: for a constant-coefficient Laplacian
+diag(A) is uniform, so Jacobi is a scalar multiple of the identity and
+cannot change the Krylov subspace. It measures as the same solver.
+
+## Paired, round-robin, every arm warmed
+
+| example 15 (uniform, cylinder mask, cap 2000) | ms/step | iterations | converged |
+| --- | --- | --- | --- |
+| **multigrid** | **32.5** | **9.8** | 12/12 |
+| jacobi | 697.6 | 342.8 | 11/12 |
+| none | 385.1 | 196.9 | 12/12 |
+
+| example 28 (variable density 1.40, cap 100) | ms/step | iterations | converged |
+| --- | --- | --- | --- |
+| **multigrid** | **92.2** | **39.7** | 9/10 |
+| jacobi | 162.6 | 100 (capped) | **0/10** |
+| none | 134.5 | 100 (capped) | **0/10** |
+
+## Two results
+
+**The V-cycle is worth about 20x in iterations and 12x in wall time.** That
+is the number this document has been implicitly assuming for its whole
+length without ever measuring it. Thirty-six dispatches per application
+buys a factor of twenty in iterations, and on this grid that trade is
+clearly right rather than marginal. The dispatch-count worry that motivated
+the experiment was real but badly mispriced: cutting 36 dispatches to 1
+costs 20x the iterations, and each of those iterations still carries the CG
+vector operations and a host round trip.
+
+**Jacobi is worse than no preconditioner.** 342.8 iterations against 196.9
+on example 15, and slower at equal capped iterations on example 28 -- two
+scenes, same direction. The prediction written into the code beforehand was
+"about the same". Being reliably *worse* means the diagonal varies in a way
+that hurts, and the likely reason is that most of the variation is
+artificial: a Dirichlet-masked row's diagonal is -1 where an interior row's
+is -4/h^2, so Jacobi rescales the masked rows by four relative to the fluid
+and those rows are not part of the problem. That is a hypothesis about a
+rejected option, not a measured cause.
+
+Note also that the variable-density scene -- the one case where theory says
+Jacobi should earn its keep -- is where both cheap arms fail hardest: zero
+converged solves in ten steps. Non-convergence is not a quality setting
+here. It is the condition this project has already measured to destroy a
+free-surface liquid (Debugging #5 in `project-history.md`: occupied cells
+1536 -> 340-700).
+
+## Kept, but not offered as an alternative
+
+The option stays because it is the instrument that produced the 20x, and
+because a future change to the operator -- a much larger density ratio, a
+non-uniform grid -- can be re-checked against it inside one run. The
+default is unchanged and the option's own documentation says to use it.
+
+This also closes the direction the TouchDesigner/LiquiGen research opened
+(`realtime-fluid-tools-research.md`). "Fewer dispatches per iteration" was
+one of three suggestions there; measured, it is the wrong axis. The other
+two -- making the V-cycle itself cheaper in dispatches, and a fixed
+iteration count with a rare convergence check -- are untouched by this
+result, because neither of them gives up the V-cycle's factor of twenty.

@@ -168,8 +168,12 @@ const DEFAULT_MAX_PLAUSIBLE_PRESSURE = 1e6;
 // own options (e.g. { numberOfLevels: 4 }).
 // options.preconditioner: 'multigrid' (default), 'jacobi' or 'none'. All
 // three are built at construction and selected per solve, so they can be
-// compared inside one run -- see multigrid.js's own comment on what Jacobi
-// is and is not worth. Mutable at runtime through the returned `settings`.
+// compared inside one run. **Use the default.** The other two are
+// measurement instruments, not alternatives: measured paired, multigrid
+// needs ~20x fewer iterations and ~12x less wall time, and on a liquid
+// scene neither cheap arm converges at all within a sane iteration cap.
+// multigrid.js carries the numbers. Mutable at runtime through the
+// returned `settings`, which is what the paired comparison needs.
 // options.tolerance/maxIterations/residualCheckInterval: forwarded to the
 // underlying CG solve().
 // options.batchIterations: submit the GPU-resident CG loop's dispatches as one

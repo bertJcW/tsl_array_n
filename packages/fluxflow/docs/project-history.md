@@ -408,6 +408,13 @@ already-fast configuration costs less than removing it from a slow one.
 
 Recorded because the reasoning recurs:
 
+0. **Cheaper preconditioners (Jacobi, none).** Built so the multigrid
+   V-cycle could be priced against something; measured paired, it is worth
+   ~20x in iterations and ~12x in wall time, and on a liquid scene neither
+   cheap arm converges at all. Jacobi came out *worse* than no
+   preconditioner, twice. Kept as the instrument, not as an option --
+   see the 2026-09-14 section of the performance document.
+
 1. **Mass-weighted P2G** (from the second OpenFOAM reading). Built,
    measured, rejected.
 2. **CPU coarse solve, one per V-cycle.** 46.0 to 87.1 ms per frame; about

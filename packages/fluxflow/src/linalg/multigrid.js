@@ -492,6 +492,53 @@ export function createLaplacianOperator( shape, gridSpacing, options = {} ) {
 // So on a uniform single-phase scene, `'jacobi'` and `'none'` should
 // measure the same, and if they do not, something is wrong. That is a
 // useful property: it makes the pair a self-check.
+//
+// *** Measured, and the answer is that neither is worth using ***
+//
+// Paired, arms round-robined inside one run, every arm warmed first so no
+// pipeline compilation lands in a measured step.
+//
+// examples/15-flow-past-cylinder/ (uniform, single phase, cylinder mask),
+// iteration cap raised to 2000 so the cheap arms can actually finish:
+//
+//   multigrid    32.5 ms/step     9.8 iterations   12/12 converged
+//   jacobi      697.6 ms/step   342.8 iterations   11/12
+//   none        385.1 ms/step   196.9 iterations   12/12
+//
+// examples/28-drop-into-pool/ (variable density, ratio 1.40) at the
+// default cap of 100 -- the case where Jacobi is supposed to earn its
+// keep:
+//
+//   multigrid    92.2 ms/step    39.7 iterations    9/10 converged
+//   jacobi      162.6 ms/step     100 (capped)      0/10
+//   none        134.5 ms/step     100 (capped)      0/10
+//
+// Two things follow, and the second was not predicted.
+//
+// **The V-cycle is worth about 20x in iterations and 12x in wall time.**
+// That number had never been measured, because until these existed there
+// was nothing to measure it against. ~36 dispatches per application buys
+// a factor of twenty in iterations, and on this grid that trade is
+// clearly right, not marginal.
+//
+// **Jacobi is worse than no preconditioner at all** -- 342.8 iterations
+// against 196.9 on example 15, and slower at equal capped iterations on
+// example 28. Both scenes, same direction. The prediction above was
+// "about the same"; being reliably *worse* means the diagonal here varies
+// in a way that hurts. The likely reason is that most of the variation is
+// artificial: a Dirichlet-masked row's diagonal is -1 while an interior
+// row's is -4/h^2, so Jacobi rescales the masked rows by a factor of four
+// relative to the fluid, and those rows are not part of the problem being
+// solved. That is a hypothesis about a rejected option, not a measured
+// cause, and it is written as one.
+//
+// They are kept because they are the instrument that produced the 20x,
+// and because a future change to the operator (a much larger density
+// ratio, a non-uniform grid) can be re-checked against them in one run.
+// They are not a recommendation. On a liquid scene the cheap arms do not
+// converge at any sane iteration cap, and non-convergence is exactly what
+// this project has already measured to destroy a free-surface liquid --
+// see docs/project-history.md, Debugging #5.
 
 /**
  * Jacobi (diagonal) preconditioner: z = r / diag(A).
