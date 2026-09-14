@@ -2005,3 +2005,71 @@ the real operator, whose diagonal varies by 4x between masked and interior
 rows. The damping factor is also a constant with 7x leverage on the result
 (omega = 1 gives 204 iterations against 29 at 2/3), which is the shape of
 number this project has twice removed rather than tuned.
+
+### Step 4: built in a sandbox copy, measured, rejected
+
+The change is structural rather than a flag -- a Jacobi sweep is defined
+on the old iterate, so it cannot write into the array it reads, and every
+level needs a second `x` with ping-pong through the cycle. Rather than
+make `src/` pay for that before knowing whether it is worth it,
+`sandbox/jacobi-smoother/multigrid_jacobi.js` is a copy of
+`src/linalg/multigrid.js` with exactly that one change, and
+`examples/30-jacobi-smoother-sandbox/` hands both to the same operator and
+the same CG solver so the smoother is the only difference. Both arms run
+with the single-workgroup coarse kernel off, since it is a red-black
+construction with no Jacobi counterpart.
+
+Ping-pong needs no copies: every sweep count in the cycle is even (2 down,
+2 up, 2 final, 20 coarsest), so a run of sweeps always lands back in `x`
+and nothing downstream knows the second buffer exists.
+
+Iterations to `1e-5`, 32x32, four levels:
+
+| operator | red-black | omega = 2/3 | omega = 0.8 | omega = 1.0 |
+| --- | --- | --- | --- | --- |
+| plain Poisson | 5 | 7 (1.40x) | 6 (1.20x) | 33 (6.60x) |
+| Dirichlet mask (a circle) | 10 | 10 (1.00x) | **9 (0.90x)** | 72 (7.20x) |
+| variable density, 8:1 | 19 | 21 (1.11x) | 20 (1.05x) | **did not converge (400)** |
+
+**Rejected, on three grounds the measurement establishes rather than
+suggests.**
+
+*The saving is already spent.* Halving a 0.155 ms V-cycle across ~12
+iterations is ~4% of a step, so any iteration ratio above ~1.04 costs more
+than it saves. At the best damping factor the ratios are 1.20, 0.90 and
+1.05 -- averaging just past break-even, and negative on the plain operator.
+
+*The damping factor does not transfer.* The float64 reference priced
+damped Jacobi at 29-31 iterations against red-black's 30, i.e. free. That
+held for the masked case (1.00x at 2/3) and did not for the plain one
+(1.40x). Which omega is best also moves between operators, and this
+project has twice removed a constant of exactly this shape rather than
+tune it per scene.
+
+*Getting it wrong is not graceful.* Undamped Jacobi is 6.6x and 7.2x on
+the first two operators and **does not converge at all** on the
+variable-density one -- which is the operator the liquid scenes actually
+use, and non-convergence there is the condition already measured to
+destroy a free-surface liquid.
+
+The one real attraction survives and is worth recording: a Jacobi sweep
+has no colour order, so the V-cycle is symmetric by construction rather
+than by remembering to reverse post-smoothing. That is a robustness
+argument, not a performance one, and after the step 5 measurement above
+there is no known symmetry defect left for it to fix.
+
+## Where steps 3, 4 and 5 leave the queue
+
+All three tested, none kept:
+
+| | claim | measured |
+| --- | --- | --- |
+| 3. fold `mg-clear` into `restrict` | ~58 dispatches/frame, zero risk | bit-identical, and within noise (-2.4 ms then +0.3 ms) |
+| 4. red-black to damped Jacobi | 25 to 13 dispatches, free in iterations | 1.05x-1.20x iterations at best omega; catastrophic at omega = 1 |
+| 5. exact-transpose transfer operators | the likely cause of V-cycle asymmetry | R = P^T/4 exactly; a constant factor, symmetry intact |
+
+They were all priced against the V-cycle, and the V-cycle is 0.155 ms of a
+~20 ms step. The accounting section above says where the step actually
+goes: **host round trips, 79%** -- and the single largest item, the
+per-iteration readback at 52%, still has no way to be reduced on the
+default path.
