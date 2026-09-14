@@ -20,6 +20,14 @@ lives in `docs/`.
   two-phase methods read from OpenFOAM, restated as mathematics. OpenFOAM
   is GPL-3.0 and this package is Apache-2.0, so that restatement is a
   licence requirement and not a style choice; see `THIRD-PARTY-NOTICES.md`.
+- [`docs/optimisation-agent-guide.md`](docs/optimisation-agent-guide.md) --
+  written for an agent (or a person) whose job is to make this faster
+  without breaking it: the cost model in measured constants, every knob
+  with its measured effect, what must not regress, the measurement
+  protocol, and the full list of what has already been tried and rejected.
+- [`docs/provenance-audit.md`](docs/provenance-audit.md) -- the licence
+  and code-copying audit: method, findings, and the limits of what could
+  be checked.
 - [`docs/realtime-fluid-tools-research.md`](docs/realtime-fluid-tools-research.md)
   -- how TouchDesigner and JangaFX's LiquiGen reach real time, and whether
   a native GPU API is the reason. It is not: CPU-side command encoding is
