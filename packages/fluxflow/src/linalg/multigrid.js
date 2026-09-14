@@ -458,6 +458,107 @@ export function createLaplacianOperator( shape, gridSpacing, options = {} ) {
 
 }
 
+// *** The cheap preconditioners, and when they are the right choice ***
+//
+// createMultigridPreconditioner below is the strong one and the default.
+// It is also, measured on examples/15-flow-past-cylinder/, about 36
+// dispatches per application: four levels of red-black smoothing, two
+// sweeps down and two up, each sweep one dispatch per colour. At 12-14 CG
+// iterations that is ~500 dispatches in a frame, on a grid of 4096 cells.
+//
+// That ratio is the reason these exist. A dispatch on a 64x64 grid is
+// almost entirely fixed overhead -- the arithmetic in it is microseconds
+// -- so a preconditioner that needs more iterations but issues one
+// dispatch instead of thirty-six is not obviously the worse trade. It
+// depends on the scene, and the scenes in this repository differ by more
+// than an order of magnitude in how hard their pressure problem is:
+// examples/29 converges in 1 iteration, examples/21 in 5,
+// examples/28 in 35.
+//
+// *** What Jacobi actually buys, which is less than it looks ***
+//
+// For a CONSTANT-COEFFICIENT Laplacian, diag(A) is the same value in every
+// interior cell, so M^-1 = cI -- a scalar multiple of the identity. That
+// leaves the Krylov subspace unchanged and CG converges in exactly the
+// same number of iterations as with no preconditioner at all. Jacobi is
+// worth something here only where the diagonal genuinely varies:
+//
+//   - with `faceWeights` (variable density), where it normalises a density
+//     ratio that would otherwise sit in the operator's condition number;
+//   - next to a `dirichletMask`, where eliminated neighbours change the
+//     stencil;
+//   - on non-uniform `gridSpacing`.
+//
+// So on a uniform single-phase scene, `'jacobi'` and `'none'` should
+// measure the same, and if they do not, something is wrong. That is a
+// useful property: it makes the pair a self-check.
+
+/**
+ * Jacobi (diagonal) preconditioner: z = r / diag(A).
+ *
+ * One dispatch per application. Takes the same `shape, gridSpacing,
+ * options` as createMultigridPreconditioner and returns the same
+ * `( input, output ) -> dispatch` shape, so the two are interchangeable
+ * wherever a preconditioner is accepted.
+ *
+ * The diagonal comes from laplacianDiagonalAt, the same function the
+ * multigrid smoother divides by, so the two cannot drift apart -- see that
+ * function's own comment on why a diagonal that does not match the
+ * operator is worse than a slow one.
+ */
+export function createJacobiPreconditioner( shape, gridSpacing, options = {} ) {
+
+	const { dirichletMask, faceWeights } = options;
+
+	return function applyJacobiPreconditioner( input, output ) {
+
+		return buildElementwiseKernel( shape, ( I ) => {
+
+			// gridSpacing is used as the spacing array directly, the same way
+			// createLaplacianOperator above hands it to laplacianAt -- the
+			// per-level doubling in computeLevelSpacings is a multigrid
+			// concern and there are no levels here.
+			const diagonal = laplacianDiagonalAt( gridSpacing, shape, I, dirichletMask, faceWeights );
+
+			// A zero diagonal would be a row with no present neighbours at
+			// all -- an isolated cell. Passing the residual through
+			// unchanged is the identity for that row, which is the right
+			// fallback: a preconditioner is allowed to be a poor
+			// approximation, but it must not produce a non-finite z, which
+			// would reach CG's own r.z and take the solve with it.
+			const usable = diagonal.abs().greaterThan( 0 );
+
+			output( ...I ).assign( usable.select( input( ...I ).div( diagonal ), input( ...I ) ) );
+
+		}, 'pre-jacobi' );
+
+	};
+
+}
+
+/**
+ * No preconditioning: z = r. PCG with this is plain CG.
+ *
+ * Present so the multigrid preconditioner can be priced against its own
+ * absence rather than only against another preconditioner -- until this
+ * existed, "what is the V-cycle worth?" had no measurable answer. Also the
+ * right choice for a problem that converges in one or two iterations
+ * anyway, where any preconditioner is pure overhead.
+ */
+export function createIdentityPreconditioner( shape ) {
+
+	return function applyIdentityPreconditioner( input, output ) {
+
+		return buildElementwiseKernel( shape, ( I ) => {
+
+			output( ...I ).assign( input( ...I ) );
+
+		}, 'pre-identity' );
+
+	};
+
+}
+
 // One red-black SOR relax pass over a single color (0 or 1). Reads the
 // full current `x`, but only *writes* cells matching `color` -- since a
 // cell's neighbors are always the opposite color on a proper checkerboard,

@@ -126,4 +126,64 @@ describe( 'createGridPressureSolver2', () => {
 
 	} );
 
+	// The preconditioner choice. Construction is all that can be checked
+	// here -- which one converges faster is a GPU question, measured live
+	// on examples/15-flow-past-cylinder/ -- but construction is where the
+	// mistakes are: a typo silently falling back to a default, or a
+	// preconditioner built against the wrong mask/face-weight options.
+	describe( 'preconditioner option', () => {
+
+		const base = { resolution: [ 8, 8 ], gridSpacing: [ 1, 1 ] };
+
+		it( 'accepts each supported preconditioner', () => {
+
+			for ( const preconditioner of [ 'multigrid', 'jacobi', 'none' ] ) {
+
+				expect( () => createGridPressureSolver2( { ...base, preconditioner } ) ).not.toThrow();
+
+			}
+
+		} );
+
+		it( 'defaults to multigrid and reports it', () => {
+
+			expect( createGridPressureSolver2( base ).settings.preconditioner ).toBe( 'multigrid' );
+
+		} );
+
+		it( 'rejects an unknown name rather than falling back', () => {
+
+			expect( () => createGridPressureSolver2( { ...base, preconditioner: 'jacobbi' } ) )
+				.toThrow( /unknown preconditioner/ );
+
+		} );
+
+		it( 'builds all three regardless of which is selected, so it can be switched at runtime', () => {
+
+			const solver = createGridPressureSolver2( { ...base, preconditioner: 'jacobi' } );
+
+			expect( solver.settings.preconditioner ).toBe( 'jacobi' );
+			// The multigrid preconditioner's own runtime switches are only
+			// present if it really was constructed.
+			expect( solver.settings.multigrid ).toBeDefined();
+
+		} );
+
+		it( 'builds with a Dirichlet mask and with variable density, which is where Jacobi differs from none', () => {
+
+			const dirichlet = () => ( { mask: () => float( 0 ), target: () => float( 0 ) } );
+			const u = createFaceCenteredGrid2( 8, 8, 1, 1, 0, 0 ).dataU;
+			const v = createFaceCenteredGrid2( 8, 8, 1, 1, 0, 0 ).dataV;
+
+			expect( () => createGridPressureSolver2( {
+				...base,
+				preconditioner: 'jacobi',
+				dirichlet,
+				faceWeights: { u: ( i, j ) => u( i, j ), v: ( i, j ) => v( i, j ) }
+			} ) ).not.toThrow();
+
+		} );
+
+	} );
+
 } );

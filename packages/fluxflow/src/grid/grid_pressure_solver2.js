@@ -92,7 +92,7 @@ import { float, int, max, min, atomicAdd, If } from 'three/tsl';
 import { createCellCenteredScalarGrid2 } from './grid_data2.js';
 import { faceCenteredDivergenceAtCenter2 } from './grid_math.js';
 import { createCopyKernel2 } from './array_utils.js';
-import { createLaplacianOperator, createMultigridPreconditioner } from '../linalg/multigrid.js';
+import { createLaplacianOperator, createMultigridPreconditioner, createJacobiPreconditioner, createIdentityPreconditioner } from '../linalg/multigrid.js';
 import { createPreconditionedConjugateGradientSolver } from '../linalg/linalg.js';
 import { isNonFiniteOrAbove } from '../float_guards.js';
 import { instrumentDispatch } from '../profiling.js';
@@ -166,6 +166,10 @@ const DEFAULT_MAX_PLAUSIBLE_PRESSURE = 1e6;
 // multigrid.js's own default when no mask is given at all).
 // options.multigrid: forwarded as-is to createMultigridPreconditioner's
 // own options (e.g. { numberOfLevels: 4 }).
+// options.preconditioner: 'multigrid' (default), 'jacobi' or 'none'. All
+// three are built at construction and selected per solve, so they can be
+// compared inside one run -- see multigrid.js's own comment on what Jacobi
+// is and is not worth. Mutable at runtime through the returned `settings`.
 // options.tolerance/maxIterations/residualCheckInterval: forwarded to the
 // underlying CG solve().
 // options.batchIterations: submit the GPU-resident CG loop's dispatches as one
@@ -213,6 +217,7 @@ export function createGridPressureSolver2( {
 	dirichlet,
 	faceWeights,
 	multigrid = {},
+	preconditioner = 'multigrid',
 	tolerance = 1e-5,
 	maxIterations = 100,
 	// How often the CG loop evaluates its true-residual stop test, in
@@ -259,7 +264,7 @@ export function createGridPressureSolver2( {
 	// drift under sustained load). Alternating the policy *within* one run
 	// makes the comparison paired, and paired is the only kind that means
 	// anything here.
-	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations };
+	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner };
 
 	const [ resolutionX, resolutionY ] = resolution;
 	const [ gridSpacingX, gridSpacingY ] = gridSpacing;
@@ -298,7 +303,52 @@ export function createGridPressureSolver2( {
 	// is exactly what that parameter is defined to mean.
 	const faceWeightAccessors = faceWeights ? [ faceWeights.u, faceWeights.v ] : undefined;
 	const applyLaplacian = createLaplacianOperator( shape, gridSpacing, { dirichletMask, faceWeights: faceWeightAccessors } );
-	const applyPreconditioner = createMultigridPreconditioner( shape, gridSpacing, { ...multigrid, dirichletMask, faceWeights: faceWeightAccessors } );
+	// *** All three preconditioners, chosen per solve ***
+	//
+	// Built together at construction for the same reason every other
+	// comparable choice in this package is: comparing two across separate
+	// runs of an evolving scene compares the scene to itself. The CG solver
+	// is handed one function, which dispatches whichever `settings` names.
+	//
+	// The wrapper costs the cheap preconditioners one submission. An entry
+	// in the CG iteration's batch joins it only if it exposes a
+	// `computeNode`, and a selector cannot -- it does not know at resolve
+	// time which kernel it will run. The multigrid V-cycle was already a
+	// batch break (linalg.js says so at its batch definition), so it loses
+	// nothing; Jacobi and identity are single kernels that could otherwise
+	// have been batched, so they pay ~38.8 us per iteration they need not
+	// have. That bias runs *against* the cheap options, which is the safe
+	// direction for a measurement meant to decide whether they are worth
+	// having at all.
+	const preconditionerBuilders = {
+		multigrid: createMultigridPreconditioner( shape, gridSpacing, { ...multigrid, dirichletMask, faceWeights: faceWeightAccessors } ),
+		jacobi: createJacobiPreconditioner( shape, gridSpacing, { dirichletMask, faceWeights: faceWeightAccessors } ),
+		none: createIdentityPreconditioner( shape )
+	};
+
+	if ( ! Object.prototype.hasOwnProperty.call( preconditionerBuilders, preconditioner ) ) {
+
+		throw new Error( `grid_pressure_solver2: unknown preconditioner '${ preconditioner }' (expected ${ Object.keys( preconditionerBuilders ).join( ', ' ) }).` );
+
+	}
+
+	function applyPreconditioner( input, output ) {
+
+		const built = {};
+
+		for ( const name of Object.keys( preconditionerBuilders ) ) {
+
+			built[ name ] = preconditionerBuilders[ name ]( input, output );
+
+		}
+
+		return function dispatchSelectedPreconditioner() {
+
+			built[ settings.preconditioner ]();
+
+		};
+
+	}
 	const cg = createPreconditionedConjugateGradientSolver( applyLaplacian, applyPreconditioner, b, pressureGrid.data, { atomicScale } );
 
 	// Updated after every project()-dispatch below, for diagnostics -- cg.solve()
@@ -621,7 +671,7 @@ export function createGridPressureSolver2( {
 	// The preconditioner's own runtime-switchable settings (V-cycle
 	// batching, coarsest-level form), surfaced next to this solver's so a
 	// measurement has one place to reach for. See multigrid.js.
-	settings.multigrid = applyPreconditioner.settings;
+	settings.multigrid = preconditionerBuilders.multigrid.settings;
 
 	return { project, pressure: pressureGrid, b, diagnostics, settings };
 
