@@ -87,7 +87,7 @@
 
 import * as tsl_array_n from 'tsl_array_n';
 import { float, Loop, If } from 'three/tsl';
-import { instrumentDispatch, profileBatch } from '../profiling.js';
+import { instrumentDispatch, profileBatch, timePhase } from '../profiling.js';
 import { isNonFinite, isNonFiniteOrAbove } from '../float_guards.js';
 
 // Fixed-point scale for encoding a float product as an atomically-summable
@@ -1083,7 +1083,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 		// Two host reads to seed the loop. Unlike the ones inside it, these
 		// happen once per solve, not once per iteration.
-		const initRTr = await dotRR.read();
+		const initRTr = await timePhase( 'solve-setup-readRR', () => dotRR.read() );
 		let newRTr = initRTr;
 		let oldRTr = initRTr;
 
@@ -1095,7 +1095,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		}
 
 		applyPreconditionerToR(); // z0 = M^-1 @ r0
-		const initRZ = await dotRZ.read();
+		const initRZ = await timePhase( 'solve-setup-readRZ', () => dotRZ.read() );
 
 		updateP(); // p0 = z0 (p was 0, so beta cannot matter here)
 
@@ -1131,7 +1131,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 			// The only round trip in the iteration. Everything the host has
 			// to decide comes back in it.
-			const snapshot = await scalars.toArray();
+			const snapshot = await timePhase( 'solve-iteration-read', () => scalars.toArray() );
 			const stopCode = snapshot[ SLOT_STOP ];
 
 			newRTr = snapshot[ SLOT_RR ];

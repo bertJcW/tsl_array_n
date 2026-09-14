@@ -1837,3 +1837,75 @@ and 698 ms per step, which moves the GPU's clocks. A clean natural step is
 **18.6-22.4 ms** depending on warm-up. The preconditioner *ratios* stand --
 both arms of each comparison sat in the same thermal environment -- but the
 absolute figure does not.
+
+## Finding the missing 8 ms: phase timing
+
+The ablations above priced two pieces of the fixed cost and left ~8 ms
+unattributed. `profiling.js` gained `markPhase`/`timePhase` for the rest,
+because counting dispatches says nothing about where a *wait* goes, and a
+round trip's cost IS the wall time of its await -- it cannot return until
+the queue in front of it has drained. Example 15, 50 steps, profiling on:
+
+| phase | calls/step | ms/step |
+| --- | --- | --- |
+| `pressure-cg-solve` (the whole solve) | 1 | **23.02** |
+| `solve-iteration-read` (the in-loop readback) | 11.5 | **13.93** |
+| `solve-setup-readRR` | 1 | **5.38** |
+| `solve-setup-readRZ` | 1 | 1.04 |
+| `pressure-badcells-read` | 1 | 0.83 |
+| *step wall* | | *26.69* |
+| *of which CPU encoding* | | *3.78* |
+| *submissions* | *30* | *~1.2 (at 38.79 us)* |
+
+**Host round trips are 21.2 ms of a 26.7 ms step -- 79%.**
+
+The missing 8 ms was never separate work. It is inside
+`solve-setup-readRR`: that is the first readback of the solve, so it
+drains everything queued ahead of it -- `dispatchBuildSystem`,
+`applyToX`, `init`. One await, 5.38 ms, absorbing the whole prologue.
+
+Two things this retires:
+
+- **Submissions are no longer the story.** 30 per step at 38.79 us is
+  ~1.2 ms, 4% of the step. The batching work already collected that; the
+  272-per-frame figure predates it.
+- **The V-cycle is not the story either.** Priced by ablation (preconditioner
+  `multigrid` vs `none` at a zero iteration cap, so the only V-cycle is the
+  initial preconditioner apply): **0.2 ms**. Against 0.861 ms for a whole CG
+  iteration, the V-cycle is under a quarter of it. Every one of the three
+  queued directions -- fold `mg-clear` into `restrict`, red-black to damped
+  Jacobi, exact-transpose transfer operators -- attacks that 0.2 ms.
+
+### Two numbers that look contradictory and are not
+
+The cap sweep gives **0.861 ms as the marginal cost of one more iteration**.
+The phase timer gives **1.21 ms as the observed cost of one in-loop read**
+(13.93 / 11.5). A read cannot cost more than the iteration containing it.
+
+Both are correct because they measure different things. An await's wall
+time includes draining work that was queued before it, so phase timing
+says *where the cost is observed*; the sweep's slope says *what one more
+iteration adds*. They must not be added together.
+
+### The actionable gap
+
+The largest single item is the per-iteration readback, 13.93 ms, 52% of
+the step -- and **there is currently no way to reduce it on the default
+path**. `residualCheckInterval` exists for exactly this, but it is
+consulted only in the host `solve()`; `solveWithGpuResidentScalars`, which
+is the default, reads `scalars` unconditionally every iteration. Measured:
+`checkEvery` 1 / 2 / 4 / 8 all ran 9 iterations and differed only by noise
+(18.8 / 22.1 / 20.7 / 20.4 ms), which is what a knob that does nothing
+looks like.
+
+That also revisits an earlier conclusion in this document. The predictive
+stop-test schedule was reverted as a wash, on the reasoning that skipping
+a check costs extra iterations. Under the numbers now measured -- 1.21 ms
+observed per read against 0.861 ms marginal per iteration -- that trade is
+worth re-testing, but only once the GPU-resident path can actually skip
+the read. It cannot today, so the earlier measurement was made on a path
+where the knob was inert.
+
+**Next: make the GPU-resident loop's readback conditional, then re-run the
+interval sweep.** That is the one change the accounting points at, and
+it is worth more than steps 3-5 combined.

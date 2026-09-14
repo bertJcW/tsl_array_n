@@ -95,7 +95,7 @@ import { createCopyKernel2 } from './array_utils.js';
 import { createLaplacianOperator, createMultigridPreconditioner, createJacobiPreconditioner, createIdentityPreconditioner } from '../linalg/multigrid.js';
 import { createPreconditionedConjugateGradientSolver } from '../linalg/linalg.js';
 import { isNonFiniteOrAbove } from '../float_guards.js';
-import { instrumentDispatch } from '../profiling.js';
+import { instrumentDispatch, timePhase } from '../profiling.js';
 
 // Last-resort bound on a single pressure cell's own magnitude -- see
 // dispatch()'s own use, below, for the full circuit-breaker this backs.
@@ -655,10 +655,10 @@ export function createGridPressureSolver2( {
 			// -- a minor, bounded inaccuracy, never a divergent one.
 			if ( updateDirichletFields ) updateDirichletFields();
 			dispatchBuildSystem();
-			diagnostics.converged = await cg.solve(
+			diagnostics.converged = await timePhase( 'pressure-cg-solve', () => cg.solve(
 				tolerance, settings.maxIterations,
 				settings.residualCheckInterval, settings.gpuResidentScalars, settings.batchIterations
-			);
+			) );
 
 			// Forwarded from the CG solver so a caller can see *why* a frame
 			// was expensive without reaching into linalg.js -- the iteration
@@ -684,7 +684,7 @@ export function createGridPressureSolver2( {
 			// justify checking periodically rather than every solve. It
 			// does not justify not checking.
 			diagnostics.rejected = settings.checkBadCells
-				? ( await countBadPressureCellsNow() ) > 0
+				? ( await timePhase( 'pressure-badcells-read', () => countBadPressureCellsNow() ) ) > 0
 				: false;
 
 			// Restore the last known-good field, or -- this solve having

@@ -546,6 +546,15 @@ try {
 				fps: +( frames / ( wallMs / 1000 ) ).toFixed( 2 ),
 				wallMsPerFrame: +( wallMs / frames ).toFixed( 2 ),
 				dispatchesPerFrame: +report.dispatchesPerFrame.toFixed( 1 ),
+				submissionsPerFrame: +report.submissionsPerFrame.toFixed( 1 ),
+				// Where the *waits* go, which the dispatch counts cannot say
+				// -- a host round trip's cost is the wall time of its await.
+				// See profiling.js's markPhase.
+				phases: report.phases.map( ( ph ) => ( {
+					label: ph.label,
+					perFrame: +ph.callsPerFrame.toFixed( 1 ),
+					msPerFrame: +ph.msPerFrame.toFixed( 3 )
+				} ) ),
 				encodeMsPerFrame: +report.cpuMsPerFrame.toFixed( 2 ),
 				encodeShareOfFrame: +( report.cpuMs / wallMs ).toFixed( 3 ),
 				gpuComputeMs: gpuMs,

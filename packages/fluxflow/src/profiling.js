@@ -149,6 +149,51 @@ export function profileBatch( label, count, run ) {
 }
 
 /** Starts counting, from zero. */
+// *** Phase timing, for the parts that are not dispatches ***
+//
+// Counting dispatches and submissions says nothing about where a *wait*
+// goes, and waits are most of a solve: the fixed cost of one pressure
+// solve was measured at about as much as all of its CG iterations put
+// together, with roughly four host round trips in it. A round trip's cost
+// IS the wall time of its await -- it cannot return until the queue in
+// front of it has drained -- so timing the await directly is exact rather
+// than inferred, and it correctly attributes the queued work to the thing
+// that waits for it.
+const phases = new Map();
+
+/** Records `ms` spent in a named phase. No-op unless profiling is on. */
+export function markPhase( label, ms ) {
+
+	if ( ! state.enabled ) return;
+
+	const entry = phases.get( label );
+
+	if ( entry === undefined ) phases.set( label, { calls: 1, ms } );
+	else {
+
+		entry.calls ++;
+		entry.ms += ms;
+
+	}
+
+}
+
+/**
+ * Times `run()` under `label` and returns its result. Async-aware: the
+ * await is the point, so the caller must await this too.
+ */
+export async function timePhase( label, run ) {
+
+	if ( ! state.enabled ) return run();
+
+	const t0 = performance.now();
+	const result = await run();
+	markPhase( label, performance.now() - t0 );
+
+	return result;
+
+}
+
 export function startProfiling() {
 
 	resetProfiling();
@@ -167,6 +212,7 @@ export function resetProfiling() {
 
 	state.dispatches = 0;
 	state.submissions = 0;
+	phases.clear();
 	state.cpuMs = 0;
 	state.byLabel.clear();
 
@@ -205,6 +251,15 @@ export function profilingReport( frames = 1 ) {
 		frames,
 		dispatches: state.dispatches,
 		dispatchesPerFrame: state.dispatches / frames,
+		phases: [ ...phases.entries() ]
+			.map( ( [ label, e ] ) => ( {
+				label,
+				calls: e.calls,
+				callsPerFrame: e.calls / frames,
+				ms: e.ms,
+				msPerFrame: e.ms / frames
+			} ) )
+			.sort( ( a, b ) => b.ms - a.ms ),
 		submissions: state.submissions,
 		submissionsPerFrame: state.submissions / frames,
 		// How much work each submission carries. The number to raise: measured
