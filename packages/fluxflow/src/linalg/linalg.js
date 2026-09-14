@@ -934,7 +934,19 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		// later having lost nothing but the rest of this iteration's work.
 		alpha().assign( stopCode.equal( STOP_NONE ).select( value, float( 0 ) ) );
 
-		scalars( SLOT_STOP ).assign( stopCode );
+		// *** Sticky: the first failure wins ***
+		//
+		// This kernel runs every iteration and the host no longer reads
+		// the slot every iteration, so an unconditional write would let a
+		// clean iteration erase the record of a guard that tripped before
+		// it. A tripped guard already leaves alpha at 0, which makes that
+		// iteration's updates no-ops -- but beta is computed from an
+		// unchanged rz and the loop would otherwise carry on as if nothing
+		// had happened. Keeping the first non-zero code means the host
+		// finds out whenever it next looks, however much later that is.
+		const previous = scalars( SLOT_STOP ).toVar();
+
+		scalars( SLOT_STOP ).assign( previous.equal( STOP_NONE ).select( stopCode, previous ) );
 
 	} );
 
@@ -962,7 +974,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		// Only overwrite the stop slot when this kernel has something to
 		// say, so an alpha-time stop set earlier this iteration survives to
 		// be read.
-		If( rzOldDegenerate, () => {
+		If( rzOldDegenerate.and( scalars( SLOT_STOP ).equal( STOP_NONE ) ), () => {
 
 			scalars( SLOT_STOP ).assign( float( STOP_DEGENERATE_OLD_RZ ) );
 
@@ -1076,7 +1088,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	 * preconditioner apply more than it strictly needs, and a guarded solve
 	 * finishes an iteration whose updates are all no-ops.
 	 */
-	async function solveWithGpuResidentScalars( tol, maxiter, batchIterations ) {
+	async function solveWithGpuResidentScalars( tol, maxiter, residualCheckInterval, batchIterations ) {
 
 		applyToX(); // Ax = A @ x
 		init(); // r = b - Ax, p = 0, Ap = 0
@@ -1109,6 +1121,9 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		scalars.fromArray( seed );
 
 		let forceResidualRecompute = false;
+		// Whether newRTr and the stop code reflect the current x. Only
+		// meaningful once the read starts being skipped.
+		let residualIsCurrent = true;
 
 		for ( let iter = 0; iter < maxiter; iter ++ ) {
 
@@ -1129,24 +1144,66 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 			}
 
-			// The only round trip in the iteration. Everything the host has
-			// to decide comes back in it.
-			const snapshot = await timePhase( 'solve-iteration-read', () => scalars.toArray() );
+			// *** The round trip, and why it is now conditional ***
+			//
+			// This is the one host round trip left in an iteration, and it
+			// was measured as the single largest item in a solver step:
+			// 13.93 ms of 26.69, 52%, at ~1.21 ms observed per read. The
+			// arithmetic does not need it -- alpha and beta are computed
+			// and consumed on the GPU -- so the only reason to come back
+			// is to ask whether to stop.
+			//
+			// Skipping it is safe in both directions it has to be safe in.
+			// A guard that trips leaves its scalar at exactly 0, so the
+			// updates it feeds are no-ops and x cannot be corrupted while
+			// the host is not looking, and the stop slot is sticky (see
+			// alphaKernel) so the record survives until the host does
+			// look. Convergence is the other direction, and skipping costs
+			// there: the loop can run up to `residualCheckInterval - 1`
+			// iterations past the point it could have stopped.
+			//
+			// Which way that trade lands is a measurement, not a
+			// prediction -- at ~1.21 ms per read against 0.861 ms of
+			// marginal iteration cost it should pay, and the default stays
+			// at 1 until it is shown to on real scenes.
+			residualIsCurrent = iter % residualCheckInterval === 0;
+
+			if ( residualIsCurrent ) {
+
+				const snapshot = await timePhase( 'solve-iteration-read', () => scalars.toArray() );
+				const stopCode = snapshot[ SLOT_STOP ];
+
+				newRTr = snapshot[ SLOT_RR ];
+
+				if ( stopCode !== STOP_NONE ) {
+
+					state.stoppedBy = STOP_REASONS[ stopCode ] ?? 'unknown';
+					break;
+
+				}
+
+				if ( Math.sqrt( Math.abs( newRTr ) ) < tol ) break;
+
+				if ( newRTr > oldRTr ) forceResidualRecompute = true;
+				oldRTr = newRTr;
+
+			}
+
+		}
+
+		// The loop can exit on an iteration that skipped its read, leaving
+		// both the residual and the stop code stale -- and a stale "no
+		// guard tripped" is the dangerous one. One read settles both, so
+		// what this function reports always describes the x it is leaving
+		// behind. See the host path's equivalent.
+		if ( ! residualIsCurrent ) {
+
+			const snapshot = await timePhase( 'solve-final-read', () => scalars.toArray() );
 			const stopCode = snapshot[ SLOT_STOP ];
 
 			newRTr = snapshot[ SLOT_RR ];
 
-			if ( stopCode !== STOP_NONE ) {
-
-				state.stoppedBy = STOP_REASONS[ stopCode ] ?? 'unknown';
-				break;
-
-			}
-
-			if ( Math.sqrt( Math.abs( newRTr ) ) < tol ) break;
-
-			if ( newRTr > oldRTr ) forceResidualRecompute = true;
-			oldRTr = newRTr;
+			if ( stopCode !== STOP_NONE ) state.stoppedBy = STOP_REASONS[ stopCode ] ?? 'unknown';
 
 		}
 
@@ -1164,7 +1221,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		// reads three scalars back per iteration, so its dispatches cannot be
 		// submitted ahead of the decisions that consume them. `batchIterations`
 		// is ignored there rather than half-applied.
-		if ( gpuResidentScalars ) return solveWithGpuResidentScalars( tol, maxiter, batchIterations );
+		if ( gpuResidentScalars ) return solveWithGpuResidentScalars( tol, maxiter, residualCheckInterval, batchIterations );
 
 		applyToX(); // Ax = A @ x
 		init(); // r = b - Ax, p = 0, Ap = 0

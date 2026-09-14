@@ -2073,3 +2073,88 @@ They were all priced against the V-cycle, and the V-cycle is 0.155 ms of a
 goes: **host round trips, 79%** -- and the single largest item, the
 per-iteration readback at 52%, still has no way to be reduced on the
 default path.
+
+# The readback the accounting pointed at (2026-09-14)
+
+The step accounting found host round trips at 79% of a solver step, with
+the per-iteration readback the largest single item -- 13.93 ms of 26.69,
+52% -- and no way to reduce it, because `residualCheckInterval` was
+consulted only in the host `solve()` while the default GPU-resident path
+read `scalars` unconditionally. This makes that read conditional.
+
+## What had to change for skipping to be safe
+
+**The stop code is now sticky.** `alphaKernel` runs every iteration and
+the host no longer looks every iteration, so an unconditional write would
+let a clean iteration erase the record of a guard that tripped before it.
+A tripped guard already leaves its scalar at exactly 0, so the updates it
+feeds are no-ops and x cannot be corrupted while the host is not looking
+-- but beta is computed from an unchanged r.z and the loop would
+otherwise carry on as though nothing had happened. The kernels now keep
+the first non-zero code, so the host finds out whenever it next looks.
+
+**A final read after the loop.** The loop can exit on an iteration that
+skipped its read, leaving both the residual and the stop code stale, and
+a stale "no guard tripped" is the dangerous one.
+
+`examples/05-preconditioned-conjugate-gradient/` runs its two guard cases
+at interval 4 as well as 1, which is the case the sticky code exists for:
+a guard tripping on an iteration whose readback is skipped. Both cases
+report the right reason from all three arms and leave x finite.
+
+## Measured
+
+Example 15, paired, state restored before every arm, medians of 24:
+
+| interval | run 1 ms | run 1 iters | run 2 ms | run 2 iters |
+| --- | --- | --- | --- | --- |
+| 1 | 40.5 | 13 | 20.6 | 12 |
+| 2 | 26.1 | 13 | 20.5 | 13 |
+| **4** | **19.1** | 13 | **16.6** | 13 |
+| 8 | 20.1 | **17** | 18.1 | **17** |
+
+4 is fastest in both runs and 8 gives the win back by pushing the
+iteration count 13 -> 17. The magnitude does not reproduce (2.12x then
+1.24x, the first run's every-iteration arm being anomalously slow), so the
+honest figure is **1.24x on this scene, possibly more**; the direction and
+the shape of the curve reproduce exactly.
+
+Example 28, a liquid with variable density, 250 steps per interval,
+scene re-seeded each time:
+
+| interval | converged | rejected | mean iterations | peak pressure | non-finite |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 240/250 | 0 | 33.8 | 15.799 | 0 |
+| 2 | **250/250** | 0 | 29.9 | 15.614 | 0 |
+| 4 | **250/250** | 0 | 30.5 | 15.614 | 0 |
+| 8 | **250/250** | 0 | 31.3 | 15.614 | 0 |
+
+Checking less often converges **more** often, which is not a paradox: the
+loop has run further by the time it asks, so it is more likely to be under
+tolerance when it does. The ten non-converged frames at interval 1 ran to
+the cap, which is also what inflates that row's mean iteration count.
+
+Example 29, which converges in a single iteration, is unaffected --
+1 iteration at every interval. Iteration 0 is always a check point, so an
+easy solve still stops immediately and the feared "a 1-iteration scene now
+runs 4" does not happen.
+
+## The default is now 4
+
+Verified on the new default: example 26 converges **250/250** (was
+199/200) and example 22 **250/250** (was 248/250), both with zero
+rejections, zero non-finite pressures, and peak pressures identical to
+their historical values to every digit (10.382 and 20.765).
+
+This is a global constant rather than a per-scene one, and what it prices
+is hardware -- a round trip against an iteration -- not scene shape.
+
+## What this says about an earlier retraction
+
+The predictive stop-test schedule was built and reverted earlier in this
+document as "a wash". Its premise was right; the measurement was made on
+a path where the knob was inert, because the default had already moved to
+the GPU-resident loop and that loop ignored the interval entirely. The
+fixed interval is the simpler thing and it works. The predictor is still
+not worth rebuilding -- 4 is one constant with measured behaviour at 1, 2,
+4 and 8 on three scenes, against a rate estimator with a safety factor.

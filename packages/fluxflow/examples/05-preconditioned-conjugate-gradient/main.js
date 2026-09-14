@@ -174,15 +174,22 @@ try {
 
 		const outcomes = {};
 
-		for ( const gpuResidentScalars of [ false, true ] ) {
-
-			const key = gpuResidentScalars ? 'gpu' : 'host';
+		// Interval 4 is here because it is the case the sticky stop code
+		// exists for: a guard can trip on an iteration whose readback is
+		// skipped, and the host must still find out. If the code were
+		// overwritten by the next clean iteration, this arm would report
+		// 'none' and the test would catch it.
+		for ( const [ key, gpuResidentScalars, interval ] of [
+			[ 'host', false, 1 ],
+			[ 'gpu', true, 1 ],
+			[ 'gpu, check every 4', true, 4 ]
+		] ) {
 
 			x.fromArray( new Float32Array( N ) );
 
 			const solver = linalg.createPreconditionedConjugateGradientSolver( guardCase.operator, identityPreconditioner, b, x );
 
-			await solver.solve( 1e-5, 20, 1, gpuResidentScalars );
+			await solver.solve( 1e-5, 20, interval, gpuResidentScalars );
 
 			const finalX = Array.from( await x.toArray() );
 
@@ -196,16 +203,15 @@ try {
 
 		}
 
-		const agree = outcomes.host.stoppedBy === outcomes.gpu.stoppedBy;
-		const expected = outcomes.host.stoppedBy === guardCase.expectedStop;
-		const finite = outcomes.host.finite && outcomes.gpu.finite;
+		const keys = Object.keys( outcomes );
+		const agree = keys.every( ( k ) => outcomes[ k ].stoppedBy === guardCase.expectedStop );
+		const finite = keys.every( ( k ) => outcomes[ k ].finite );
 
 		log(
 			`guard — ${ guardCase.name }`,
-			agree && expected && finite,
-			`host stopped by '${ outcomes.host.stoppedBy }' (x finite: ${ outcomes.host.finite }), ` +
-			`GPU-resident stopped by '${ outcomes.gpu.stoppedBy }' (x finite: ${ outcomes.gpu.finite }), ` +
-			`expected '${ guardCase.expectedStop }'`
+			agree && finite,
+			keys.map( ( k ) => `${ k }: '${ outcomes[ k ].stoppedBy }' (x finite: ${ outcomes[ k ].finite })` ).join( ', ' ) +
+			` — expected '${ guardCase.expectedStop }'`
 		);
 
 	}

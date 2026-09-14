@@ -233,7 +233,30 @@ export function createGridPressureSolver2( {
 	// stays at 1 -- but they are the instrument that priced the round trip,
 	// and mutable at runtime via `settings` below so that pricing can be
 	// done paired.
-	residualCheckInterval = 1,
+	// How often the CG loop asks whether it has converged, in iterations.
+	//
+	// Every ask is a host round trip, and that round trip was measured as
+	// the largest single item in a solver step -- 13.93 ms of 26.69, 52%,
+	// at ~1.21 ms each -- against 0.861 ms for the marginal cost of one
+	// more iteration. So asking less often trades a 1.21 ms round trip for
+	// up to `interval - 1` iterations at 0.861 ms, and 4 is where that
+	// stopped paying on the scenes measured:
+	//
+	//   example 15, paired, twice: 4 fastest both times (1.24x and 2.12x
+	//     against every-iteration); 8 pushes the iteration count 13 -> 17
+	//     and gives the win back.
+	//   example 28 (liquid, variable density), 250 steps each: intervals
+	//     2/4/8 all converge 250/250 against 240/250 at 1, zero rejections,
+	//     zero non-finite, same peak pressure. Checking less often converges
+	//     MORE often, because the loop has run further by the time it asks.
+	//   example 29 (converges in one iteration): unaffected, because
+	//     iteration 0 is always a check point, so an easy solve still stops
+	//     immediately.
+	//
+	// This is a global constant, not a per-scene one, and the mechanism it
+	// prices is hardware (round trip against iteration), not scene shape.
+	// 1 restores asking every iteration.
+	residualCheckInterval = 4,
 	// Compute alpha and beta on the GPU and read the loop's scalars back in
 	// one trip per iteration instead of three -- see
 	// solveWithGpuResidentScalars in linalg.js. On by default: measured
