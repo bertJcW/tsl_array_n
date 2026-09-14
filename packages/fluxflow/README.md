@@ -25,6 +25,9 @@ lives in `docs/`.
   without breaking it: the cost model in measured constants, every knob
   with its measured effect, what must not regress, the measurement
   protocol, and the full list of what has already been tried and rejected.
+- [`docs/long-run-stability.md`](docs/long-run-stability.md) -- every
+  drivable example run for 12,000 solver steps, 108,000 in total: what
+  converged, what did not, and what stayed flat.
 - [`docs/provenance-audit.md`](docs/provenance-audit.md) -- the licence
   and code-copying audit: method, findings, and the limits of what could
   be checked.
