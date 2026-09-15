@@ -688,6 +688,27 @@ have said the same thing sooner.
 
 ## Open items
 
+- **Estimate the residual gap instead of recomputing on a fixed schedule.**
+  The convergence bug fixed on 2026-09-15 was a textbook one -- the
+  recursively updated residual drifting from the true `b - Ax`, known in
+  the literature as the *residual gap* -- and the code already had the
+  textbook remedy, *residual replacement*, at a fixed interval of 50
+  iterations. The defect was that the interval was longer than a typical
+  solve here (14-33 iterations), so it never fired: a constant sized for a
+  slow solver, left behind when the multigrid preconditioner made the
+  solver fast. **The better the preconditioner, the less likely that
+  interval is ever reached** -- which is why it failed silently.
+  
+  The current fix (verify when convergence is claimed, then recompute
+  every iteration once a verification has failed) is correct but cruder
+  than the literature's. Modern residual-replacement strategies *estimate*
+  the accumulated gap and replace only when it threatens the target, at a
+  cost the papers describe as negligible against computing the residual
+  explicitly. See van der Vorst & Ye, *Residual Replacement Strategies for
+  Krylov Subspace Iterative Methods* (SIAM J. Sci. Comput.), and Cools et
+  al. on automated replacement for pipelined CG. Parked deliberately, not
+  forgotten.
+
 - **`src/grid/dye_field2.js`** is committed but deliberately not exported --
   a higher-resolution passive dye field, parked pending the agreed ordering
   (surface tension, then performance, then dye). The performance phase is
