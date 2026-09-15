@@ -47,12 +47,16 @@ lives in `docs/`.
 - [`docs/machine-learning-fluid-research.md`](docs/machine-learning-fluid-research.md)
   -- where machine learning can buy efficiency or quality in a fluid
   solver, surveyed by *what the network replaces*, then filtered through
-  this package's own measurements. The filter is the point: the GPU is
-  idle for ~99% of the frame here, so ML that makes the arithmetic cheaper
-  is worth ~1%, and the only ML worth having is ML that replaces an
-  iterative, host-synchronised loop with a fixed-length feed-forward one.
-  Ends with a ranked shortlist whose first item is a measurement, not a
-  model.
+  this package's own measurements. The filter is the point: a solver step
+  is ~1416 dispatches, a data-dependent iteration count and four-plus host
+  round trips at 1.1 ms each, against a few per cent of GPU-busy time --
+  so ML that makes the arithmetic cheaper is worth almost nothing, and the
+  only ML worth having is ML that replaces an iterative, host-synchronised
+  loop with a fixed-length feed-forward one. Ends with a ranked shortlist
+  whose first two items are measurements, not models -- the second being a
+  re-measurement of the frame itself, because the GPU-busy share quoted
+  here is derived from a 2026-09-13 run taken before four optimisations
+  landed, and it has risen since by an amount nobody has pinned down.
 - [`docs/two-phase-bubbles-research.md`](docs/two-phase-bubbles-research.md)
   -- the earlier bubble research, archived.
 

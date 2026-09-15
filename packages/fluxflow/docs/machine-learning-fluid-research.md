@@ -15,57 +15,121 @@ that is rarely the headline.
 
 ## Part 0 — the constraint that filters everything
 
-Before any of the literature, the number that decides which of it applies.
+Before any of the literature, the measurements that decide which of it
+applies — and a warning about their dates, because this repo's numbers move
+fast and the first draft of this document got this wrong.
 
-`docs/perf-investigation-cg-gpu-resident-alpha-beta.md`, example 15
-(`flow-past-cylinder`, 64×64), driver loop paused, `renderer.compute`
-patched in the live page:
+### The numbers, with their provenance
 
-| quantity | measured |
-| --- | --- |
-| wall per frame | **31.8 – 35.9 ms** |
-| `renderer.compute()` calls per frame | **259 – 278** |
-| dispatches per frame | **740 – 813** |
-| **GPU compute time per frame** | **0.21 – 0.40 ms (~1%)** |
+All from `docs/perf-investigation-cg-gpu-resident-alpha-beta.md`, example 15
+(`flow-past-cylinder`, 64×64), driver paused:
 
-Plus, from the same document: **38.79 µs per submission**, so ~272
-submissions is ~10.6 ms — about a third of the frame; and from the step
-accounting, **host round trips were 79% of a solver step**, with the
-per-iteration residual readback the single largest item at 52%.
+| quantity | measured | date | still current? |
+| --- | --- | --- | --- |
+| dispatches **per solver step** | **1416 – 1434** | 2026-09-13 | yes — nothing since removes dispatches |
+| dispatches **per rendered frame** | 740 – 813 | 2026-09-13 | yes, but see the unit warning below |
+| `renderer.compute()` calls per frame | 259 – 278 | 2026-09-13 | **no** — CG-iteration batching removed 232 submissions/step after this |
+| **GPU compute time per frame** | **0.21 – 0.40 ms** | 2026-09-13 | yes, in absolute terms |
+| cost of one submission | 38.79 µs *on an idle queue* | 2026-09-13 | yes, with the caveat below |
+| cost of one host round trip | **1.1 ms** | 2026-09-14 | yes |
+| clean natural solver step | 18.6 – 22.4 ms | 2026-09-14 | **no** — two later changes |
+| solver step after `seedScalarsKernel` | 14.8 – 26.4 ms | 2026-09-15 | most recent figure |
 
-*That last figure is the one that has since moved, and it moved because of
-it.* Two changes landed in response to that accounting: the residual check
-became periodic with a default interval of 4 (1.24× on example 15, and it
-converges *more* often, not less, because the loop has run further by the
-time it asks), and the two setup round trips were replaced by
-`seedScalarsKernel` (bit-identical, 1.144× and 1.297× paired). At 13
-iterations and interval 4 the in-loop readbacks are now roughly 4 per
-solve rather than 13, plus the circuit breaker's 0.73 ms. So the round-trip
-term is smaller than the 79% figure — but the dispatch and submission terms
-above are untouched by both changes, and they are still the frame.
+**A frame is not a step**, and this document's first draft conflated them.
+The drivers take several solver steps per rendered frame in some scenes and
+a fraction of one in others; the doc's own worked example is scene 28, where
+a 16.6 ms rendered frame carried ~27 submissions against 359 per solver
+step. Everything below is stated per *step*, which is the unit the solver
+actually has.
 
-**The GPU is idle for roughly 99% of the frame.** That one fact reorders
-the entire field:
+### The percentage moved, and it moved against the easy conclusion
 
-- **Machine learning that makes the arithmetic cheaper is worth at most
-  1% here.** Almost every ML-for-CFD paper is written against the opposite
-  cost model: a large 3D grid where the solve is genuinely compute-bound
-  and a coarser or cheaper approximation is the whole point. That pitch
-  does not transfer to a 64×64 browser grid.
+The first draft said "the GPU is idle for 99% of the frame". That figure was
+taken from 2026-09-13, and **at least four optimisations landed after it**:
+CG-iteration submission batching (1.15×–1.56× per step), stage batching
+(6%), the residual check going periodic at interval 4 (1.24×), and
+`seedScalarsKernel` removing the two setup round trips (1.144×/1.297×).
+
+None of those make the GPU do less arithmetic. They remove host overhead.
+So the numerator — 0.21–0.40 ms of actual GPU execution — is unchanged,
+while the denominator shrank. **The GPU-busy share has therefore gone up,
+not down.**
+
+Roughly, and this is an estimate rather than a measurement: a step is
+~1416 dispatches against the frame harness's 740–813, so ~0.4–0.8 ms of GPU
+compute per step; a step is now ~15–20 ms. That puts the GPU at **~3–7%
+busy, not ~1%**.
+
+**This has not been re-measured, and it should be.** It needs real WebGPU
+hardware, which the container this was written in does not have (`/dev/dri`
+is absent, so any WebGPU here would be a software rasteriser and the
+timings would be meaningless). It is the second measurement on the
+shortlist in Part 3.
+
+### The better framing, which the step accounting already provides
+
+The 2026-09-14 interventional accounting is a cleaner basis for the ML
+argument than any GPU-utilisation percentage, because it says where a step
+goes rather than how busy a device is:
+
+| component | ms | share |
+| --- | --- | --- |
+| non-pressure stages (advection, forces, dye, boundary) | 1.4 | **6%** |
+| CG iterations (0.861 ms × 12) | 10.3 | **46%** |
+| pressure-solve fixed cost | ~9.1 | **~40%** |
+
+Fitted at **0.861 ms per CG iteration**, R² = 0.996, with the intercept
+agreeing with the directly measured zero-iteration point to 1%.
+
+That fixed 40% is the part worth staring at. It is, per the doc's own
+inventory, roughly **four host round trips and one full V-cycle** outside
+the CG loop — and a host round trip was re-measured directly at **1.1 ms**,
+correcting an earlier 0.2–0.4 ms estimate by 3–5×. The document's own
+verdict on it: "Nothing has ever targeted it — every optimisation in this
+document attacks per-iteration cost."
+
+### What that reorders
+
+- **Machine learning that makes the arithmetic cheaper is worth a few
+  per cent here — call it 3–7%, pending re-measurement.** That is five
+  times more than the first draft claimed and still not the lever. Almost
+  every ML-for-CFD paper is written against the opposite cost model: a
+  large 3D grid where the solve is genuinely compute-bound and a coarser
+  approximation is the whole point. That pitch does not transfer to a
+  64×64 browser grid.
 - **Machine learning that changes the *shape* of the computation is worth
-  the frame.** A neural network is feed-forward: a fixed number of layers,
-  a fixed number of dispatches, no data-dependent loop length, and — this
-  is the part that matters most here — **no convergence check, therefore
-  no host round trip.** FluidNet's own framing of its advantage is
-  precisely this: ConvNets have "fixed computational complexity and
-  latency, unlike exact iterative solvers."
+  the step.** A neural network is feed-forward: a fixed number of layers,
+  a fixed number of dispatches, no data-dependent loop length, and — the
+  part that matters most here — **no convergence check, therefore no host
+  round trip.** FluidNet's own framing of its advantage is exactly this:
+  ConvNets have "fixed computational complexity and latency, unlike exact
+  iterative solvers."
+
+The correction to the percentage does not weaken that second point; it
+**strengthens** it. A feed-forward network does not merely replace the 46%
+of the step that is CG iterations. It also removes most of the untargeted
+40%, because that 40% is dominated by round trips at 1.1 ms each and by the
+initial preconditioner V-cycle — none of which a network has. The thing
+nothing in this repo has yet attacked is precisely the thing this family of
+methods deletes by construction.
 
 So the interesting question for this package is not "can a network
 approximate the pressure solve more cheaply than MGPCG". It is: **can a
-network replace 740–813 dispatches, 272 submissions and a per-iteration
-convergence check with ~10–20 dispatches, 1–2 submissions and zero round
-trips?** That is a structural question, and it has a very different
-answer.
+network replace ~1416 dispatches per step, a data-dependent iteration
+count, and ~four-plus host round trips at 1.1 ms each, with ~10–20
+dispatches, 1–2 submissions and zero round trips?** That is a structural
+question, and it has a very different answer.
+
+### One honest caveat about submissions
+
+The 38.79 µs per submission is measured **on an idle queue**, and this
+matters: when the batching change removed ~10 of the remaining ~13
+submissions per frame, frame time did not move. The doc's own explanation
+is that in a real frame most of a submission's cost overlaps with GPU
+execution already queued. So "submissions × 38.79 µs" is an upper bound on
+what removing them can buy, not a prediction. The per-step frozen-workload
+measurement (1.15×–1.56×) is the one that held up; the per-frame one did
+not.
 
 Three further constraints, all of them already established in this repo:
 
@@ -242,7 +306,8 @@ best stability record.
 
 **Verdict for this package: right idea, wrong bottleneck, for now.** B buys
 *resolution*. This package is not resolution-bound at 64×64 — it is
-dispatch-bound, with the GPU idle 99% of the frame. B becomes the most
+dispatch-bound, with the GPU busy for only a few per cent of a step. B
+becomes the most
 interesting direction in the survey the moment the dispatch problem is
 solved and the grid can grow; before that, an 8× coarsening of a grid that
 is already tiny buys nothing. It also requires a differentiable solver,
@@ -433,7 +498,8 @@ Unreal Engine 5's Neural Network Engine (NNE) with
 [TensorRT for RTX](https://developer.nvidia.com/blog/speed-up-unreal-engine-nne-inference-with-nvidia-tensorrt-for-rtx-runtime/)
 completes neural inference in **3.8 ms at 1080p on an RTX 5090**, 1.5× over
 DirectML. That is the budget a AAA engine accepts for a full-screen
-network. This package's whole frame is 32 ms on a 64×64 grid — so a
+network. This package's whole solver step is ~15–20 ms on a 64×64 grid —
+so a
 *small* network is affordable here by a wide margin, and a full-screen one
 is not.
 
@@ -479,8 +545,9 @@ MFLOP, and the same figure at each level by construction (the channel
 count squares as the cell count quarters). Twelve of those is **≈ 0.2
 GFLOP per solve**. Against a current GPU compute time of 0.21–0.40 ms per
 *whole frame*, a few tenths of a millisecond of added GPU work is
-plausible — and it would be trading against 740–813 dispatches, ~272
-submissions and the whole periodic-readback apparatus.
+plausible — and it would be trading against ~1416 dispatches per step, a
+data-dependent iteration count, and the four-plus host round trips at
+1.1 ms each that make up the untargeted 40%.
 
 **Every number in that paragraph is an estimate, and the error bars are
 wide.** At 64×64 the tensors are small enough that a naive TSL convolution
@@ -505,22 +572,39 @@ into example 15 in place of the pressure solve, and measure it in the
 existing paired harness. It computes nothing meaningful; that is the
 point. It prices the *shape*.
 
-Acceptance criteria are the ones this repo already uses:
-dispatches/frame, `renderer.compute()` calls/frame, GPU compute time/frame,
-ms/step, medians of 24 with state restored before every arm.
+Acceptance criteria are the ones this repo already uses, stated per
+*step* rather than per frame: dispatches/step, `renderer.compute()` calls/step,
+GPU compute time/step, ms/step, medians of 24 with state restored before
+every arm.
 
-If a 12-dispatch feed-forward net does not measurably beat 740–813
-dispatches on this machine, **every direction in family A is dead and
-nothing was spent finding out.** If it does, the rest of the ladder has a
+If a 12-dispatch feed-forward net does not measurably beat ~1416
+dispatches per step on this machine, **every direction in family A is dead
+and nothing was spent finding out.** If it does, the rest of the ladder has a
 budget to spend. No training run should happen before this number exists.
 
-### 2. Learned initial guess for the pressure solve (A4)
+### 2. Re-measure the frame, because Part 0's percentage is stale
+
+The GPU-busy share quoted throughout this document (~3–7%) is an estimate
+derived from a 2026-09-13 measurement taken before four optimisations
+landed. The direction of the staleness is known — host overhead came out,
+GPU compute did not, so the share rose — but the magnitude is not.
+
+It is one run of the existing instrumented harness on real hardware:
+`renderer.compute()` patched, driver paused, GPU timestamps, reported per
+step. It costs an afternoon and it is the denominator for every efficiency
+claim below, including item 1's.
+
+Worth folding into the same run: whether the 1.1 ms host round trip and the
+0.861 ms per CG iteration still hold on the current defaults, since both
+were measured before `seedScalarsKernel`.
+
+### 3. Learned initial guess for the pressure solve (A4)
 
 Strictly safe: CG converges to the same answer regardless, so a bad guess
 costs iterations and nothing else. Pays directly in the measured currency —
 fewer iterations is fewer V-cycles, fewer submissions, and fewer of the
-per-iteration readbacks that the step accounting put at 52% before the
-check interval was widened to 4.
+per-iteration readbacks, which the step accounting put at 52% of a step
+before the check interval was widened to 4.
 
 **The bar is higher than it looks, and this is the honest part.** The
 obvious non-ML warm start is already in place: `pressureGrid` persists
@@ -539,7 +623,7 @@ example 15.
 Acceptance: median CG iterations per frame down; max|div| unchanged;
 `docs/long-run-stability.md`'s 12,000-frame volume/occupancy run flat.
 
-### 3. Learned preconditioner or learned V-cycle components (A2/A5)
+### 4. Learned preconditioner or learned V-cycle components (A2/A5)
 
 Keeps the convergence guarantee, which the free-surface measurement says
 is non-negotiable. DCDM's unsupervised loss ‖b − A·net(b)‖ means the
@@ -552,14 +636,14 @@ method), and **whether one network covers both the plain and the
 variable-density operator** — the damped-Jacobi result says constants do
 not transfer between them, and a network is a large constant.
 
-### 4. A splash / whitewater network for the FLIP examples (F)
+### 5. A splash / whitewater network for the FLIP examples (F)
 
 Pure quality upside, zero solver risk, small local network, one dispatch.
 Um et al.'s classifier-plus-velocity-modifier formulation is directly
 portable to `grid_flip_solver2.js`'s particles. The nearest thing to free
 in this whole document.
 
-### 5. Single-pass super-resolution for the smoke/fire/dye examples (C)
+### 6. Single-pass super-resolution for the smoke/fire/dye examples (C)
 
 A post-process on the density/dye field, no invariant to preserve. Use a
 feed-forward generator, **not** a diffusion model — the iteration count is
