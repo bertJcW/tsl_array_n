@@ -679,10 +679,49 @@ in this whole document.
 
 ### 6. Single-pass super-resolution for the smoke/fire/dye examples (C)
 
-A post-process on the density/dye field, no invariant to preserve. Use a
-feed-forward generator, **not** a diffusion model — the iteration count is
-the whole objection. tempoGAN's lesson applies regardless of architecture:
-without an explicitly temporal term, per-frame upsampling flickers.
+**Built. `src/ml/superres.js` and `examples/32-superres-smoke/`.
+Untrained, and usable anyway.**
+
+A post-process on the density field, no invariant to preserve. Feed-forward
+generator, **not** a diffusion model — the iteration count is the whole
+objection.
+
+Three things about the built version are worth carrying back into this
+document, because two of them corrected assumptions made above.
+
+**The baseline was worse than this document assumed.** Section C above
+treats bicubic as the thing to beat. What actually ships is *nearest
+neighbour*: every drawing example here paints a canvas at grid resolution
+and lets CSS scale it with `image-rendering: pixelated`. So the first win
+in this family needed no machine learning at all — one dispatch calling
+`grid_math.js`'s existing monotonic-bicubic sampler, which was already
+written and tested for advection.
+
+**Sub-pixel convolution, not upsample-then-convolve.** Every convolution
+runs at the simulation's resolution; the last emits `factor²` channels
+which one fused kernel rearranges into the high-resolution image (Shi et
+al., CVPR 2016). Measured on the built network at 96×128 → 384×512:
+**86.7 MMAC per frame against 1,387 MMAC** for the same parameters
+convolving at full resolution. On a package whose entire performance story
+is "do not do work where it is not needed", that is not an optimisation, it
+is the only sane arrangement — and this document did not mention it.
+
+**It degrades to bicubic exactly.** The network predicts a residual on top
+of the classical upsample, added inside the rearrange kernel, so zero
+weights give bicubic pixel for pixel (tested at every pixel). That makes it
+shippable untrained, makes training purely additive, and makes a
+half-trained network recognisable — "bicubic plus garbage" looks nothing
+like "garbage". It also gives the example a hardware self-check that needs
+no reference data: panel 4 must equal panel 3 or the pipeline is wrong.
+
+**The gap is temporal, and it is the one tempoGAN warned about.** No
+temporal term is built, so a trained network of this shape will flicker.
+The fix is better available here than in video super-resolution, because a
+simulation *has* the velocity field: advect the previous high-resolution
+frame and feed it as an extra input channel. `inChannels` is the seam;
+`advection_solver2.js` has the backtrace. Not built, because an untrained
+temporal channel costs dispatches and buys nothing until a training loop
+exists to use it.
 
 ### Explicitly not now
 

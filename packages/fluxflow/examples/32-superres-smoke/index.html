@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>fluxflow — super-resolved smoke</title>
+	<style>
+		body { margin: 0; padding: 1.2rem; font-family: system-ui, sans-serif; background: #111; color: #eee; box-sizing: border-box; }
+		h1 { font-size: 1rem; font-weight: 600; margin: 0 0 0.3rem; }
+		#row { display: flex; flex-wrap: wrap; gap: 1rem; margin: 0.8rem 0; }
+		figure { margin: 0; display: flex; flex-direction: column; gap: 0.35rem; }
+		figcaption { font-size: 0.8rem; opacity: 0.8; font-variant-numeric: tabular-nums; }
+		canvas { width: 288px; height: 384px; border: 2px solid #3f4148; background: #000; display: block; }
+		canvas.nearest { image-rendering: pixelated; }
+		#status, #perf { font-size: 0.85rem; line-height: 1.6; font-variant-numeric: tabular-nums; }
+		#perf { background: rgba(20,21,24,0.85); border: 1px solid #3f4148; border-radius: 0.35rem; padding: 0.5rem 0.7rem; display: inline-block; white-space: pre; }
+		.err { color: #f87171; }
+		.ok { color: #4ade80; }
+		.note { color: #a3a3a3; max-width: 70ch; font-size: 0.82rem; line-height: 1.55; }
+	</style>
+</head>
+<body>
+	<h1>simulate coarse, render fine — 96×128 smoke shown at 384×512</h1>
+	<div id="status">initializing…</div>
+	<div id="row">
+		<figure><canvas id="outNearest" class="nearest" width="96" height="128"></canvas><figcaption>1. nearest — what ships today (CSS <code>pixelated</code>)</figcaption></figure>
+		<figure><canvas id="outBilinear" width="384" height="512"></canvas><figcaption>2. bilinear — one GPU dispatch</figcaption></figure>
+		<figure><canvas id="outBicubic" width="384" height="512"></canvas><figcaption>3. monotonic bicubic — one GPU dispatch</figcaption></figure>
+		<figure><canvas id="outNetwork" width="384" height="512"></canvas><figcaption>4. network — <strong>untrained</strong></figcaption></figure>
+	</div>
+	<div id="perf">measuring…</div>
+	<p class="note">
+		Panel 4 is a residual super-resolution network whose weights are all zero, so it is
+		<em>pixel-identical to panel 3 by construction</em> — that identity is this page's correctness
+		check on the GPU pipeline, not a demo of super-resolution. It will differ from bicubic only
+		once weights exist. Nothing here is trained.
+	</p>
+	<script type="module" src="./main.js"></script>
+</body>
+</html>

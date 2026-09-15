@@ -953,7 +953,30 @@ No atomics anywhere in the module: every kernel writes each output element from 
 
 Against ~1416 dispatches, a data-dependent iteration count and several 1.1 ms host round trips for one MGPCG solver step on the same grid. Whether that translates into wall-clock time is what `examples/31-null-net-probe/` measures, and it needs real WebGPU hardware -- **it has not been run yet.** The counts above are exact (computed from the built network); everything about speed is still unmeasured.
 
-Verified with 33 vitest tests: the reference implementations numerically (delta kernels, partition of unity, clamp-versus-zero padding at the boundary, bias-then-activation ordering, channel summation), the transfer pair's adjointness on square and non-square grids, the PyTorch layout conversion element by element, and the U-Net's structure, cost accounting and weight-loading validation. The GPU kernels are covered structurally, per this package's established convention -- `examples/31-null-net-probe/` is what closes the loop on hardware, by running the GPU pass and the float64 reference on the same weights and reporting the difference.
+### Super-resolution for the display path — `createSuperResolver2`
+
+Simulate coarse, render fine. `examples/32-superres-smoke/` runs the 96×128 smoke scene from `examples/17-smoke-fire/` and shows it at 384×512 four ways: nearest (what ships today — a 96×128 canvas with CSS `image-rendering: pixelated`), bilinear, monotonic bicubic, and the network.
+
+This is the one direction in the research document with **no solver risk at all** — it reads a field the solver has finished with, preserves no invariant, and touches neither pressure nor divergence nor volume. Its budget is also independent of the pressure-solve question: it runs once per *rendered frame*, not per solver step.
+
+**Every convolution runs at low resolution.** The last one emits `factor²` channels and one fused kernel rearranges them into the high-resolution image (sub-pixel convolution — Shi et al., CVPR 2016). Upsampling first and convolving at full resolution would cost `factor²` times the arithmetic for the same parameters:
+
+| `createSuperResolver2({ shape: [96,128], factor: 4, channels: 16, layers: 3 })` | |
+|---|---|
+| dispatches per frame | **5** (4 convolutions at 96×128, 1 fused rearrange at 384×512) |
+| parameters | 7,120 = **27.8 KiB** float32 |
+| arithmetic | **86.7 MMAC** per frame |
+| the same network convolving at full resolution instead | 1,387 MMAC — **16×** |
+
+**It degrades to bicubic, exactly.** The network predicts a *residual* added to a classical upsample inside the same kernel that does the rearrange, so `output = bicubic(input) + network(input)`. With zero weights the residual is a hard zero and the output is bicubic **pixel for pixel** — verified in `test/ml_superres.test.js` at every pixel for both bicubic and bilinear bases. Three things follow: it is useful before it is trained, training can only ever add detail (which is what the super-resolution literature settled on), and a half-trained network reads as "bicubic plus garbage" rather than as "garbage".
+
+That identity is also how the example checks itself on hardware: panel 4 is currently **pixel-identical to panel 3 by construction**, and the page reports the max absolute difference every frame. Anything above float32 rounding means a bug in the trunk, the `factor²` head, the sub-pixel index arithmetic, the half-cell sample shift, or the residual add.
+
+**The known gap: there is no temporal term, so a trained network of this shape will flicker.** That is tempoGAN's central finding (Xie et al., SIGGRAPH 2018), not a guess. The fix suits a simulation better than it suits video: advect the previous high-resolution frame by the velocity field the solver already has and feed it in as an extra input channel. `inChannels` is the seam and `advection_solver2.js` has the backtrace; it is deliberately unbuilt, because an untrained temporal channel costs dispatches and buys nothing until there is a training loop to use it.
+
+The classical arms are not reimplemented — the kernel calls `grid_math.js`'s own `collocatedValueAtPosition2` and `collocatedCubicValueAtPosition2`, so the baseline is the same monotonic cubic the advection solver uses, monotonicity clamp included.
+
+Verified with 59 vitest tests across the module: the reference implementations numerically (delta kernels, partition of unity, clamp-versus-zero padding at the boundary, bias-then-activation ordering, channel summation), the transfer pair's adjointness on square and non-square grids, the PyTorch layout conversion element by element, and the U-Net's structure, cost accounting and weight-loading validation. The GPU kernels are covered structurally, per this package's established convention -- `examples/31-null-net-probe/` is what closes the loop on hardware, by running the GPU pass and the float64 reference on the same weights and reporting the difference.
 
 ## Current state: `profiling`
 

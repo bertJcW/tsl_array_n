@@ -497,6 +497,15 @@ export function forwardReference( plan, inputData, weightsByName, config ) {
 				addTo: step.additive ? require( step.to ) : null
 			} ) );
 
+		} else if ( step.op === 'shuffleResidual' ) {
+
+			buffers.set( step.to, shuffleResidualReference( require( step.from ), require( step.base ), {
+				lowWidth: step.lowWidth,
+				lowHeight: step.lowHeight,
+				factor: step.factor,
+				base: step.baseKind
+			} ) );
+
 		} else {
 
 			throw new Error( `ml: unknown plan op '${ step.op }'.` );
@@ -506,5 +515,165 @@ export function forwardReference( plan, inputData, weightsByName, config ) {
 	}
 
 	return buffers;
+
+}
+
+// *** Classical resampling, mirroring src/grid/grid_math.js exactly ***
+//
+// These are the *baseline* the super-resolution network has to beat, and
+// also the base it adds its residual onto, so they have to agree with the
+// GPU path element for element. They are transcriptions of
+// `bilinearCoordsAndWeights2` and `collocatedCubicValueAtPosition2` /
+// `monotonicCubic1d` / `cubicIndices1d`, clamping included -- the GPU side
+// calls those functions directly rather than reimplementing them, so this
+// is the only copy, and test/ml.test.js pins the two together through the
+// shared plan.
+
+function clampIndex( i, n ) {
+
+	return i < 0 ? 0 : ( i > n - 1 ? n - 1 : i );
+
+}
+
+/**
+ * Bilinear sample of one channel of a feature map at continuous grid
+ * coordinates. Indices clamp; the fractional weights come from the
+ * unclamped position, matching `bilinearCoordsAndWeights2`.
+ */
+export function sampleBilinearReference( data, width, height, gx, gy, channel = 0 ) {
+
+	const i0 = Math.floor( gx );
+	const j0 = Math.floor( gy );
+	const fx = gx - i0;
+	const fy = gy - j0;
+
+	const i0c = clampIndex( i0, width );
+	const i1c = clampIndex( i0 + 1, width );
+	const j0c = clampIndex( j0, height );
+	const j1c = clampIndex( j0 + 1, height );
+
+	const at = ( i, j ) => data[ featureIndex( width, height, i, j, channel ) ];
+
+	return at( i0c, j0c ) * ( 1 - fx ) * ( 1 - fy )
+		+ at( i1c, j0c ) * fx * ( 1 - fy )
+		+ at( i0c, j1c ) * ( 1 - fx ) * fy
+		+ at( i1c, j1c ) * fx * fy;
+
+}
+
+/**
+ * The monotonicity-clamped cubic of `monotonicCubic1d`. The clamp is what
+ * stops a cubic from overshooting into new extrema, which on a density
+ * field means invented bright spots and negative densities -- the reason
+ * this package uses a monotonic cubic rather than a plain Catmull-Rom.
+ */
+export function monotonicCubic1dReference( f0, f1, f2, f3, f ) {
+
+	const D1 = f2 - f1;
+	const rawD1 = ( f2 - f0 ) * 0.5;
+	const rawD2 = ( f3 - f1 ) * 0.5;
+
+	const isFlat = Math.abs( D1 ) < 1e-12;
+	const d1 = ( isFlat || rawD1 * D1 < 0 ) ? 0 : rawD1;
+	const d2 = ( isFlat || rawD2 * D1 < 0 ) ? 0 : rawD2;
+
+	const a3 = d1 + d2 - 2 * D1;
+	const a2 = 3 * D1 - 2 * d1 - d2;
+
+	return a3 * f * f * f + a2 * f * f + d1 * f + f1;
+
+}
+
+export function sampleBicubicReference( data, width, height, gx, gy, channel = 0 ) {
+
+	const indices = ( coord, n ) => {
+
+		const i0 = Math.floor( coord );
+
+		return {
+			taps: [
+				clampIndex( i0 - 1, n ),
+				clampIndex( i0, n ),
+				clampIndex( i0 + 1, n ),
+				clampIndex( i0 + 2, n )
+			],
+			f: coord - i0
+		};
+
+	};
+
+	const xi = indices( gx, width );
+	const yi = indices( gy, height );
+
+	const at = ( i, j ) => data[ featureIndex( width, height, i, j, channel ) ];
+
+	const rows = yi.taps.map( ( j ) => monotonicCubic1dReference(
+		at( xi.taps[ 0 ], j ), at( xi.taps[ 1 ], j ), at( xi.taps[ 2 ], j ), at( xi.taps[ 3 ], j ), xi.f
+	) );
+
+	return monotonicCubic1dReference( rows[ 0 ], rows[ 1 ], rows[ 2 ], rows[ 3 ], yi.f );
+
+}
+
+/**
+ * The high-resolution pixel's position in *low-resolution grid
+ * coordinates*, for a cell-centred collocated field.
+ *
+ * Low-res cell centres sit at `i + 0.5` in low-res units; high-res centres
+ * at `(X + 0.5) / factor`. So the sample position is
+ * `(X + 0.5) / factor - 0.5`. Getting this wrong by the half-cell shifts the
+ * whole image by half a low-res cell, which at 4x is two high-res pixels --
+ * visible, and easy to mistake for the network having learned an offset.
+ */
+export function lowResCoordinate( highIndex, factor ) {
+
+	return ( highIndex + 0.5 ) / factor - 0.5;
+
+}
+
+/**
+ * Sub-pixel rearrange plus the classical base, in float64.
+ *
+ * `shuffleSource` is `[lowWidth, lowHeight, factor^2]`; output is
+ * `[lowWidth * factor, lowHeight * factor, 1]`.
+ */
+export function shuffleResidualReference( shuffleSource, baseData, options ) {
+
+	const { lowWidth, lowHeight, factor, base = 'bicubic', baseChannels = 1 } = options;
+
+	const highWidth = lowWidth * factor;
+	const highHeight = lowHeight * factor;
+	const output = new Float64Array( highWidth * highHeight );
+
+	for ( let Y = 0; Y < highHeight; Y ++ ) {
+
+		for ( let X = 0; X < highWidth; X ++ ) {
+
+			const lowX = Math.floor( X / factor );
+			const lowY = Math.floor( Y / factor );
+			const sub = ( X - lowX * factor ) + factor * ( Y - lowY * factor );
+
+			const residual = shuffleSource[ featureIndex( lowWidth, lowHeight, lowX, lowY, sub ) ];
+
+			let baseValue = 0;
+
+			if ( base !== 'none' ) {
+
+				const gx = lowResCoordinate( X, factor );
+				const gy = lowResCoordinate( Y, factor );
+				const sample = base === 'bicubic' ? sampleBicubicReference : sampleBilinearReference;
+				baseValue = sample( baseData, lowWidth, lowHeight, gx, gy, 0 );
+
+			}
+
+			output[ featureIndex( highWidth, highHeight, X, Y, 0 ) ] = baseValue + residual;
+
+		}
+
+	}
+
+	void baseChannels;
+
+	return output;
 
 }

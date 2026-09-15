@@ -10,6 +10,12 @@ export {
 export { createUNet2 } from './unet.js';
 
 export {
+	buildShuffleResidualKernel,
+	createClassicalUpsampler2,
+	createSuperResolver2
+} from './superres.js';
+
+export {
 	featureIndex,
 	weightIndex,
 	applyActivation,
@@ -19,5 +25,10 @@ export {
 	createSeededRandom,
 	heNormalWeights,
 	fromPyTorchConv2dWeights,
-	forwardReference
+	forwardReference,
+	sampleBilinearReference,
+	sampleBicubicReference,
+	monotonicCubic1dReference,
+	shuffleResidualReference,
+	lowResCoordinate
 } from './reference.js';
