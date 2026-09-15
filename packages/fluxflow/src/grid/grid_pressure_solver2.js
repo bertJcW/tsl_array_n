@@ -693,6 +693,22 @@ export function createGridPressureSolver2( {
 
 		} );
 
+		// *** One submission per group, not one per kernel ***
+		//
+		// Everything outside the solve itself is a fixed sequence of kernels
+		// with no host decision inside it, and a bare dispatch costs a
+		// command encoder, a compute pass and a queue submit of its own --
+		// ~33 us of three.js bookkeeping before the dispatch costs anything,
+		// measured (see grid_blocked_boundary_condition_solver2.js's
+		// constrainVelocity). The tail has two forms because the choice
+		// between restoring and snapshotting is made on the host, from the
+		// circuit breaker's readback, so it cannot be inside one plan.
+		const buildSystemBatch = tsl_array_n.createBatch(
+			updateDirichletFields ? [ updateDirichletFields, dispatchBuildSystem ] : [ dispatchBuildSystem ]
+		);
+		const finishRejected = tsl_array_n.createBatch( [ restorePressure, dispatchCorrectU, dispatchCorrectV ] );
+		const finishAccepted = tsl_array_n.createBatch( [ snapshotPressure, dispatchCorrectU, dispatchCorrectV ] );
+
 		return async function dispatch() {
 
 			// *** Last-resort circuit breaker, confirmed necessary on real
@@ -712,8 +728,10 @@ export function createGridPressureSolver2( {
 			// one frame's pressure update is silently skipped (velocity gets
 			// corrected against a one-frame-stale pressure gradient instead)
 			// -- a minor, bounded inaccuracy, never a divergent one.
-			if ( updateDirichletFields ) updateDirichletFields();
-			dispatchBuildSystem();
+			// One submission for the pair -- see
+			// grid_blocked_boundary_condition_solver2.js's constrainVelocity
+			// for what a bare dispatch costs and why merging is safe.
+			buildSystemBatch();
 			diagnostics.converged = await timePhase( 'pressure-cg-solve', () => cg.solve(
 				settings.tolerance, settings.maxIterations,
 				settings.residualCheckInterval, settings.gpuResidentScalars, settings.batchIterations,
@@ -759,11 +777,8 @@ export function createGridPressureSolver2( {
 			// just been checked and passed -- become the last known-good
 			// field. See pressureSnapshot's own comment for why the
 			// snapshot happens here rather than before the solve.
-			if ( diagnostics.rejected ) restorePressure();
-			else snapshotPressure();
-
-			dispatchCorrectU();
-			dispatchCorrectV();
+			if ( diagnostics.rejected ) finishRejected();
+			else finishAccepted();
 
 		};
 

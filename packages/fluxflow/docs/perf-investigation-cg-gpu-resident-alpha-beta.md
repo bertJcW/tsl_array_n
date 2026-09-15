@@ -2405,3 +2405,34 @@ shape of a finding. The two big items are unchanged and both are now
 quantified: ~7.5 ms/step of three.js bookkeeping above what the WebGPU calls
 themselves cost, and ~11 ms/step of serial `mapAsync` waits that would cost
 ~2.3 ms if they could be issued together.
+
+## Second pass: the remaining singles (2026-09-16)
+
+The 26 single-dispatch calls left on example 15 were scattered rather than
+concentrated, but every one of them sat in a fixed sequence with no host step
+inside it:
+
+| site | was | now |
+| --- | --- | --- |
+| `linalg.js` GPU-resident CG setup | 11 submissions | 2 (V-cycle splits it) |
+| `advection_solver2.js` MacCormack face advection | 6 | 1 |
+| `advection_solver2.js` scalar advection / order-1 forms | 3 / 2 | 1 |
+| `grid_pressure_solver2.js` dirichlet refresh + build system | 2 | 1 |
+| `grid_pressure_solver2.js` snapshot-or-restore + both corrections | 3 | 1 |
+| `external_force_solver2.js` force pair | 2 | 1 |
+| `grid_solver2.js` velocity clone | 2 | 1 |
+
+Calls per step on example 15: **159 -> 81 -> 67**, single-dispatch calls
+**107 -> 26 -> 5**, dispatches unchanged at 999 throughout.
+
+Paired, phase-alternated, the unbatched arm re-splitting exactly the groups
+this pass added: **1.043x** (19.15 -> 18.36 ms). Cumulative against the
+pre-batching baseline on this scene: 24.51 -> 18.36 ms, **1.33x**.
+
+Output identical again, and to the same hashes as before either pass: 150
+steps from a fresh load, u/v/pressure hashing 857113263 / -742805524 /
+-914744686 in both arms and in both rounds. Example 28 over 300 steps:
+300/300 converged, zero rejections, every cell finite.
+
+The five singles that remain are one-off kernels with host work on both
+sides of them; there is no sequence left to merge.

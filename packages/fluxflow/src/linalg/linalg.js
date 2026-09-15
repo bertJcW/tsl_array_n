@@ -1110,6 +1110,29 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	const iterationBatchCore = tsl_array_n.createBatch( iterationCore );
 	const iterationBatchRecompute = tsl_array_n.createBatch( iterationRecompute );
 
+	// The GPU-resident setup is the same case as the iteration body above:
+	// eleven dispatchers with no host read between them (that is the whole
+	// point of seedScalarsKernel -- see solveWithGpuResidentScalars), so they
+	// were eleven command buffers doing the work of two. The preconditioner
+	// is again the entry with no `computeNode`, so the plan comes out as
+	// pre-V-cycle group, V-cycle, post-V-cycle group.
+	//
+	// Worth what it costs: profiling three.js's own Renderer.compute on
+	// examples/15-flow-past-cylinder/ prices a compute() call at ~33 us of
+	// host-side bookkeeping before the dispatch inside it costs anything, so
+	// nine submissions removed is ~0.3 ms off every solve.
+	const setupSequence = [
+		applyToX, init,
+		dotRR.dispatch, reduceRR,
+		dotBB.dispatch, reduceBB,
+		applyPreconditionerToR,
+		dotRZ.dispatch, reduceRZ,
+		updateP,
+		seedScalarsKernel
+	];
+	const setupBatch = tsl_array_n.createBatch( setupSequence );
+	const runGpuResidentSetup = () => profileBatch( 'pcg-setup', setupSequence.length - 1, setupBatch );
+
 	/**
 	 * The same algorithm as solve() below, with alpha and beta computed on
 	 * the GPU and one readback per iteration instead of three.
@@ -1124,9 +1147,6 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	 */
 	async function solveWithGpuResidentScalars( tol, maxiter, residualCheckInterval, batchIterations, gpuResidentSetup, relativeTolerance, recomputeInterval = RESIDUAL_RECOMPUTE_INTERVAL, verifyConvergence = true ) {
 
-		applyToX(); // Ax = A @ x
-		init(); // r = b - Ax, p = 0, Ap = 0
-
 		let newRTr;
 		let oldRTr;
 
@@ -1135,21 +1155,18 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 			// No host read anywhere in the setup. The reductions put r.r
 			// and r.z in their slots and seedScalarsKernel derives the
 			// rest there -- see that kernel for what the two reads were
-			// actually costing.
-			dotRR.dispatch();
-			reduceRR();
-
-			dotBB.dispatch();
-			reduceBB();
-
-			applyPreconditionerToR(); // z0 = M^-1 @ r0
-
-			dotRZ.dispatch();
-			reduceRZ();
-
-			updateP(); // p0 = z0 (p was 0, so beta cannot matter here)
-
-			seedScalarsKernel();
+			// actually costing. Because nothing here waits on the host, the
+			// whole sequence goes out as one plan (setupSequence above):
+			//
+			//   applyToX          Ax = A @ x
+			//   init              r = b - Ax, p = 0, Ap = 0
+			//   dotRR, reduceRR   r.r
+			//   dotBB, reduceBB   b.b, for the relative stop threshold
+			//   applyPreconditionerToR   z0 = M^-1 @ r0
+			//   dotRZ, reduceRZ   r.z
+			//   updateP           p0 = z0 (p was 0, so beta cannot matter)
+			//   seedScalarsKernel derives the remaining slots on the GPU
+			runGpuResidentSetup();
 
 			// Nothing is known about the residual yet. Infinity makes the
 			// first check's "did the residual grow?" test pass rather than
@@ -1158,6 +1175,9 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 			oldRTr = Infinity;
 
 		} else {
+
+			applyToX(); // Ax = A @ x
+			init(); // r = b - Ax, p = 0, Ap = 0
 
 			// Two host reads to seed the loop. Unlike the ones inside it,
 			// these happen once per solve, not once per iteration.

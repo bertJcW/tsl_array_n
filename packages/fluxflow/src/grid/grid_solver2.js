@@ -66,6 +66,7 @@
 // boundary handling, the same as overriding a virtual method in jet's
 // own C++ replaces its entire body).
 
+import * as tsl_array_n from 'tsl_array_n';
 import { createFaceCenteredGrid2 } from './grid_data2.js';
 import { createCopyKernel2 } from './array_utils.js';
 import { createExternalForceSolver2 } from './external_force_solver2.js';
@@ -175,6 +176,11 @@ export function createGridSolver2( {
 	const velocityPrev = createFaceCenteredGrid2( resolutionX, resolutionY, gridSpacingX, gridSpacingY, originX, originY );
 	const copyVelocityU = createCopyKernel2( velocityGrid.dataU, velocityPrev.dataU );
 	const copyVelocityV = createCopyKernel2( velocityGrid.dataV, velocityPrev.dataV );
+	// One submission for the clone rather than one per component -- a bare
+	// dispatch costs a command encoder, a compute pass and a queue submit of
+	// its own (~33 us of three.js bookkeeping, measured; see
+	// grid_blocked_boundary_condition_solver2.js's constrainVelocity).
+	const copyVelocity = tsl_array_n.createBatch( [ copyVelocityU, copyVelocityV ] );
 
 	const outflowSolver = outflows ? createGridOutflowSolver2( { velocityGrid, velocityPrev, outflows, dt, applyVelocityBC: outflowVelocityBC } ) : null;
 
@@ -214,8 +220,7 @@ export function createGridSolver2( {
 
 	async function defaultComputeAdvection() {
 
-		copyVelocityU();
-		copyVelocityV();
+		copyVelocity();
 		await advectDispatch();
 		// Part 2 of what an outflow does (grid_outflow_solver2.js) -- run
 		// right after advection, matching mantaflow's own placement

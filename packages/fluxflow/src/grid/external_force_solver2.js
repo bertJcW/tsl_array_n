@@ -67,10 +67,16 @@ export function createExternalForceSolver2( { velocityGrid, force, dt } ) {
 
 	} );
 
+	// One submission, not two: the pair is a fixed sequence with nothing
+	// host-side between them, and a bare dispatch costs a command encoder, a
+	// compute pass and a queue submit of its own (~33 us of three.js
+	// bookkeeping, measured -- see
+	// grid_blocked_boundary_condition_solver2.js's constrainVelocity).
+	const applyBoth = tsl_array_n.createBatch( [ dispatchU, dispatchV ] );
+
 	function applyExternalForces() {
 
-		dispatchU();
-		dispatchV();
+		applyBoth();
 
 	}
 

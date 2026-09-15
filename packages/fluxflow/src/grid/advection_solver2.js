@@ -300,12 +300,14 @@ export function createSemiLagrangianAdvectionSolver2( { velocityGrid, collider, 
 
 		} );
 
-		if ( order === 1 ) return function dispatch() {
-
-			dispatchU1();
-			dispatchV1();
-
-		};
+		// One submission per advection call, not one per kernel: a fixed
+		// sequence with no host step inside it, and a bare dispatch costs a
+		// command encoder, a compute pass and a queue submit of its own
+		// (~33 us of three.js bookkeeping, measured -- see
+		// grid_blocked_boundary_condition_solver2.js's constrainVelocity).
+		// The MacCormack form below depends on each stage seeing the
+		// previous one's writes, which WebGPU guarantees inside a pass.
+		if ( order === 1 ) return tsl_array_n.createBatch( [ dispatchU1, dispatchV1 ] );
 
 		// order 2 (MacCormack) -- see createSemiLagrangianAdvectionSolver2's
 		// own header comment. fwdU/fwdV together form one scratch
@@ -422,16 +424,11 @@ export function createSemiLagrangianAdvectionSolver2( { velocityGrid, collider, 
 
 		} );
 
-		return function dispatch() {
-
-			dispatchForwardU();
-			dispatchForwardV();
-			dispatchBackwardU();
-			dispatchBackwardV();
-			dispatchCorrectAndClampU();
-			dispatchCorrectAndClampV();
-
-		};
+		return tsl_array_n.createBatch( [
+			dispatchForwardU, dispatchForwardV,
+			dispatchBackwardU, dispatchBackwardV,
+			dispatchCorrectAndClampU, dispatchCorrectAndClampV
+		] );
 
 	}
 
@@ -520,13 +517,7 @@ export function createSemiLagrangianAdvectionSolver2( { velocityGrid, collider, 
 
 		} );
 
-		return function dispatch() {
-
-			dispatchForward();
-			dispatchBackward();
-			dispatchCorrectAndClamp();
-
-		};
+		return tsl_array_n.createBatch( [ dispatchForward, dispatchBackward, dispatchCorrectAndClamp ] );
 
 	}
 
