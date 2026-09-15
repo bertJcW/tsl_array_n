@@ -44,6 +44,12 @@ lives in `docs/`.
   > submissions -- the command buffers, not the kernels -- that carry about a
   > third of the frame. The profiler's own figure of 502 was an undercount,
   > for the reason given in the profiling section above.
+- **[`docs/ml-handoff.md`](docs/ml-handoff.md)** -- read this before touching
+  `src/ml/`. The ML work was built in a container with no GPU, so every claim
+  about *speed* is still an estimate: this file says what exists, exactly what
+  to run on real WebGPU (three runs, in priority order, with pass/fail
+  criteria), where each number goes when it comes back, and the six-phase
+  training plan for the super-resolution network.
 - [`docs/machine-learning-fluid-research.md`](docs/machine-learning-fluid-research.md)
   -- where machine learning can buy efficiency or quality in a fluid
   solver, surveyed by *what the network replaces*, then filtered through
