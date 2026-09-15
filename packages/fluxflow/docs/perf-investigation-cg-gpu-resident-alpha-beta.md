@@ -2210,3 +2210,66 @@ reads were ~6.4 ms and are gone. The circuit breaker's read is 0.73 ms
 and stays -- it is the guard this project shipped broken twice, and
 making it periodic is a change in safety posture rather than a free win.
 The remaining in-loop reads are now the whole story again.
+
+# "The GPU is idle 99% of the time" -- re-measured (2026-09-15)
+
+That figure comes from a 2026-09-13 run: 0.21-0.40 ms of GPU compute in a
+31.8-35.9 ms frame. Since then the in-loop readbacks went from every
+iteration to every fourth, the two setup round trips were removed, and
+frames came down to 16-28 ms -- all of which changes the denominator, so
+the share had to be measured again rather than quoted.
+
+**It is current.** Three scenes, paused driver, warm, timestamps resolved
+every step:
+
+| scene | wall / step | GPU compute / step | busy |
+| --- | --- | --- | --- |
+| 15 flow past cylinder | 27.45 ms | 0.218 ms | **0.79%** |
+| 20 FLIP dam break | 16.28 ms | 0.131 ms | **0.81%** |
+| 28 drop into pool | 27.83 ms | 0.173 ms | **0.62%** |
+
+The optimisations landed since did not move the ratio, and that is the
+expected result: every one of them removed *host* work (fewer round
+trips, fewer submissions, less encoding), so both numerator and
+denominator shrank together. The GPU was never the constraint.
+
+## Where the 27 ms goes
+
+From the same page's `profile( 40 )` (example 15, 892 dispatches and 44.6
+submissions per step):
+
+| | ms / step | share |
+| --- | --- | --- |
+| `pressure-cg-solve` total | 14.23 | 70% |
+| ...of which `solve-iteration-read` (5 round trips) | 10.63 | 52% |
+| ...of which the circuit breaker's read | 0.80 | 4% |
+| CPU-side dispatch encoding | 4.98 | 25% |
+| GPU compute | 0.22 | **1%** |
+
+A host round trip costs ~2.1 ms and there are six of them. Encoding 892
+dispatches costs 5 ms at ~5.6 us each. The work itself costs 0.22 ms. The
+library is not GPU-bound, it is **latency-bound and encode-bound**, and
+the ceiling if both went to zero is roughly a 90x step-time reduction --
+which is the size of the prize the two obvious directions are chasing:
+fewer, larger dispatches (persistent-kernel or indirect-dispatch V-cycles)
+and a stop test that never leaves the GPU (the residual-gap estimator
+parked in project-history.md).
+
+## A profiler bug this exposed
+
+`readComputeTimestampMs` tested `renderer.trackTimestamp`, and three.js
+keeps that flag on the *backend* -- `Backend`'s constructor sets
+`this.trackTimestamp = ( parameters.trackTimestamp === true )` and nothing
+copies it up to the renderer. So the test read `undefined`, and the
+function returned `null` for every measurement taken before today, on a
+machine whose adapter does support `timestamp-query`. That is why the
+2026-09-13 number could only be quoted, not reproduced. Fixed.
+
+The second half of the fix is that the query pool must be drained every
+step: it holds 2048 queries = 1024 timestamped passes, a step here has
+~159, and `updateTimeStampUID` keys allocations off `info.compute.frame`
+-- which does not advance while the rAF driver is paused, so a single
+resolve after 40 steps overruns the pool. Example 15's `profile()` now
+times the frames in one pass (no resolves, so mapAsync latency is not
+counted as frame time) and measures GPU time in a second pass, resolving
+per step. Examples 20 and 28 accept `?profile=1` for the same reason.

@@ -77,7 +77,18 @@ const DRAW_INTERVAL = 2;
 
 try {
 
-	const renderer = await tsl_array_n.init( { canvas: document.createElement( 'canvas' ), allowFallback: true } );
+	// `?profile=1` turns on WebGPU timestamp queries, the only way to see
+	// how much of a step the GPU is actually busy for. Off by default:
+	// three.js then writes a timestamp around every compute pass, and a
+	// step here has ~115 of them. tsl_array_n.init forwards anything it
+	// does not recognise straight to the WebGPURenderer constructor.
+	const profileEnabled = new URLSearchParams( location.search ).get( 'profile' ) === '1';
+
+	const renderer = await tsl_array_n.init( {
+		canvas: document.createElement( 'canvas' ),
+		allowFallback: true,
+		trackTimestamp: profileEnabled
+	} );
 	status( `backend: ${ renderer.backend?.constructor?.name ?? 'unknown' }` );
 
 	const velocityGrid = grid.createFaceCenteredGrid2( NX, NY, 1, 1, 0, 0 );

@@ -301,7 +301,15 @@ export function profilingReport( frames = 1 ) {
  */
 export async function readComputeTimestampMs( renderer ) {
 
-	if ( ! renderer || renderer.trackTimestamp !== true ) return null;
+	// The flag lives on the BACKEND, not on the renderer: three.js's
+	// Renderer forwards its parameters to Backend's constructor, which sets
+	// `this.trackTimestamp = ( parameters.trackTimestamp === true )`, and
+	// nothing copies it back up. Reading `renderer.trackTimestamp` therefore
+	// finds `undefined` on a renderer that *is* tracking, and this function
+	// returned null for every measurement taken before 2026-09-15 -- which
+	// is the whole reason the "GPU is idle 99% of the time" number could
+	// only be quoted from an old run instead of re-measured.
+	if ( ! renderer || renderer.backend?.trackTimestamp !== true ) return null;
 
 	try {
 

@@ -542,7 +542,32 @@ try {
 			profiling.stopProfiling();
 
 			const report = profiling.profilingReport( frames );
-			const gpuMs = await profiling.readComputeTimestampMs( renderer );
+
+			// GPU time is measured in a SECOND pass rather than alongside the
+			// wall-clock one, for two reasons. The query pool holds 1024
+			// timestamped passes against this scene's ~159 per step, so it has
+			// to be drained every step -- and draining it is a host round trip
+			// (mapAsync), which would be measured as part of the frame it is
+			// trying to measure. So: time the frames without resolving, then
+			// resolve per step to get the GPU number.
+			let gpuMs = null;
+
+			if ( renderer.backend?.trackTimestamp === true ) {
+
+				await profiling.readComputeTimestampMs( renderer );
+
+				let total = 0;
+
+				for ( let k = 0; k < frames; k ++ ) {
+
+					await solver.onAdvanceTimeStep();
+					total += await profiling.readComputeTimestampMs( renderer ) ?? 0;
+
+				}
+
+				gpuMs = +( total / frames ).toFixed( 4 );
+
+			}
 
 			return {
 				frames,
@@ -561,6 +586,9 @@ try {
 				encodeMsPerFrame: +report.cpuMsPerFrame.toFixed( 2 ),
 				encodeShareOfFrame: +( report.cpuMs / wallMs ).toFixed( 3 ),
 				gpuComputeMs: gpuMs,
+				// The headline this whole profiler exists to produce: what
+				// fraction of a step the GPU is actually computing for.
+				gpuBusyShare: gpuMs === null ? null : +( gpuMs / ( wallMs / frames ) ).toFixed( 4 ),
 				byLabel: report.labels.map( ( l ) => ( {
 					label: l.label,
 					perFrame: +l.callsPerFrame.toFixed( 1 ),
