@@ -7,6 +7,10 @@ uses during development, and (2) the provenance of `src/grid/` and
 `src/noise/`, both of which are ports of code from other projects, not
 written from scratch.
 
+`src/ml/` is listed too, and the short version is that it adds **no
+dependency at all** -- no PyTorch, no ONNX Runtime, no TensorFlow.js, no
+pretrained weights -- see "Provenance of `src/ml/`" below.
+
 ## Runtime dependency
 
 ### three.js
@@ -896,6 +900,94 @@ the user-reported symptom and root cause).
 
 - **Source:** https://github.com/doyubkim/fluid-engine-dev/blob/master/include/jet/grid_fluid_solver2.h, .../grid_fluid_solver2.cpp
 - **License:** MIT — full text already reproduced above, under "fluid-engine-dev (MIT) — via fluxflow (Python)"; not repeated a second time.
+
+## Provenance of `src/ml/`
+
+### No machine-learning library is used, at all
+
+Worth stating first, because it is the question this folder invites.
+`src/ml/` adds **no dependency of any kind** — not PyTorch, not ONNX
+Runtime Web, not TensorFlow.js, not WebNN, not a WASM runtime, no
+pretrained weights, and no training data. Every import in the folder is
+either `tsl_array_n`, `three/tsl`, or another file in this package.
+The convolution, restriction, upsampling and U-Net composition are written
+directly as TSL compute kernels; the reason is recorded in
+`layers.js`'s own header comment (a second inference runtime is a second
+device and buffer world, and this package's cost is submissions and
+dispatches) and in the README's `ml` section.
+
+So this folder creates no new licence obligation beyond the ones this
+package already carries for three.js and `tsl_array_n`.
+
+### jet/fluid-engine-dev (MIT) — the transfer operators, via `src/linalg/multigrid.js`
+
+The one piece of `src/ml/` that is **not** original: the restriction and
+upsampling filters in `layers.js` (`restrictionTapsForAxis`,
+`upsampleTapsForAxis`) and their float64 counterparts in `reference.js`
+are deliberately identical to `src/linalg/multigrid.js`'s own — the
+separable 1/8-3/8-3/8-1/8 full-weighting restriction and the bilinear
+1/4-3/4 correction, with the same boundary clamping. They are reproduced
+rather than imported because they operate on 3-D `[width, height,
+channels]` feature maps and must **not** transfer across the channel axis,
+which `multigrid.js`'s dimension-generic version would do.
+
+Same chain and same licence as the `multigrid.js` entry above, which
+carries the full description of what is jet's and what is this port's
+generalisation:
+
+```
+fluid-engine-dev (C++, MIT, Doyub Kim)
+  -> fluxflow (this package, JS/TSL, Apache-2.0, bert wang)
+```
+
+- **Source:** https://github.com/doyubkim/fluid-engine-dev/blob/master/src/jet/fdm_mg_linear_system2.cpp (restriction/correction formulas)
+- **License:** MIT — full text already reproduced above, under "fluid-engine-dev (MIT) — via fluxflow (Python)"; not repeated a second time.
+
+Why a machine-learning module uses a multigrid transfer pair rather than
+average pooling and a transposed convolution is a design argument, not a
+provenance one, and it is made in `reference.js`'s `restrict2Reference`
+header: the pair is adjoint (`R = P^T / 4` in 2D), average pooling paired
+with bilinear upsampling is not, and adjointness is what keeps the shape
+usable as a conjugate-gradient preconditioner. `test/ml.test.js` verifies
+it rather than asserting it.
+
+### Academic references (no code, no licence obligation)
+
+Standard, widely reimplemented methods. Nothing was copied from any
+implementation of them; they are listed because the folder would be
+unreadable without knowing which published ideas it is instantiating.
+
+- **U-Net** — Ronneberger, Fischer & Brox, *U-Net: Convolutional Networks
+  for Biomedical Image Segmentation*, MICCAI 2015. The encoder/decoder
+  with skip connections. This package's variant departs from it in three
+  ways recorded in `unet.js`'s header (constant channel width, additive
+  rather than concatenated skips, and fixed rather than learned transfer
+  operators).
+- **He/Kaiming initialisation** — He, Zhang, Ren & Sun, *Delving Deep into
+  Rectifiers*, ICCV 2015. The `sqrt(2 / fanIn)` scaling in
+  `heNormalWeights`.
+- **PyTorch's `conv2d` weight layout** (`[outChannels, inChannels,
+  kernelHeight, kernelWidth]`) — a data layout, not code, converted by
+  `fromPyTorchConv2dWeights` so offline-trained weights can be loaded.
+  PyTorch itself is not a dependency of this package and is not used
+  anywhere in it.
+- The literature this module exists to serve is surveyed, with sources, in
+  `docs/machine-learning-fluid-research.md`. No code from any of those
+  papers or their repositories is present here.
+
+### What is original
+
+The convolution kernel and its build-time tap unrolling / runtime channel
+loop, the clamp-versus-zero padding treatment, the field/feature-map
+joins, the U-Net composition and its three departures from the textbook
+shape, the executable `plan` the builder emits so the float64 reference
+runs the same architecture the GPU does, the seeded weight initialisation
+and loading, and every test.
+
+**Nothing in this folder is trained, and nothing in it trains.** There are
+no weights in this repository, pretrained or otherwise;
+`createUNet2().randomize()` generates them from an integer seed at
+construction time.
 
 ## Provenance of `src/time/`
 
