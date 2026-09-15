@@ -107,7 +107,7 @@ try {
 		force,
 		dirichlet,
 		dt,
-		pressure: { multigrid: { numberOfLevels: 4 }, tolerance: 1e-4, maxIterations: 40 }
+		pressure: { multigrid: { numberOfLevels: 4 }, maxIterations: 40 }
 	} );
 
 	const computeCellVelocity = tsl_array_n.kernel( [ N, N ], ( i, j ) => {

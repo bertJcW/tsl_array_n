@@ -228,3 +228,123 @@ caller's number means — the same hazard that had example 15 pinning
 `residualCheckInterval: 1` and opting itself out of a changed default. A
 default change here should come with the `tolerance` default moving to
 1e-7 in the same commit, and a check across every scene, not just this one.
+
+---
+
+# The real cause: the solver was reporting convergence it had not achieved
+
+The section above blamed float32 precision. That was the wrong mechanism
+too. The cause is a correctness bug, it affects **every scene**, and it
+invalidates the convergence column of the 12,000-step table at the top of
+this document.
+
+## What was happening
+
+CG does not recompute `b - Ax` every iteration. It tracks the residual
+incrementally with `r -= alpha * Ap`, and that estimate **drifts
+optimistically** -- the update is a near-cancellation of two similar
+quantities, so the error grows relative to a shrinking residual. The true
+residual is recomputed only every 50 iterations.
+
+A typical solve on these scenes finishes in **14 to 33 iterations**. It
+therefore never reached the recompute, and stopped on a number that had
+drifted below the threshold without the solution following it there.
+
+Measured on `examples/28-drop-into-pool/`, same frame, same restored state
+(particles, velocities and pressure), only the recompute interval varying,
+with the true residual computed independently on the host in double
+precision:
+
+| recompute every | iterations | reported converged | solver's residual | true residual | ratio |
+| --- | --- | --- | --- | --- | --- |
+| **50 (the default)** | 32 | **yes** | 7.40e-6 | **3.571e-4** | **48x** |
+| 10 | 48 | yes | 7.43e-6 | 8.773e-5 | 11.8x |
+| 5 | 200 (cap) | no | 2.279e-4 | 2.325e-4 | 1.02 |
+| 2 | 200 (cap) | no | 2.130e-4 | 2.131e-4 | 1.00 |
+| 1 | 200 (cap) | no | 2.038e-4 | 2.038e-4 | 1.00 |
+
+Read the bottom three rows first: when the residual is recomputed often
+enough, the solver's number matches the independent host computation to
+three significant figures, which validates the host reconstruction of the
+operator and with it everything above. Those rows also never reach 1e-5,
+because ~2e-4 is what this operator can actually achieve.
+
+Then read the top row. At the shipped default the solver stopped at
+iteration 32 claiming 7.40e-6 while the truth was 3.571e-4.
+
+**So example 28 never converged. Nor did any other scene.** With
+verification switched on and the old absolute 1e-5 target,
+`examples/26-dye-free-surface/` converges **0 times in 600**, against the
+800/800 it used to report.
+
+## What was ruled out on the way
+
+Each by measurement, and each worth not re-testing:
+
+- **Iteration budget.** A 2000-iteration cap fails as often as 100.
+- **Isolated fluid pockets.** Connected-component analysis on a failing
+  step: 4731 cells, one component, zero orphans.
+- **Variable density.** Density ratio 1.00 fails as often as 1.40.
+- **The reduction's summation precision.** Host double-precision partials
+  are no better than GPU float32 ones (19 failures against 9).
+- **Submission batching.** Identical numbers batched and unbatched, same
+  frame.
+- **Catastrophic cancellation in the stencil**, which the previous section
+  claimed. It used norm-of-b as if it were a per-cell value, and by
+  Sterbenz's lemma the difference of two nearby f32 values is exact.
+
+`src/linalg/double_single.js` was written for that last hypothesis -- a
+~48-bit float from two f32s, since WGSL has no f64. It is kept, and
+verified on hardware by `examples/27-float-guard-probe/` (plain f32 error
+5.31e-5 against double-single 0.00e+0, so the compiler does not optimise
+the error-free transformations away), but it is **not** what fixed this.
+
+## The fix, which is two changes that only work together
+
+**`verifyConvergence`** (default on): when the tracked residual first
+claims success, recompute the true residual and test that instead. Costs
+one Laplacian apply and one dot product per solve. After a failed
+verification the loop recomputes every iteration, without which it
+oscillates -- the tracked residual is already under the threshold, so it
+asks, fails, takes one step, dips under again, and runs to the cap. That
+oscillation showed up as every arm reporting a mean iteration count of
+exactly the cap, which is how it was caught.
+
+**`relativeTolerance`** (default on) with **`tolerance` now 1e-6**: the
+test compares against `tolerance * norm(b)`. Verification alone would be
+honest and useless -- every scene would run to its cap chasing an
+unreachable absolute target. The norm is reduced into the scalar buffer
+during the already-GPU-resident setup and read from the snapshot the host
+takes anyway, so it costs no round trip.
+
+## Measured after the fix, with verification on
+
+| example | converged | rejected | mean iterations | peak pressure | historical |
+| --- | --- | --- | --- | --- | --- |
+| 16 Karman vortex street | 400/400 | 0 | 19.3 | - | - |
+| 20 FLIP dam break | **600/600** | 0 | 15.6 | 20.765 | **20.765** |
+| 26 dye in free surface | **800/800** | 0 | 12.3 | 10.382 | **10.382** |
+| 28 drop into pool | **800/800** | 0 | 27.8 | 15.614 | **15.614** |
+
+Every peak pressure matches its historical value to every digit, so the
+physics is unchanged. Example 28, the scene this investigation started
+from, now converges on every step -- honestly -- where it previously
+reported 93.8% dishonestly.
+
+The iteration counts are also lower than the old dishonest ones (28: 27.8
+against 33.2). An achievable target is reached and left; an unachievable
+one is chased.
+
+## Two consequences for callers
+
+**`tolerance` has changed meaning.** It is relative now. Every example
+that pinned it has had the pin removed so the default applies -- the same
+"a default is not in force where a caller names the option" hazard that
+had example 15 opting out of a changed `residualCheckInterval`.
+
+**`examples/16-karman-vortex-street/` keeps an explicit `tolerance: 1e-5`**
+and says why: at the library default of 1e-6 it converges 0 times in 400
+within its 40-iteration budget, and 18 of 400 even at 100 iterations, so
+1e-6 is below what that operator achieves. A caller's accuracy requirement
+is not the kind of constant this project's no-magic-numbers rule forbids;
+an internal number tuned per scene to make the solver work is.

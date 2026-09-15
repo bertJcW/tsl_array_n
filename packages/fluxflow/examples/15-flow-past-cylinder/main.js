@@ -265,7 +265,7 @@ try {
 		// report -- switching back to numberOfLevels: 4 alone (no other
 		// change) resolves it, confirmed stable (all-finite, low residual)
 		// over 1000+ real-hardware frames.
-		pressure: { multigrid: { numberOfLevels: mgLevels, numberOfCoarsestIterations: coarseIter }, tolerance: 1e-5, maxIterations: maxIter, ...( checkEvery === undefined ? {} : { residualCheckInterval: checkEvery } ) }
+		pressure: { multigrid: { numberOfLevels: mgLevels, numberOfCoarsestIterations: coarseIter }, maxIterations: maxIter, ...( checkEvery === undefined ? {} : { residualCheckInterval: checkEvery } ) }
 	} );
 
 	// dye's own advection, bound to the solver's already-projected

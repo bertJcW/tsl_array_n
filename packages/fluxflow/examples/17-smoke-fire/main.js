@@ -113,7 +113,7 @@ try {
 		// MGPCG-based example in this port -- numberOfLevels:1 was
 		// confirmed inadequate at comparable grid sizes elsewhere
 		// (examples/15's own header comment).
-		pressure: { multigrid: { numberOfLevels: 4 }, tolerance: 1e-4, maxIterations: 60 }
+		pressure: { multigrid: { numberOfLevels: 4 }, maxIterations: 60 }
 	} );
 
 	// Explicit clear -- grid_smoke_solver2.js's own header comment on why

@@ -229,7 +229,11 @@ try {
 	const massWeightedTransfer = new URLSearchParams( location.search ).get( 'massWeighted' ) === '1';
 	const maxPressureOverride = new URLSearchParams( location.search ).get( 'maxPressure' );
 	const maxIterParam = Number( new URLSearchParams( location.search ).get( 'maxIter' ) ?? 100 );
-	const toleranceParam = Number( new URLSearchParams( location.search ).get( 'tol' ) ?? 1e-5 );
+	// `?tol=` overrides the solver's own tolerance. Absent, the library
+	// default applies -- which is now a RELATIVE target, so a number pinned
+	// here would both override the default and change meaning.
+	const toleranceParamRaw = new URLSearchParams( location.search ).get( 'tol' );
+	const toleranceParam = toleranceParamRaw === null ? undefined : Number( toleranceParamRaw );
 	const densityRatioUniform = tsl_array_n.array0( 'float' );
 	densityRatioUniform.fromArray( new Float32Array( [ initialDensity ] ) );
 	densityRatioInput.value = String( initialDensity );
@@ -303,7 +307,7 @@ try {
 			// dt, gravity and the domain size. `?maxPressure=` still overrides.
 			...( maxPressureOverride !== null ? { maxPlausiblePressure: Number( maxPressureOverride ) } : {} ),
 			maxIterations: maxIterParam,
-			tolerance: toleranceParam
+			...( toleranceParam === undefined ? {} : { tolerance: toleranceParam } )
 		}
 	} );
 

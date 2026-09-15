@@ -1122,7 +1122,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	 * preconditioner apply more than it strictly needs, and a guarded solve
 	 * finishes an iteration whose updates are all no-ops.
 	 */
-	async function solveWithGpuResidentScalars( tol, maxiter, residualCheckInterval, batchIterations, gpuResidentSetup, relativeTolerance ) {
+	async function solveWithGpuResidentScalars( tol, maxiter, residualCheckInterval, batchIterations, gpuResidentSetup, relativeTolerance, recomputeInterval = RESIDUAL_RECOMPUTE_INTERVAL, verifyConvergence = true ) {
 
 		applyToX(); // Ax = A @ x
 		init(); // r = b - Ax, p = 0, Ap = 0
@@ -1192,6 +1192,12 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		// Whether newRTr and the stop code reflect the current x. Only
 		// meaningful once the read starts being skipped.
 		let residualIsCurrent = ! gpuResidentSetup;
+		// Seeded false: the setup's r comes straight from init() (r = b - Ax
+		// with x the incoming guess), which IS a true residual, but the
+		// first iteration replaces it before the first test.
+		let residualIsTrue = false;
+		// Set the first time a claimed convergence fails verification.
+		let verifyFailed = false;
 
 		// *** Why the stop test can be relative ***
 		//
@@ -1222,8 +1228,21 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 			// Decided here so that both forms run the same sequence; the flag
 			// itself has to be cleared in both, exactly as before.
-			const recompute = forceResidualRecompute || ( iter % RESIDUAL_RECOMPUTE_INTERVAL === 0 && iter > 0 );
+			// Once a verification has failed, every subsequent test is on a
+			// true residual. Without this the loop oscillates: the tracked
+			// residual is already below the threshold, so it asks for a
+			// verification, fails, takes one incremental step, dips below
+			// again, and asks once more -- running to the iteration cap
+			// even when it would have converged honestly a few steps later.
+			// Measured before this line existed: every arm reported a mean
+			// iteration count of exactly the cap.
+			const recompute = forceResidualRecompute || verifyFailed
+				|| ( iter % recomputeInterval === 0 && iter > 0 );
 			if ( recompute ) forceResidualRecompute = false;
+
+			// Whether the r this iteration produces is the true b - Ax or
+			// the incrementally updated one. The stop test needs to know.
+			residualIsTrue = recompute;
 
 			if ( batchIterations ) {
 
@@ -1291,7 +1310,47 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 				}
 
-				if ( Math.sqrt( Math.abs( newRTr ) ) < stopThreshold ) break;
+				if ( Math.sqrt( Math.abs( newRTr ) ) < stopThreshold ) {
+
+					// *** Do not take the incremental residual's word for it ***
+					//
+					// CG tracks r by `r -= alpha * Ap` rather than
+					// recomputing `b - Ax`, and that estimate drifts --
+					// optimistically, and by more as r gets small, because
+					// the update is a near-cancellation of two similar
+					// quantities. Measured on examples/28-drop-into-pool/,
+					// same frame, only the recompute interval varying:
+					//
+					//   recompute every 50 (the default): the loop stops at
+					//     iteration 32 reporting 7.40e-6, while the true
+					//     residual is 3.571e-4 -- optimistic by 48x.
+					//   every 5, 2 or 1: the reported residual matches the
+					//     true one to three significant figures, and the
+					//     solve runs to its iteration cap without ever
+					//     reaching 1e-5, because ~2e-4 is the floor there.
+					//
+					// So that scene never converged; it reported that it
+					// had, because a typical solve finishes in ~33
+					// iterations and the drift was only checked every 50.
+					// The handful of "failures" were the solves that
+					// happened to run past 50, got corrected, and told the
+					// truth.
+					//
+					// Verifying costs one Laplacian apply and one dot
+					// product per solve -- cheaper than a V-cycle, which is
+					// 0.155 ms -- and it only happens once, when the
+					// tracked residual first claims success.
+					if ( residualIsTrue || ! verifyConvergence ) break;
+
+					verifyFailed = true;
+
+					// Recompute next iteration and test again. No risk of
+					// looping: after a recompute `residualIsTrue` is set,
+					// so the next pass either breaks or carries on as
+					// normal.
+					forceResidualRecompute = true;
+
+				}
 
 				if ( newRTr > oldRTr ) forceResidualRecompute = true;
 				oldRTr = newRTr;
@@ -1329,7 +1388,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 	}
 
-	async function solve( tol, maxiter, residualCheckInterval = 1, gpuResidentScalars = false, batchIterations = true, gpuResidentSetup = false, relativeTolerance = false ) {
+	async function solve( tol, maxiter, residualCheckInterval = 1, gpuResidentScalars = false, batchIterations = true, gpuResidentSetup = false, relativeTolerance = false, recomputeInterval = RESIDUAL_RECOMPUTE_INTERVAL, verifyConvergence = true ) {
 
 		state.stoppedBy = 'none';
 
@@ -1337,7 +1396,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		// reads three scalars back per iteration, so its dispatches cannot be
 		// submitted ahead of the decisions that consume them. `batchIterations`
 		// is ignored there rather than half-applied.
-		if ( gpuResidentScalars ) return solveWithGpuResidentScalars( tol, maxiter, residualCheckInterval, batchIterations, gpuResidentSetup, relativeTolerance );
+		if ( gpuResidentScalars ) return solveWithGpuResidentScalars( tol, maxiter, residualCheckInterval, batchIterations, gpuResidentSetup, relativeTolerance, recomputeInterval, verifyConvergence );
 
 		applyToX(); // Ax = A @ x
 		init(); // r = b - Ax, p = 0, Ap = 0

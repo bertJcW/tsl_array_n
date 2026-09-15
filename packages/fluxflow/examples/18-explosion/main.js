@@ -119,7 +119,7 @@ try {
 		dt,
 		buoyancyTemperatureFactor,
 		advection: { order: macCormackEnabled ? 2 : 1 }, // see this file's own macCormackEnabled/macCormackCheckbox comments above -- grid_smoke_solver2.js forwards this to BOTH velocity's own self-advection and density/temperature advection
-		pressure: { multigrid: { numberOfLevels: 4 }, tolerance: 1e-4, maxIterations: 60 }
+		pressure: { multigrid: { numberOfLevels: 4 }, maxIterations: 60 }
 	} );
 
 	// *** density/temperature burst: injected on frame 0 itself, through a

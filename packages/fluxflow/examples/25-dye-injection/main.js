@@ -266,7 +266,7 @@ try {
 		// A small velocityDamping is kept as well, an order of magnitude below
 		// the default -- enough to stop FLIP noise accumulating over a long run,
 		// far too little to flatten a plume in the first few seconds.
-		pressure: { maxPlausiblePressure: 5000, tolerance: 1e-4, maxIterations: 200 }
+		pressure: { maxPlausiblePressure: 5000, maxIterations: 200 }
 	} );
 
 	function seedScene() {

@@ -225,7 +225,7 @@ export function createGridPressureSolver2( {
 	faceWeights,
 	multigrid = {},
 	preconditioner = 'multigrid',
-	tolerance = 1e-5,
+	tolerance = 1e-6,
 	maxIterations = 100,
 	// How often the CG loop evaluates its true-residual stop test, in
 	// iterations. 1 asks every iteration. Higher values are not a speedup --
@@ -262,11 +262,35 @@ export function createGridPressureSolver2( {
 	// and measured at 1.14x and 1.30x paired on example 15, because the
 	// first of those two reads also drained everything queued behind it.
 	// See seedScalarsKernel in linalg.js.
-	// Compare the residual against `tolerance * |b|` rather than
-	// `tolerance`. Off by default until measured; see linalg.js for why an
-	// absolute criterion asks for more digits than float32 has on a busy
-	// scene.
-	relativeTolerance = false,
+	// *** These three go together and must be changed together ***
+	//
+	// `tolerance` is now a RELATIVE target: the stop test compares the
+	// residual against `tolerance * |b|`, with the absolute form kept as
+	// an OR so a zero right-hand side still converges.
+	//
+	// The three used to be absolute-1e-5, no verification, and a
+	// true-residual recompute every 50 iterations, and that combination
+	// reported convergence that had not happened. CG tracks its residual
+	// incrementally and the estimate drifts optimistically; a typical
+	// solve finishes in 14-33 iterations and so never reached the
+	// recompute that would have caught it. Measured on
+	// examples/26-dye-free-surface/ with verification on:
+	//
+	//   absolute 1e-5   0 of 600 solves converge (100 iterations, the cap)
+	//   relative 1e-6   600 of 600, mean 13.9 iterations
+	//
+	// The old configuration reported 800 of 800 on that scene at 10.7
+	// iterations. It was measuring a residual up to 48x smaller than the
+	// true one -- see linalg.js at the stop test.
+	relativeTolerance = true,
+	// How often the CG loop recomputes the TRUE residual b - Ax instead of
+	// trusting its incremental r -= alpha*Ap. See linalg.js.
+	residualRecomputeInterval = 50,
+	// Recompute the true b - Ax before believing the incremental
+	// residual's claim to have converged. On by default: without it this
+	// solver reported convergence it had not achieved -- see linalg.js at
+	// the stop test for the measurement.
+	verifyConvergence = true,
 	gpuResidentSetup = true,
 	residualCheckInterval = 4,
 	// Compute alpha and beta on the GPU and read the loop's scalars back in
@@ -314,7 +338,7 @@ export function createGridPressureSolver2( {
 	// this measurement does not work and the interventional one needs the
 	// cap to move inside a single run. A capped solve does not converge and
 	// is not a correctness configuration; see the tolerance note above.
-	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations, tolerance, checkBadCells: true, gpuResidentSetup, relativeTolerance };
+	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations, tolerance, checkBadCells: true, gpuResidentSetup, relativeTolerance, residualRecomputeInterval, verifyConvergence };
 
 	const [ resolutionX, resolutionY ] = resolution;
 	const [ gridSpacingX, gridSpacingY ] = gridSpacing;
@@ -693,7 +717,8 @@ export function createGridPressureSolver2( {
 			diagnostics.converged = await timePhase( 'pressure-cg-solve', () => cg.solve(
 				settings.tolerance, settings.maxIterations,
 				settings.residualCheckInterval, settings.gpuResidentScalars, settings.batchIterations,
-				settings.gpuResidentSetup, settings.relativeTolerance
+				settings.gpuResidentSetup, settings.relativeTolerance,
+				settings.residualRecomputeInterval, settings.verifyConvergence
 			) );
 
 			// Forwarded from the CG solver so a caller can see *why* a frame

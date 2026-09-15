@@ -191,7 +191,7 @@ try {
 		origin: [ 0, 0 ],
 		force,
 		dt,
-		pressure: { multigrid: { numberOfLevels: 4 }, tolerance: 1e-5, maxIterations: 100 }
+		pressure: { multigrid: { numberOfLevels: 4 }, maxIterations: 100 }
 	} );
 
 	// dye's own advection, bound to the solver's already-projected
