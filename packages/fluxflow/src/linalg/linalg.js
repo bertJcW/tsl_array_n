@@ -740,6 +740,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	const dotRR  = createDotReducer( shape, r, r );
 	const dotRZ  = createDotReducer( shape, r, z );
 	const dotPAp = createDotReducer( shape, p, Ap );
+	const dotBB  = createDotReducer( shape, b, b );
 
 
 	// Live view of the most recent solve()'s own final r.r -- exposed (not
@@ -848,7 +849,12 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	const SLOT_RZ_OLD = 3;
 	const SLOT_STOP = 4;
 	const SLOT_PAP_BASELINE = 5;
-	const SCALAR_SLOT_COUNT = 6;
+	// b.b, for the relative stop test. Computed once per solve in the
+	// setup, which is already all GPU dispatches, and read by the host out
+	// of the same snapshot it takes at every check -- so a relative
+	// criterion costs no extra round trip.
+	const SLOT_BB = 6;
+	const SCALAR_SLOT_COUNT = 7;
 
 	// Defensive floor for the pAp growth baseline: a literal 0 baseline
 	// would make the first legitimate nonzero pAp look like infinite
@@ -1016,6 +1022,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	} );
 
 	const reducePAp = buildScalarReduction( dotPAp, SLOT_PAP );
+	const reduceBB = buildScalarReduction( dotBB, SLOT_BB );
 	const reduceRR = buildScalarReduction( dotRR, SLOT_RR );
 	const reduceRZ = buildScalarReduction( dotRZ, SLOT_RZ );
 
@@ -1115,7 +1122,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	 * preconditioner apply more than it strictly needs, and a guarded solve
 	 * finishes an iteration whose updates are all no-ops.
 	 */
-	async function solveWithGpuResidentScalars( tol, maxiter, residualCheckInterval, batchIterations, gpuResidentSetup ) {
+	async function solveWithGpuResidentScalars( tol, maxiter, residualCheckInterval, batchIterations, gpuResidentSetup, relativeTolerance ) {
 
 		applyToX(); // Ax = A @ x
 		init(); // r = b - Ax, p = 0, Ap = 0
@@ -1131,6 +1138,9 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 			// actually costing.
 			dotRR.dispatch();
 			reduceRR();
+
+			dotBB.dispatch();
+			reduceBB();
 
 			applyPreconditionerToR(); // z0 = M^-1 @ r0
 
@@ -1182,6 +1192,29 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		// Whether newRTr and the stop code reflect the current x. Only
 		// meaningful once the read starts being skipped.
 		let residualIsCurrent = ! gpuResidentSetup;
+
+		// *** Why the stop test can be relative ***
+		//
+		// `tol` compared against sqrt(r.r) is an ABSOLUTE norm over the
+		// whole field, so what it demands depends on how big the problem
+		// is. Measured: |b| is ~550 on examples/28-drop-into-pool/ and
+		// ~370 on examples/26-dye-free-surface/, so an absolute 1e-5 asks
+		// for the residual to fall by 5.5e7 and 3.7e7 respectively.
+		// float32 has a 24-bit mantissa -- about 6e-8 of relative
+		// precision -- so both scenes are asking for more digits than the
+		// arithmetic has. Example 26 clears it on margin; example 28 is
+		// far enough past to stall on ~5% of solves, at a residual it then
+		// cannot improve no matter how many iterations it is given (a
+		// 2000-iteration cap did not help, and a tolerance of 1e-4 made
+		// every solve converge).
+		//
+		// Relative is the textbook criterion and it is scale-free: it asks
+		// for a fixed number of digits of reduction rather than a fixed
+		// absolute value, which is the same requirement on every scene and
+		// well inside float32. The absolute test is kept as an OR so a
+		// zero right-hand side -- nothing to project -- still converges
+		// instead of chasing a threshold of zero.
+		let stopThreshold = tol;
 
 		for ( let iter = 0; iter < maxiter; iter ++ ) {
 
@@ -1241,7 +1274,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 					// x exactly where it belongs. Without the pre-loop read
 					// that case now reaches the loop, and calling it
 					// 'degenerate-pAp' would be alarming and wrong.
-					if ( Math.sqrt( Math.abs( newRTr ) ) >= tol ) {
+					if ( Math.sqrt( Math.abs( newRTr ) ) >= stopThreshold ) {
 
 						state.stoppedBy = STOP_REASONS[ stopCode ] ?? 'unknown';
 
@@ -1251,7 +1284,14 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 				}
 
-				if ( Math.sqrt( Math.abs( newRTr ) ) < tol ) break;
+				if ( relativeTolerance ) {
+
+					const normB = Math.sqrt( Math.abs( snapshot[ SLOT_BB ] ) );
+					stopThreshold = Math.max( tol * normB, tol );
+
+				}
+
+				if ( Math.sqrt( Math.abs( newRTr ) ) < stopThreshold ) break;
 
 				if ( newRTr > oldRTr ) forceResidualRecompute = true;
 				oldRTr = newRTr;
@@ -1272,17 +1312,24 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 			newRTr = snapshot[ SLOT_RR ];
 
+			if ( relativeTolerance ) {
+
+				const normB = Math.sqrt( Math.abs( snapshot[ SLOT_BB ] ) );
+				stopThreshold = Math.max( tol * normB, tol );
+
+			}
+
 			if ( stopCode !== STOP_NONE ) state.stoppedBy = STOP_REASONS[ stopCode ] ?? 'unknown';
 
 		}
 
 		state.residualSquared = newRTr;
 
-		return Math.sqrt( Math.abs( newRTr ) ) < tol;
+		return Math.sqrt( Math.abs( newRTr ) ) < stopThreshold;
 
 	}
 
-	async function solve( tol, maxiter, residualCheckInterval = 1, gpuResidentScalars = false, batchIterations = true, gpuResidentSetup = false ) {
+	async function solve( tol, maxiter, residualCheckInterval = 1, gpuResidentScalars = false, batchIterations = true, gpuResidentSetup = false, relativeTolerance = false ) {
 
 		state.stoppedBy = 'none';
 
@@ -1290,7 +1337,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		// reads three scalars back per iteration, so its dispatches cannot be
 		// submitted ahead of the decisions that consume them. `batchIterations`
 		// is ignored there rather than half-applied.
-		if ( gpuResidentScalars ) return solveWithGpuResidentScalars( tol, maxiter, residualCheckInterval, batchIterations, gpuResidentSetup );
+		if ( gpuResidentScalars ) return solveWithGpuResidentScalars( tol, maxiter, residualCheckInterval, batchIterations, gpuResidentSetup, relativeTolerance );
 
 		applyToX(); // Ax = A @ x
 		init(); // r = b - Ax, p = 0, Ap = 0

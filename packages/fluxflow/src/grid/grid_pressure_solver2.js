@@ -262,6 +262,11 @@ export function createGridPressureSolver2( {
 	// and measured at 1.14x and 1.30x paired on example 15, because the
 	// first of those two reads also drained everything queued behind it.
 	// See seedScalarsKernel in linalg.js.
+	// Compare the residual against `tolerance * |b|` rather than
+	// `tolerance`. Off by default until measured; see linalg.js for why an
+	// absolute criterion asks for more digits than float32 has on a busy
+	// scene.
+	relativeTolerance = false,
 	gpuResidentSetup = true,
 	residualCheckInterval = 4,
 	// Compute alpha and beta on the GPU and read the loop's scalars back in
@@ -309,7 +314,7 @@ export function createGridPressureSolver2( {
 	// this measurement does not work and the interventional one needs the
 	// cap to move inside a single run. A capped solve does not converge and
 	// is not a correctness configuration; see the tolerance note above.
-	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations, tolerance, checkBadCells: true, gpuResidentSetup };
+	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations, tolerance, checkBadCells: true, gpuResidentSetup, relativeTolerance };
 
 	const [ resolutionX, resolutionY ] = resolution;
 	const [ gridSpacingX, gridSpacingY ] = gridSpacing;
@@ -688,7 +693,7 @@ export function createGridPressureSolver2( {
 			diagnostics.converged = await timePhase( 'pressure-cg-solve', () => cg.solve(
 				settings.tolerance, settings.maxIterations,
 				settings.residualCheckInterval, settings.gpuResidentScalars, settings.batchIterations,
-				settings.gpuResidentSetup
+				settings.gpuResidentSetup, settings.relativeTolerance
 			) );
 
 			// Forwarded from the CG solver so a caller can see *why* a frame

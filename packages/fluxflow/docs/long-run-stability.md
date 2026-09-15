@@ -118,3 +118,113 @@ Three scenes were run concurrently in separate tabs. That contends for the
 GPU and makes the wall-clock column meaningless, which is why there is no
 timing column here — this measures convergence and robustness, and those
 are contention-independent.
+
+---
+
+# Why example 28 does not converge, and what to do about it (2026-09-15)
+
+The report above recommended raising `maxIterations` on example 28 and
+re-measuring. **That recommendation was wrong, and the measurement is what
+says so.**
+
+## Raising the cap does nothing
+
+1200 steps per arm, scene re-seeded each time:
+
+| iteration cap | converged | mean iterations | steps that hit the cap |
+| --- | --- | --- | --- |
+| 100 | 1192/1200 | 33.2 | 9 |
+| 400 | 1185/1200 | 37.4 | 15 |
+| 2000 | 1194/1200 | 42.7 | **6** |
+
+Solves are running to **2000 iterations** and still not converging. The
+distribution is bimodal: 1156 of 1200 finish in 20-49 iterations and a
+handful never finish at any budget. These are not slow solves. They are
+stalled.
+
+## It is not a singular sub-domain
+
+The first hypothesis was an isolated pocket of fluid with no Dirichlet
+(air) neighbour, which would make the local system singular. Connected-
+component analysis of the fluid mask on the first failing step refutes it:
+**4731 fluid cells, one component, zero orphans.** Same at the end of the
+run.
+
+## It is float32 running out of digits
+
+The stop test compares `sqrt(r.r)` — an **absolute** L2 norm over the whole
+field — against `tolerance`. What that demands therefore depends on how
+big the problem is. Measured:
+
+| scene | ‖b‖ | reduction demanded by `tolerance = 1e-5` |
+| --- | --- | --- |
+| 28 drop into pool | **~550** | **5.5 × 10⁷** |
+| 26 dye in free surface | ~370 | 3.7 × 10⁷ |
+
+float32 has a 24-bit mantissa, about **6 × 10⁻⁸** of relative precision, so
+the largest reduction the arithmetic can express is around **1.7 × 10⁷**.
+Both scenes are asking for more digits than exist. Example 26 clears it on
+margin; example 28 is far enough past that ~5% of its solves stall at a
+residual they cannot improve.
+
+Three independent measurements agree:
+
+- more iterations do not help (2000 is no better than 100);
+- a tolerance of **1e-4** converges **1500/1500**, and 5e-5 converges
+  1491/1500 — the failures sit between those two;
+- ‖b‖ puts the demand past the float32 limit arithmetically.
+
+**This is a property of the default, not of example 28.** Example 26 is
+passing by luck rather than by margin.
+
+## The fix, and the level matters more than the criterion
+
+`relativeTolerance` (in `settings`, off by default) compares against
+`tolerance * ‖b‖` instead of `tolerance`, with the absolute test kept as an
+OR so a zero right-hand side still converges. ‖b‖ is reduced into the
+scalar buffer during the setup, which is already all GPU dispatches, and
+read out of the snapshot the host already takes — **no extra round trip.**
+
+Relative is the textbook criterion and it is scale-free, which is what this
+project wants. But it changes what accuracy is being asked for, and that
+has to be measured rather than assumed. 1200 steps, post-projection
+divergence over fluid cells:
+
+| setting | converged | mean iterations | worst max \|div\| | mean \|div\| |
+| --- | --- | --- | --- | --- |
+| absolute 1e-5 (today's default) | 1193/1200 | 32.8 | 5.0e-5 | 5.75e-6 |
+| relative 1e-5 | **1200/1200** | 15.3 | **1.88e-3** | 3.07e-5 |
+| **relative 1e-7** | 1198/1200 | **29.6** | **4.0e-5** | **5.08e-6** |
+
+**Relative 1e-5 converges every time by asking for much less.** With
+‖b‖ ≈ 550 its threshold is 5.5e-3, some 550× looser than today's, and the
+divergence is 37× worse. The halved iteration count and the higher peak
+pressure (23.6 against 15.6) are the same fact seen three ways. It is not
+the fix.
+
+**Relative 1e-7 is better than today's default on every axis measured** —
+more solves converged, fewer iterations, and slightly *better* divergence
+— because its threshold (~5.5e-5) is loose enough for float32 to reach and
+tight enough to preserve the physics.
+
+## What this does not fix
+
+Relative 1e-7 still leaves 2 of 1200 unconverged. The floor is real: on
+this scene the residual cannot go far below ~4e-5 in float32 whatever the
+criterion. A criterion change moves the goalposts to where the arithmetic
+can reach; it does not add precision. Closing the last fraction of a
+percent would need a higher-precision residual (compensated summation in
+the reduction, or a mixed-precision correction step), not another
+threshold.
+
+## Recommendation, and why the default is unchanged
+
+For a scene like example 28, `relativeTolerance: true` with
+`tolerance: 1e-7` is the measured best of the three.
+
+The default is left at absolute for now because `tolerance` is a public
+option and switching the criterion silently changes what every existing
+caller's number means — the same hazard that had example 15 pinning
+`residualCheckInterval: 1` and opting itself out of a changed default. A
+default change here should come with the `tolerance` default moving to
+1e-7 in the same commit, and a check across every scene, not just this one.
