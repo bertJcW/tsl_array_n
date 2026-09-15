@@ -2273,3 +2273,135 @@ resolve after 40 steps overruns the pool. Example 15's `profile()` now
 times the frames in one pass (no resolves, so mapAsync latency is not
 counted as frame time) and measures GPU time in a second pass, resolving
 per step. Examples 20 and 28 accept `?profile=1` for the same reason.
+
+# What a dispatch and a round trip actually cost, and the 107 single-dispatch submissions (2026-09-16)
+
+The GPU-idle re-measurement above says the step is host-bound but not what
+the host is paying for. These are microbenchmarks against raw WebGPU on the
+same device, in the same page, so the library's numbers can be compared
+against the API's own floor.
+
+## The floor
+
+| operation | cost |
+| --- | --- |
+| encode one dispatch (pipeline + bind group + dispatchWorkgroups) | **0.56 us** |
+| `queue.submit` of an empty command buffer | **4.44 us** |
+| 900 dispatches across 45 submissions, encode + submit | **0.40 ms** |
+| `queue.onSubmittedWorkDone()` -- wait for the GPU, no readback | **0.155 ms** |
+| `mapAsync` readback, 16 bytes | **2.70 ms** |
+| `mapAsync` readback, 64 KB | **3.04 ms** |
+| the same through a *fresh* staging buffer each time | 2.84 / 3.00 ms |
+
+Two things follow immediately.
+
+**A readback costs the same whatever it reads.** 16 bytes and 64 KB are
+within 12% of each other, and a persistent staging buffer is no cheaper than
+allocating one per read. The cost is not the copy. Waiting for the GPU is
+0.155 ms; the other ~2.5 ms is `mapAsync` itself -- the map completion coming
+back through Chrome's GPU-process round trip. So "read fewer bytes" is not an
+optimisation here, and neither is pooling staging buffers. Only *not waiting*
+is.
+
+**And waiting parallelises perfectly:**
+
+| | total |
+| --- | --- |
+| 1 readback | 3.45 ms |
+| 4 readbacks, awaited one after another | 11.35 ms |
+| 4 readbacks, all in flight, `Promise.all` | **2.91 ms** |
+| 8 readbacks, all in flight | **3.06 ms** |
+
+Eight concurrent maps cost what one costs. The solver's ~11 ms of round trips
+is therefore not "six reads" but *six serial waits*: each stop test has to be
+answered before the host knows whether to encode the next batch. That is a
+dependency-chain cost, not a bandwidth cost, and it is why raising
+`residualCheckInterval` cannot fix it (re-swept today at 4/8/16/32/64 on
+example 15: 4 and 8 both converge 100% at 20.0 / 19.2 ms, while 16 and 32
+collapse to 47% / 39% converged as the iterate is driven past the point where
+the recursive residual still tracks the true one).
+
+## Against the floor: three.js's per-call cost
+
+Wrapping `Renderer.compute` and its callees on example 15 (no `?profile=1`,
+so no timestamp writes), per step:
+
+| | ms/step | calls/step | us/call |
+| --- | --- | --- | --- |
+| `renderer.compute` **total** | **8.81** | 159 | 55.4 |
+| ...`backend.finishCompute` (pass end + queue submit) | 2.70 | 159 | 17.0 |
+| ...`bindings.updateForCompute` | 1.16 | 999 | 1.16 |
+| ...`backend.compute` (the dispatch itself) | 1.01 | 999 | 1.01 |
+| ...`nodes.updateForCompute` | 1.02 | 999 | 1.02 |
+| ...`backend.beginCompute` | 0.83 | 159 | 5.2 |
+| ...`pipelines.getForCompute` | 0.34 | 999 | 0.34 |
+| ...`backend.updateTimeStampUID` | 0.14 | 159 | 0.88 |
+
+The same 999 dispatches in 159 submissions cost **1.27 ms** through raw
+WebGPU. So ~7.5 ms per step is three.js's node/binding/pipeline bookkeeping
+above the API, split about evenly between a per-dispatch cost of ~3.5 us and
+a per-`compute()`-call cost of ~33 us.
+
+## The finding: 107 of 159 calls carried one dispatch
+
+Counting the array length at every `compute()` call, per step:
+
+| nodes per call | calls/step |
+| --- | --- |
+| **1** | **107** |
+| 38 (the V-cycle) | 18 |
+| 4 | 17 |
+| 8 | 13 |
+| 9 | 4 |
+
+11% of the dispatches were taking ~70% of the per-call overhead. Sampling the
+stacks of the single-dispatch calls named two sites, both fixed sequences with
+no host decision inside them:
+
+- `array_utils.js`'s `createExtrapolateToRegion2().run( n )` -- `n + 2`
+  dispatches, one submission each;
+- `grid_blocked_boundary_condition_solver2.js`'s `constrainVelocity()` --
+  ~13 of its own plus the two extrapolations, and it runs three times a step
+  (after forces, after pressure, after advection).
+
+Both now build one `tsl_array_n.createBatch` plan. `run()` also exposes its
+dispatcher list so `constrainVelocity` can splice it in rather than nest a
+submission inside its own, which collapses the whole of `constrainVelocity`
+to a single 27-dispatch pass. `grid_flip_solver2.js`'s resample pass (seven
+dispatches) went the same way.
+
+Calls per step, example 15: **159 -> 81**, with the dispatch count unchanged
+at 999.
+
+## Measured
+
+Paired and phase-alternated inside one run, 15 rounds of 4 steps per arm. The
+"unbatched" arm re-splits the merged pass into one submission per dispatch at
+the `renderer.compute` boundary, so both arms run identical kernels in
+identical order and differ only in submission granularity:
+
+| scene | unbatched | batched | |
+| --- | --- | --- | --- |
+| 15 flow past cylinder (has a collider) | 24.51 ms | 19.95 ms | **1.229x** |
+| 20 FLIP dam break (no collider; extrapolation only) | 18.71 ms | 17.79 ms | **1.052x** |
+
+The spread between the two is the collider: without one, `constrainVelocity`
+is only the closed-boundary and clamp kernels, and the extrapolation is all
+there is to batch.
+
+**Identical output, checked rather than assumed.** 150 steps from a fresh
+load in each mode, hashing every cell of u, v and pressure: 857113263 /
+-742805524 / -914744686 in both. WebGPU's ordering guarantee inside a pass
+holds on this device for a 27-dispatch chain that reads what the dispatch
+before it wrote. Example 28 over 300 steps: 300/300 converged, zero
+rejections, peak pressure 15.614 -- its historical value to every digit.
+
+## What is left
+
+26 single-dispatch calls per step remain on example 15 and 18 on example 20,
+scattered across the FLIP and advection paths rather than concentrated in one
+sequence. At ~33 us each that is ~0.8 ms, worth having but no longer the
+shape of a finding. The two big items are unchanged and both are now
+quantified: ~7.5 ms/step of three.js bookkeeping above what the WebGPU calls
+themselves cost, and ~11 ms/step of serial `mapAsync` waits that would cost
+~2.3 ms if they could be issued together.

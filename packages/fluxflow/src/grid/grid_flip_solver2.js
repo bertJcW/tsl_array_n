@@ -1288,21 +1288,35 @@ export function createGridFlipSolver2( {
 
 		} );
 
-		resamplePass = function resample() {
-
-			resetResampleBuffers();
-			countPerCellKernel();
-			buildDonorPoolKernel();
-			claimDonorsKernel();
+		// One submission for the whole pass rather than seven. Each bare
+		// dispatch would be its own command encoder, pass and queue submit at
+		// ~33 us of host-side three.js work, measured -- see
+		// grid_blocked_boundary_condition_solver2.js's constrainVelocity for
+		// the measurement and for why merging is safe (WebGPU orders
+		// dispatches within a pass and makes each one's writes visible to the
+		// next, which is what the count -> donor pool -> claim chain here
+		// needs). The buffer resets stay outside: they are host uploads, not
+		// dispatches, so createBatch runs them in place and starts the pass
+		// after them.
+		const resampleBatch = tsl_array_n.createBatch( [
+			countPerCellKernel,
+			buildDonorPoolKernel,
+			claimDonorsKernel,
 
 			// Relocation changed particle positions -- the fluidMask/
 			// uFluidAdjacent/vFluidAdjacent computed just before this pass
 			// are now stale for the recipient cells; recompute so this same
 			// frame's pressure solve sees the corrected distribution.
-			clearFluidMask();
-			markFluidCellsKernel();
-			computeUFluidAdjacent();
-			computeVFluidAdjacent();
+			clearFluidMask,
+			markFluidCellsKernel,
+			computeUFluidAdjacent,
+			computeVFluidAdjacent
+		] );
+
+		resamplePass = function resample() {
+
+			resetResampleBuffers();
+			resampleBatch();
 
 		};
 

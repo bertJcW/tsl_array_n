@@ -200,19 +200,65 @@ export function createExtrapolateToRegion2( inputField, validField, outputField,
 	const stepAtoB = createExtrapolateStepKernel2( outputField, validA, validB, shape );
 	const stepBtoA = createExtrapolateStepKernel2( outputField, validB, validA, shape );
 
-	return function run( numberOfIterations = 5 ) {
+	// *** Why the sequence is batched rather than called one by one ***
+	//
+	// Every bare dispatch is its own command encoder, compute pass and queue
+	// submission (see tsl_array_n's kernel.js for the measurement), and this
+	// run() is `numberOfIterations + 2` of them -- so a depth-5 extrapolation
+	// of two velocity components costs 14 submissions. Measured on
+	// examples/15-flow-past-cylinder/ by instrumenting three.js's own
+	// Renderer.compute: a step made 159 compute() calls for 999 dispatches,
+	// and 107 of those calls carried a single dispatch. A call costs ~33 us of
+	// host-side three.js work before the dispatch inside it costs anything, so
+	// the singles were ~11% of the dispatches and ~40% of the dispatch cost.
+	//
+	// The sequence here is fixed once the iteration count is known, so it is
+	// resolved once per count and reused -- createBatch() is exactly this
+	// case. Ordering inside one pass is guaranteed by WebGPU and was verified
+	// rather than assumed (kernel.js's own header records the 40-dispatch
+	// read-modify-write check), which is what the ping-pong here depends on.
+	const batches = new Map();
 
-		if ( copyInputToOutput ) copyInputToOutput();
+	// The dispatchers this run() would issue, in order. Exposed so a caller
+	// that is itself batching can splice them into its own sequence and pay
+	// one submission for everything instead of one for this and one for
+	// itself -- see grid_blocked_boundary_condition_solver2.js's
+	// constrainVelocity, which does exactly that.
+	function dispatchers( numberOfIterations = 5 ) {
 
-		copyValidToA();
+		const sequence = [];
+
+		if ( copyInputToOutput ) sequence.push( copyInputToOutput );
+
+		sequence.push( copyValidToA );
 
 		for ( let iter = 0; iter < numberOfIterations; iter ++ ) {
 
-			if ( iter % 2 === 0 ) stepAtoB();
-			else stepBtoA();
+			sequence.push( iter % 2 === 0 ? stepAtoB : stepBtoA );
 
 		}
 
-	};
+		return sequence;
+
+	}
+
+	function run( numberOfIterations = 5 ) {
+
+		let batch = batches.get( numberOfIterations );
+
+		if ( batch === undefined ) {
+
+			batch = tsl_array_n.createBatch( dispatchers( numberOfIterations ) );
+			batches.set( numberOfIterations, batch );
+
+		}
+
+		batch();
+
+	}
+
+	run.dispatchers = dispatchers;
+
+	return run;
 
 }

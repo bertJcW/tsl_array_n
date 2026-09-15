@@ -156,17 +156,6 @@ export function createGridBlockedBoundaryConditionSolver2(
 	const zeroVDown  = tsl_array_n.kernel( vSize[ 0 ], ( i ) => { velocity.dataV( i, 0 ).assign( 0 ); } );
 	const zeroVUp    = tsl_array_n.kernel( vSize[ 0 ], ( i ) => { velocity.dataV( i, vSize[ 1 ] - 1 ).assign( 0 ); } );
 
-	function projectClosedDomainBoundary() {
-
-		const flag = solver.closedDomainBoundaryFlag;
-
-		if ( flag & DIRECTION_LEFT )  zeroULeft();
-		if ( flag & DIRECTION_RIGHT ) zeroURight();
-		if ( flag & DIRECTION_DOWN )  zeroVDown();
-		if ( flag & DIRECTION_UP )    zeroVUp();
-
-	}
-
 	// ---- inflow: one (applyU, applyV) kernel pair per inflow object, rebuilt whenever setInflows() is called ----
 
 	// inflow.mode is read as a plain JS value *here*, at kernel-build time
@@ -211,6 +200,11 @@ export function createGridBlockedBoundaryConditionSolver2(
 
 	let inflowKernels = [];
 
+	// Bumped whenever any dispatcher this file holds is rebuilt, so
+	// constrainVelocity's cached batches (see its own comment) cannot outlive
+	// the kernels they were planned from.
+	let plansGeneration = 0;
+
 	// newInflows: null, one createSDFInflow2(...) object, or an array of
 	// them -- mirrors setCollider's own "swap it at any time" precedent
 	// (genuine "customize later" support, not just a fixed constructor
@@ -221,17 +215,7 @@ export function createGridBlockedBoundaryConditionSolver2(
 
 		const list = ! newInflows ? [] : ( Array.isArray( newInflows ) ? newInflows : [ newInflows ] );
 		inflowKernels = list.map( buildInflowKernels );
-
-	}
-
-	function applyInflow() {
-
-		for ( const { applyU, applyV } of inflowKernels ) {
-
-			applyU();
-			applyV();
-
-		}
+		plansGeneration ++;
 
 	}
 
@@ -245,6 +229,8 @@ export function createGridBlockedBoundaryConditionSolver2(
 	let extrapolateU = null, extrapolateV = null;
 
 	function rebuildColliderKernels() {
+
+		plansGeneration ++;
 
 		const collider = solver.collider;
 
@@ -505,40 +491,65 @@ export function createGridBlockedBoundaryConditionSolver2(
 
 	}
 
-	// velocity is the one bound at construction time (see the file header
-	// comment), no longer a parameter here
-	function constrainVelocity( extrapolationDepth = 5 ) {
+	// *** Why this is one batched submission and not ~27 bare dispatches ***
+	//
+	// Everything this function does is a fixed sequence of kernels with no
+	// host decision in the middle, and a bare dispatch costs a command
+	// encoder, a compute pass and a queue submission of its own. Measured on
+	// examples/15-flow-past-cylinder/ by wrapping three.js's Renderer.compute:
+	// a step issued 159 compute() calls for 999 dispatches, 107 of them
+	// carrying one dispatch, at ~33 us of host-side three.js work per call
+	// before the dispatch itself costs anything. This function is called three
+	// times per step (after forces, pressure and advection), and with a
+	// depth-5 extrapolation of both velocity components it was ~27 of those
+	// calls each time.
+	//
+	// WebGPU orders dispatches inside a pass and makes each one's writes
+	// visible to the next, so merging them changes nothing about the result --
+	// the ping-pong inside the extrapolation depends on that and tsl_array_n's
+	// kernel.js records the check.
+	//
+	// The plan is cached rather than rebuilt, and the key is everything that
+	// can change which dispatchers run: the collider (its kernels are rebuilt
+	// by setCollider), the extrapolation depth, the closed-boundary flag
+	// (a caller may set it at any time) and the inflow set (rebuilt by
+	// setInflows). `plansGeneration` is bumped wherever kernels are rebuilt,
+	// so a stale plan cannot survive a rebuild.
+	const plans = new Map();
+
+	function constrainVelocityPlan( extrapolationDepth ) {
+
+		const sequence = [];
 
 		if ( solver.collider ) {
 
-			fillUMarker();
-			fillVMarker();
-
-			markAndProjectU();
-			markAndProjectV();
+			sequence.push( fillUMarker, fillVMarker, markAndProjectU, markAndProjectV );
 
 			// free slip - extrapolate
-			extrapolateU( extrapolationDepth );
-			extrapolateV( extrapolationDepth );
+			sequence.push( ...extrapolateU.dispatchers( extrapolationDepth ) );
+			sequence.push( ...extrapolateV.dispatchers( extrapolationDepth ) );
 
 			// no flux (collider surface)
-			noFluxProjectionU();
-			noFluxProjectionV();
+			sequence.push( noFluxProjectionU, noFluxProjectionV );
 
-			copyUTempToVelocity();
-			copyVTempToVelocity();
+			sequence.push( copyUTempToVelocity, copyVTempToVelocity );
 
 			// blocked boundary condition
-			blockedBoundary();
+			sequence.push( blockedBoundary );
 
 		}
 
 		// no flux (domain boundary, if closed) - independent of collider, still needed even without one
-		projectClosedDomainBoundary();
+		const flag = solver.closedDomainBoundaryFlag;
+
+		if ( flag & DIRECTION_LEFT ) sequence.push( zeroULeft );
+		if ( flag & DIRECTION_RIGHT ) sequence.push( zeroURight );
+		if ( flag & DIRECTION_DOWN ) sequence.push( zeroVDown );
+		if ( flag & DIRECTION_UP ) sequence.push( zeroVUp );
 
 		// inflow always wins if a caller's closedDomainBoundaryFlag still
 		// happens to include the same wall an inflow object overlaps.
-		applyInflow();
+		for ( const { applyU, applyV } of inflowKernels ) sequence.push( applyU, applyV );
 
 		// Last-resort circuit breaker, always run last -- see
 		// MAX_VELOCITY_COMPONENT's own comment above for why this exists
@@ -547,8 +558,28 @@ export function createGridBlockedBoundaryConditionSolver2(
 		// frame (forces, pressure, advection -- see this file's own
 		// header comment), so this one addition catches a runaway
 		// regardless of which stage actually produced it.
-		clampVelocityU();
-		clampVelocityV();
+		sequence.push( clampVelocityU, clampVelocityV );
+
+		return tsl_array_n.createBatch( sequence );
+
+	}
+
+	// velocity is the one bound at construction time (see the file header
+	// comment), no longer a parameter here
+	function constrainVelocity( extrapolationDepth = 5 ) {
+
+		const key = `${ plansGeneration }|${ extrapolationDepth }|${ solver.closedDomainBoundaryFlag }`;
+
+		let plan = plans.get( key );
+
+		if ( plan === undefined ) {
+
+			plan = constrainVelocityPlan( extrapolationDepth );
+			plans.set( key, plan );
+
+		}
+
+		plan();
 
 	}
 
