@@ -43,6 +43,7 @@
 
 import * as tsl_array_n from 'tsl_array_n';
 import { float, int, uint, abs, floatBitsToUint } from 'three/tsl';
+import { dsAddFloat, dsToFloat } from '../../src/linalg/double_single.js';
 
 const statusEl = document.querySelector( '#status' );
 const tableEl = document.querySelector( '#results' );
@@ -233,6 +234,68 @@ try {
 
 	status( `backend: ${ renderer.backend?.constructor?.name ?? 'unknown' } — ${ N } values × ${ TESTS.length } tests` );
 	perfEl.textContent = `one dispatch, ${ elapsed.toFixed( 1 ) } ms including readback`;
+
+	// *** Second probe: does the compiler preserve double-single arithmetic? ***
+	//
+	// src/linalg/double_single.js builds a ~48-bit float out of two f32s so
+	// the residual `b - Ax` can be computed accurately -- in f32 the
+	// Laplacian's five-term accumulation carries an error twenty-four times
+	// larger than the residual it is measuring. Every error-free
+	// transformation it uses depends on the compiler evaluating the
+	// expression exactly as written, and two ordinary optimisations destroy
+	// them: reassociating `(a+b)+c` into `a+(b+c)`, and contracting `a*b+c`
+	// into an FMA. WGSL permits neither, but so did the reasoning behind the
+	// NaN idiom above, which turned out to be a no-op on real hardware.
+	//
+	// The test is the case the solver actually hits: sum five terms of
+	// magnitude ~550 whose exact total is a small number, and see whether
+	// the sum comes back as that number or as rounding noise.
+	{
+		const TERMS = [ 613.3701, -284.9004, 401.2178, -520.7051, -208.9805 ];
+		// Chosen so the exact sum of the five f32 values is tiny but nonzero.
+		const exact = TERMS.reduce( ( a, v ) => a + Math.fround( v ), 0 );
+
+		const out = tsl_array_n.arrayN( 'float', [ 2 ] );
+
+		tsl_array_n.kernel( [ 1 ], ( _thread ) => {
+
+			let plain = float( 0 );
+			for ( const v of TERMS ) plain = plain.add( float( v ) );
+
+			let hi = float( 0 ), lo = float( 0 );
+			for ( const v of TERMS ) [ hi, lo ] = dsAddFloat( hi, lo, float( v ) );
+
+			out( 0 ).assign( plain );
+			out( 1 ).assign( dsToFloat( hi, lo ) );
+
+		} )();
+
+		const [ plainSum, dsSum ] = await out.toArray();
+		const plainError = Math.abs( plainSum - exact );
+		const dsError = Math.abs( dsSum - exact );
+
+		// f32 accumulation of terms this size carries ~1e-4 of error; the
+		// double-single form should be at or near zero. If the compiler had
+		// reassociated the error-free transformations away, the two columns
+		// would agree.
+		const dsWorks = dsError < plainError / 100;
+
+		const line = document.createElement( 'div' );
+		line.className = dsWorks ? 'good' : 'warn';
+		line.style.marginTop = '0.75rem';
+		line.textContent =
+			( dsWorks ? '✓ ' : '✗ ' ) +
+			'double-single arithmetic survives the shader compiler — ' +
+			`five terms ~550 summing to ${ exact.toExponential( 3 ) }: ` +
+			`plain f32 error ${ plainError.toExponential( 2 ) }, ` +
+			`double-single error ${ dsError.toExponential( 2 ) }` +
+			( dsWorks
+				? '. src/linalg/double_single.js is sound here.'
+				: '. The two agree, so the error-free transformations were optimised away and src/linalg/double_single.js is UNSOUND on this device.' );
+
+		verdictEl.parentNode.insertBefore( line, verdictEl.nextSibling );
+
+	}
 
 } catch ( error ) {
 

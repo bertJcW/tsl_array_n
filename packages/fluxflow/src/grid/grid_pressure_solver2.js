@@ -701,6 +701,13 @@ export function createGridPressureSolver2( {
 			// count is the number every performance question here turns out
 			// to depend on.
 			diagnostics.iterations = cg.state ? cg.state.iterations : null;
+			// The residual the solve actually reached. Exposed because
+			// "converged" is a boolean and the number behind it is what
+			// says whether a solve got close or merely stopped -- and, as
+			// the drift investigation in docs/long-run-stability.md found,
+			// whether the solver's own residual agrees with a true
+			// b - Ax recomputed independently.
+			diagnostics.residual = cg.state ? Math.sqrt( Math.abs( cg.state.residualSquared ) ) : null;
 			diagnostics.stoppedBy = cg.state ? cg.state.stoppedBy : null;
 
 			// *** Measurement instrument, not a feature ***
