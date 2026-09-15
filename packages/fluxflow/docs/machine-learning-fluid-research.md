@@ -533,31 +533,40 @@ the inner loop.
 **3. TensorFlow.js WebGPU backend / WebNN.** Same trade as 2 with less
 control. Mentioned for completeness.
 
-### The cost estimate, and why it should be measured before it is believed
+### The shape, now built rather than estimated
 
-A concrete candidate shape: a small U-Net on the 64×64 grid — 64×64×16,
-32×32×32, 16×16×64 down and back, 3×3 convolutions, two per level per
-side. That is **~12 convolutions ≈ 12 dispatches**, batchable into 1–2
-submissions, with **zero host round trips**.
+`src/ml/` implements this, and these numbers come from the built network
+(`createUNet2({ shape: [64,64], channels: 16, levels: 3 })`), not from
+arithmetic on the back of an envelope:
 
-Arithmetic, per level per convolution: 4096 cells × 16×16×9 MACs ≈ 19
-MFLOP, and the same figure at each level by construction (the channel
-count squares as the cell count quarters). Twelve of those is **≈ 0.2
-GFLOP per solve**. Against a current GPU compute time of 0.21–0.40 ms per
-*whole frame*, a few tenths of a millisecond of added GPU work is
-plausible — and it would be trading against ~1416 dispatches per step, a
-data-dependent iteration count, and the four-plus host round trips at
-1.1 ms each that make up the untargeted 40%.
+| | |
+| --- | --- |
+| dispatches per forward pass | **12** — 8 convolutions, 2 restrictions, 2 upsamples |
+| submissions per forward pass | **1**, through `tsl_array_n.createBatch` |
+| host round trips | **0** |
+| parameters | 14,225 = **55.6 KiB** float32 |
+| arithmetic | 25.95 MMAC = **51.9 MFLOP** per pass |
 
-**Every number in that paragraph is an estimate, and the error bars are
-wide.** At 64×64 the tensors are small enough that a naive TSL convolution
-may be latency-bound rather than arithmetic-bound, and the estimate says
-nothing about that. This repo's own history is a list of confidently
-predicted wins that measured flat or negative (the GPU-resident alpha/beta
-rounds; the `mg-clear` fold; damped Jacobi), so the estimate is not the
-evidence.
+The first draft of this section estimated "≈ 0.2 GFLOP per solve" from a
+channel-doubling U-Net. The built network is **four times cheaper** than
+that, because its channel width is constant across levels — a choice made
+to avoid the projection convolutions that channel-doubling forces at every
+level change, which would have cost four more dispatches. The dispatch
+estimate ("~10–20") held.
 
-The measurement is cheap, and it should come first — see shortlist item 1.
+Against that: ~1416 dispatches per solver step, a data-dependent iteration
+count, and the four-plus host round trips at 1.1 ms each that make up the
+untargeted 40%.
+
+**What is still entirely unknown is the wall-clock time.** 51.9 MFLOP is
+nothing in isolation, but at 64×64 the tensors are small enough that a
+naive TSL convolution may be latency-bound rather than arithmetic-bound,
+and none of the counts above say anything about that. This repo's own
+history is a list of confidently predicted wins that measured flat or
+negative (the GPU-resident alpha/beta rounds; the `mg-clear` fold; damped
+Jacobi), so a parameter count is not evidence about speed.
+
+The probe that settles it is built and unrun — see shortlist item 1.
 
 ---
 
@@ -567,20 +576,45 @@ Ordered by evidence-per-unit-risk, not by how interesting the paper is.
 
 ### 1. The null-net probe — measurement, not machine learning
 
-Build the candidate network shape in TSL with **random weights**, wire it
-into example 15 in place of the pressure solve, and measure it in the
-existing paired harness. It computes nothing meaningful; that is the
-point. It prices the *shape*.
+**Built. `src/ml/` and `examples/31-null-net-probe/`. Not yet run — it
+needs real WebGPU hardware.**
 
-Acceptance criteria are the ones this repo already uses, stated per
-*step* rather than per frame: dispatches/step, `renderer.compute()` calls/step,
-GPU compute time/step, ms/step, medians of 24 with state restored before
-every arm.
+The candidate shape exists now as actual TSL kernels: convolution,
+full-weighting restriction, bilinear upsample, and a U-Net composing them,
+with **random weights**. It computes nonsense, which is the point — what is
+being priced is the shape, and a shape can be priced before any training
+run exists.
 
-If a 12-dispatch feed-forward net does not measurably beat ~1416
-dispatches per step on this machine, **every direction in family A is dead
-and nothing was spent finding out.** If it does, the rest of the ladder has a
-budget to spend. No training run should happen before this number exists.
+What is already exact, computed from the built network rather than
+estimated:
+
+| | `createUNet2({ shape: [64,64], channels: 16, levels: 3 })` |
+| --- | --- |
+| dispatches per forward pass | **12** |
+| submissions per forward pass | **1** (batched through `tsl_array_n.createBatch`) |
+| host round trips | **0** |
+| parameters | 14,225 = **55.6 KiB** float32 |
+| arithmetic | 25.95 MMAC = **51.9 MFLOP** per pass |
+
+That last row retires the estimate this document carried earlier. The
+first draft guessed "~0.2 GFLOP"; the built network is 51.9 MFLOP, four
+times less, because the channel width is constant across levels rather
+than doubling. The dispatch estimate ("~10–20") held.
+
+The probe page reports three things, in order of how much they decide:
+**correctness** (the GPU pass against a float64 JavaScript reference on the
+same weights — without which the timing is the timing of an unknown
+computation), **cost** (dispatches, submissions, encode time and GPU time
+per pass, batched and unbatched), and **the comparison** (the same
+measurements for one MGPCG solve on the same grid, run with
+`grid_pressure_solver2.js`'s shipped defaults rather than `solve()`'s own
+slower parameter defaults — the perf document records example 15 springing
+exactly that trap).
+
+Nothing about speed is known yet. When the page is run, its numbers replace
+the estimates in Part 0 and Part 2, and the acceptance threshold is stated
+on the page: **under 2× is a negative result**, because a trained network
+has to buy accuracy with its speed and family A gives accuracy up.
 
 ### 2. Re-measure the frame, because Part 0's percentage is stale
 

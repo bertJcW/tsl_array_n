@@ -915,6 +915,46 @@ Verified with 8 vitest structural tests (mirroring the CG solvers' style, includ
 - `examples/06-multigrid-preconditioner/` (standalone, no CG wrapper) needs no atomics at all, so it doesn't hit this project's atomic/WebGL2-fallback wall -- but the GPU dispatch pattern didn't reliably match the proven-correct JS reference above in this dev sandbox, most likely another instance of this project's well-established WebGL2-fallback unreliability (a different specific mechanism than the atomics one). **Run by the user on real WebGPU hardware**, the residual ratio after one V-cycle is `0.0256` for `numberOfLevels:1` (plain relax) versus `0.0135` for `numberOfLevels:4` (the full V-cycle) -- the multi-level version genuinely outperforming plain relaxation on this low-frequency test case confirms `restrict()`/`correct()`/the recursion itself are working, not just `relax()`.
 - `examples/07-multigrid-preconditioned-cg/` (the full pipeline, a real 2D Poisson problem with a manufactured known solution rather than the 1D diagonal toy case) hits the atomic wall the same way `examples/04-`/`05-` do in this sandbox. Running it here also surfaced a genuine bug in the example's *own* verification code, worth remembering generally: `x.toArray()` came back empty (0 elements) in this sandbox, and `[].every(...)` is vacuously `true` in JavaScript regardless of the predicate -- the original check silently reported a false "converged" pass instead of the empty-readback failure it actually was. Fixed here (and defensively in `examples/04-`/`05-` too, which had the same latent issue) by checking the array length before `.every()`. **Run by the user on real WebGPU hardware, it converges to the expected exact answer** (`succeeded=true`, max deviation from `xExpected` under `1e-2`) -- the full pipeline (GPU-atomic CG reduction + multigrid preconditioner together) is confirmed correct, not just each piece in isolation.
 
+## Current state: `ml`
+
+```js
+import { ml } from 'fluxflow';
+```
+
+Neural-network **inference** as TSL compute kernels, on `tsl_array_n` arrays. Convolution, restriction, bilinear upsampling, the field/feature-map joins, a small U-Net that composes them, and a plain-JS float64 reference implementation of every one of them. `docs/machine-learning-fluid-research.md` is the survey this exists to serve; `examples/31-null-net-probe/` is the measurement it opens with.
+
+**There is no training here, and nothing in this module is trained.** `randomize()` fills the network with seeded He-normal weights that compute nonsense at realistic magnitudes, which is exactly what a *cost* measurement needs; `loadWeights()` is the seam for weights trained offline, and `fromPyTorchConv2dWeights()` converts PyTorch's `[outC, inC, kH, kW]` layout into this library's `[inC, kw, kh, outC]`.
+
+### Why hand-written kernels rather than ONNX Runtime Web
+
+ORT Web's WebGPU backend is mature and would have saved writing any of this. It is the right choice for a **post-process** and the wrong one for anything **inside the solver loop**, because a second inference runtime is a second device and buffer world: even with `Tensor.fromGpuBuffer()` and IO binding (which are real, and do avoid the CPU copy) it is a separate scheduler's submissions interleaved with three.js's, with no way to put a convolution and a Laplacian into the same command buffer. These kernels are ordinary `tsl_array_n` kernels, so they read and write the arrays the solver already owns, they go into `tsl_array_n.createBatch()` exactly like the V-cycle's do -- **a whole forward pass is one submission** -- and `profiling.js` counts them by label for free.
+
+### Two design choices that are not the machine-learning defaults
+
+**Padding is clamp-to-edge, not zero.** A zero ring around the domain asserts that the field is zero just outside it; here the domain edge is a real physical boundary carrying its own condition, never a zero. `padding: 'zero'` exists for parity with offline training code that assumed it -- train and infer with the same one.
+
+**Downsampling is full-weighting restriction, not average pooling.** Paired with the bilinear upsample, average pooling is *not* adjoint; the 4-tap filter is, and it is the same pair `multigrid.js` uses (`R = P^T / 4` in 2D, as the perf investigation measured). A symmetric transfer pair is what keeps this shape usable as a CG **preconditioner** rather than only as a filter, and `multigrid.js`'s own comments record the confirmed-on-hardware divergence bug this codebase already paid for when a V-cycle was not symmetric. It costs one dispatch either way. `test/ml.test.js` checks the adjointness directly rather than trusting it.
+
+### Determinism
+
+No atomics anywhere in the module: every kernel writes each output element from exactly one thread. A forward pass is bit-identical run to run, which the CG solver next door is not (`linalg.js`'s lane-partitioned float32 dot products vary with reduction order). A network in the loop does not add to the "same input, different outcome" noise this port's stability testing kept hitting.
+
+### The candidate shape, as built
+
+`createUNet2({ shape: [64, 64], channels: 16, levels: 3 })` -- constant channel width across levels (so skips add rather than concatenate, and no projection convolutions are needed), additive skips folded into the upsample dispatch, and the multigrid transfer pair for down/up:
+
+| | |
+|---|---|
+| dispatches per forward pass | **12** (8 convolutions, 2 restrictions, 2 upsamples) |
+| submissions per forward pass | **1** (batched) |
+| host round trips | **0** |
+| parameters | 14,225 = **55.6 KiB** as float32 |
+| arithmetic | 25.95 MMAC = **51.9 MFLOP** per pass |
+
+Against ~1416 dispatches, a data-dependent iteration count and several 1.1 ms host round trips for one MGPCG solver step on the same grid. Whether that translates into wall-clock time is what `examples/31-null-net-probe/` measures, and it needs real WebGPU hardware -- **it has not been run yet.** The counts above are exact (computed from the built network); everything about speed is still unmeasured.
+
+Verified with 33 vitest tests: the reference implementations numerically (delta kernels, partition of unity, clamp-versus-zero padding at the boundary, bias-then-activation ordering, channel summation), the transfer pair's adjointness on square and non-square grids, the PyTorch layout conversion element by element, and the U-Net's structure, cost accounting and weight-loading validation. The GPU kernels are covered structurally, per this package's established convention -- `examples/31-null-net-probe/` is what closes the loop on hardware, by running the GPU pass and the float64 reference on the same weights and reporting the difference.
+
 ## Current state: `profiling`
 
 ### `profiling.js` -- dispatches, submissions and GPU time
