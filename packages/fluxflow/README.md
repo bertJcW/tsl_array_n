@@ -44,6 +44,15 @@ lives in `docs/`.
   > submissions -- the command buffers, not the kernels -- that carry about a
   > third of the frame. The profiler's own figure of 502 was an undercount,
   > for the reason given in the profiling section above.
+- [`docs/machine-learning-fluid-research.md`](docs/machine-learning-fluid-research.md)
+  -- where machine learning can buy efficiency or quality in a fluid
+  solver, surveyed by *what the network replaces*, then filtered through
+  this package's own measurements. The filter is the point: the GPU is
+  idle for ~99% of the frame here, so ML that makes the arithmetic cheaper
+  is worth ~1%, and the only ML worth having is ML that replaces an
+  iterative, host-synchronised loop with a fixed-length feed-forward one.
+  Ends with a ranked shortlist whose first item is a measurement, not a
+  model.
 - [`docs/two-phase-bubbles-research.md`](docs/two-phase-bubbles-research.md)
   -- the earlier bubble research, archived.
 
