@@ -802,3 +802,171 @@ have said the same thing sooner.
   although deleted, the grid table's missing rows, examples 22/27/28/29 absent
   from the README index, and the perf document's own top Status (annotated in
   that file, not rewritten).
+- **`examples/28-drop-into-pool/`'s particle rendering: a GPU point-sprite
+  path was scoped, not built.** `draw()` reads particle positions and
+  concentration back to the CPU every frame and, until 2026-09-16, filled
+  one `arc()` + `fill()` per particle in Canvas2D -- with ~18,800 particles,
+  fill() (not arc()) was the expensive step. Shipped fix: particles are
+  bucketed into 32 quantized-colour groups and each bucket is filled as one
+  compound path (`moveTo` to each disc's own start point before its `arc()`,
+  so discs stay independent subpaths instead of being stitched together),
+  collapsing tens of thousands of fill() calls into a few dozen.
+
+  A further step -- removing the CPU readback and Canvas2D entirely by
+  rendering particles as GPU sprites reading straight from
+  `flip.positions`/`flip.concentration` -- was investigated and shelved
+  rather than built. Findings, so a future attempt does not have to
+  re-derive them: `THREE.Points` is capped at 1px in WebGPU (three.js's own
+  documented limit), too small for this scene's dot size, so the working
+  path is `THREE.Sprite` with `sprite.count = maxParticles` (confirmed in
+  `RenderObject.js`: `object.count` drives `instanceCount` for an instanced
+  draw) and a `PointsNodeMaterial` whose `positionNode`/`colorNode` read
+  `flip.positions.node.element(instanceIndex)` /
+  `flip.concentration.node.element(instanceIndex)` directly -- NOT
+  `.toAttribute()`, the method `SpriteNodeMaterial`'s own doc comment
+  recommends: it has no implementation anywhere in this three.js version
+  (`^0.185.1` at the time of checking), a stale comment. A circular dot
+  needs a procedural fragment discard against `uv()` distance from centre,
+  since Sprite has no built-in shape and this project adds no texture
+  assets.
+
+  Shelved on cost/benefit, not feasibility, against the Canvas2D baseline
+  measured at the time (~18 ms/step pressure solve against ~4.6 ms for the
+  readback + draw this would remove, a ceiling of roughly 20%). That
+  baseline no longer exists: example 28 was reworked shortly afterward to
+  render `flip.cellConcentration` into a `StorageTexture` and display it on
+  a plane (see the entry right below this one) rather than either
+  per-particle Canvas2D or this shelved Sprite path -- CPU readback and
+  Canvas2D are gone from this example either way, achieved by a third,
+  simpler route than the one recorded above. The Sprite-instancing API
+  findings above remain accurate and are kept for whichever future example
+  actually wants discrete per-particle GPU sprites (this texture-based
+  route only ever produces a smooth field, not distinguishable dots).
+- **`examples/28-drop-into-pool/`'s GPU-texture rendering: a stray dye
+  particle can stop sinking, and it is a real, understood characteristic of
+  the density-coupling design, not a bug in it.** Found running the scene
+  6000+ steps at `?particlesPerCellAxis=8` and tracking specific particle
+  ids across hundreds of further steps directly against the raw
+  `positions`/`velocities` buffers (not the render): one dyed particle sat
+  at y=73.79 -> 73.58 over 500 steps (velocity components in the +/-0.06
+  range throughout, not the +/-3 to +/-20 range a particle genuinely
+  mid-arc in the Worthington jet shows) while the bulk of the dye, tracked
+  the same way, sank steadily from a mean height of 61 to 3 over the same
+  run. A first hypothesis -- an isolated droplet with no nearby fluid to
+  press against -- was checked directly and ruled out: a 7x7-cell
+  neighbourhood dump around the stuck particle's cell showed `fluidMask`
+  entirely 1 (a flood fill capped at 200 cells filled the cap, so this is
+  deep inside a large connected body, not a lone island) and a smooth,
+  gradient-free local pressure field.
+
+  The real cause is in `cellDensity`: `computeBetaU`/`computeBetaV`, and
+  therefore `applyReducedGravityU`/`applyReducedGravityV` (the density-
+  coupling force that makes dye sink at all -- see `dirichlet()`'s own
+  header comment for why gravity is not applied any more directly than
+  this), are driven by `cellConcentration`, the PER-CELL AVERAGE of every
+  particle's concentration in that cell -- not by any individual particle's
+  own value. At `particlesPerCellAxis=8` a cell holds 64 particles; the
+  neighbourhood dump read `cellDensity` at ~1.004-1.010 throughout, i.e.
+  essentially ambient (1.0), not the dyed component's (1.25) -- meaning the
+  other ~63 particles sharing that cell with the one stray dyed particle
+  are plain water. The colour ("is this particle dye") is carried exactly,
+  per particle, Lagrangian; the force that makes dye sink is carried
+  approximately, per cell, Eulerian. A dyed particle that separates from
+  the dyed bulk -- which several hundred out of tens of thousands will,
+  simply from being caught in the splash -- stops contributing enough to
+  its cell's average to register as "denser than water" there, so the one
+  force that pulls dye down stops seeing it as dye at all. It is not stuck
+  from a broken force; it is drifting on whatever residual velocity the
+  now-becalmed local water has, same as any water particle there would.
+
+  Not fixed, and not attempted: doing so would mean deriving the sinking
+  force from something closer to each particle's own concentration rather
+  than a cell average -- a real redesign of the density-coupling mechanism
+  (`grid_flip_solver2.js`'s variable-density section), not a local patch,
+  and this file's own header comment already documents why the cell-average
+  formulation was chosen (keeping the pressure operator's face-symmetric
+  structure). Worth revisiting if a scene's whole point is dye that
+  visibly, individually sinks (this one's point is the bulk plume, where
+  the effect already works); the practical symptom is a handful of
+  slow-drifting stray droplets, most visible at high particle density,
+  where the current shipped fix is simply to not chase it.
+- **`linalg.js`'s `fuseChunkIntoOneSubmission`: built, correct, never
+  measured clearly better, shipped off by default.** The per-iteration
+  V-cycle fusion
+  (`fuseVcycleIntoIteration`, on by default) was built on a measurement --
+  a chunk-read's cost tracks submission count almost linearly, independent
+  of what each submission carries -- and it held up. The obvious next step
+  under the same premise was to collapse a whole chunk's worth of
+  iterations (still one submission per iteration even after that fusion)
+  into a single submission too, the same move one level up. It was built:
+  a lazily-cached mega-batch, keyed by exact chunk size, concatenating N
+  copies of one iteration's dispatcher sequence. It is correct -- bit-
+  identical on example 15 over 150 steps, 298-300/300 converged with zero
+  rejections and zero non-finite pressures across examples 15/20/28 over
+  300 steps each -- and it is not a win: paired, interleaved, example 15,
+  submissionsPerFrame fell from ~16-20 to ~3 exactly as intended, and
+  wallMsPerFrame rose from ~5.1 ms to ~7.6 ms, about **1.5x slower**.
+
+  Two follow-up rounds narrowed, but did not finish, the "why".
+
+  **Ruled out, both checked directly rather than assumed:**
+  - *Cache churn* -- a scene's chunk size can drift frame to frame, so the
+    mega-batch cache could in principle miss constantly and pay a rebuild
+    every frame. Instrumented and re-run: 200 frames of a settled scene
+    needed only 12 distinct sizes, a 94% hit rate.
+  - *GPU execution time* -- re-measured with `?profile=1` (real WebGPU
+    timestamp queries, this machine's adapter supports them): GPU compute
+    was 0.044-0.045 ms either way, identical to three significant figures
+    whether the chunk went out as ~15 submissions or 1. The GPU is not
+    doing more work, or taking longer to do the same work, when the
+    dispatches arrive in one pass instead of several.
+
+  **Also ruled out, and this one closes the question rather than narrowing
+  it:** `?profile=1` also disables the prepared-dispatch fast path (see
+  `optimisation-agent-guide.md`), which is the code path a real run
+  actually uses -- so the clean GPU-timestamp comparison above was
+  necessarily taken on the *slow* path, where fusion still saves the
+  expected amount of CPU encoding time (fewer `renderer.compute()` calls).
+  Re-measuring the fast path directly (no `?profile=1`, so prepared-dispatch
+  stays active) gave inconsistent whole-solve results across attempts: one
+  4-round session read a clean 1.5x regression, a second read fusion as
+  slightly *faster*, a third -- 10 rounds, both orders, 80 steps each --
+  landed back on a regression, but a smaller and noisier one (mean 7.79 ms
+  fused against 7.29 ms unfused, ~1.07x, against session-wide step times
+  that had themselves drifted from ~5 ms to ~7-8 ms between attempts, this
+  document's own well-established machine-drift pattern). That
+  inconsistency is itself informative, and the direct test settles it:
+  `prepared_dispatch.js`'s own `encode()` -- the fast path's per-dispatch
+  loop -- was benchmarked directly, isolated from the solve entirely (ten
+  distinct real kernels over a 64x128 field, cycled to build lists of
+  50/100/200/400/750/1500 dispatches, timing only the encode+submit call,
+  no GPU wait, both ascending and descending size order to catch drift).
+  Per-dispatch cost held flat at 0.24-0.73 us across the whole range with
+  no upward trend -- if anything, very slightly cheaper per dispatch at
+  1500 than at 50, the opposite of what would explain a regression from
+  fusing more dispatches into one call.
+
+  So: not GPU execution (identical timestamps), not cache churn (94% hit
+  rate), and now not the fast path's own encoding loop either (flat
+  per-dispatch cost from 50 to 1500). Every mechanism the fusion's own
+  design touches has been checked and cleared. What remains is that the
+  whole-solve measurements disagreed with each other more than any of them
+  disagreed with zero -- two of three read a regression, one read a small
+  win, and the magnitude ranged 1.5x down to a wash across attempts on a
+  machine already on record for measurement noise of similar size (a 27%
+  spread on three identical repeats, elsewhere in this project's own
+  history). The honest conclusion is that this specific regression was
+  never actually isolated from that noise floor, not that a real, uncaptured
+  cost was found and left unexplained. `fuseChunkIntoOneSubmission` stays
+  off by default on the strength of "never measured better," which is
+  reason enough not to flip a default, but the question this section's
+  title asks -- why is it slower -- does not currently have an answer,
+  because the evidence no longer clearly says it is.
+
+  Shipped as `settings.fuseChunkIntoOneSubmission`, off by default,
+  mechanism kept rather than deleted -- same convention as every other
+  measured-and-rejected change in this file's own history. The safety
+  argument it rests on (concatenating N copies of a frozen-on-convergence
+  iteration and running them in one submission is equivalent to N separate
+  calls) is sound on its own and does not need revisiting; only the
+  performance premise does.

@@ -73,6 +73,9 @@
 //   ?height=0.92     drop centre height as a fraction of the tank
 //   ?pool=0.75       pool depth as a fraction of the tank
 //   ?resX=64 ?resY=96  grid resolution
+//   ?particlesPerCellAxis=2  particles per cell, per axis (4 per cell at
+//                    the default of 2) -- higher raises the concentration
+//                    field's own resolution independent of the grid
 //   ?targetDt=0.016  per-frame simulated time
 
 // Measurement handle only: `window.__fluxflowProbe` exposes the renderer and the
@@ -81,10 +84,11 @@
 // single run. Nothing here changes what the scene does.
 
 import * as tsl_array_n from 'tsl_array_n';
-import { grid } from 'fluxflow';
+import { grid, float_guards } from 'fluxflow';
+import { texture, uv, uvec2, vec3, vec4, clamp, float, int, atomicAdd, textureStore } from 'three/tsl';
+import { Scene, OrthographicCamera, PlaneGeometry, Mesh, StorageTexture, MeshBasicNodeMaterial } from 'three/webgpu';
 
 const canvas = document.querySelector( '#out' );
-const vorticityCanvas = document.querySelector( '#vorticity' );
 const statusEl = document.querySelector( '#status' );
 const perfEl = document.querySelector( '#perf' );
 const densityRatioInput = document.querySelector( '#densityRatio' );
@@ -185,8 +189,12 @@ try {
 	// straight to the WebGPURenderer constructor.
 	const profileEnabled = new URLSearchParams( location.search ).get( 'profile' ) === '1';
 
+	// This example's own dye visualisation renders through this same
+	// renderer (see "GPU-native rendering" below) rather than through a
+	// separate Canvas2D context, so the renderer's canvas has to be the one
+	// actually on the page.
 	const renderer = await tsl_array_n.init( {
-		canvas: document.createElement( 'canvas' ),
+		canvas,
 		allowFallback: true,
 		trackTimestamp: profileEnabled
 	} );
@@ -197,11 +205,13 @@ try {
 	// Seed the whole domain and keep the two regions wanted, the same
 	// carve-out approach example 26 uses -- computeFlipBoxSeed fills a
 	// rectangle, and anything shaped differently is a filter on top of it.
+	const particlesPerCellAxis = Number( params.get( 'particlesPerCellAxis' ) ?? 2 );
+
 	const seed = grid.computeFlipBoxSeed( {
 		boxMin: [ 0, 0 ],
 		boxMax: [ NX, NY ],
 		gridSpacingX: 1, gridSpacingY: 1,
-		particlesPerCellAxis: 2
+		particlesPerCellAxis
 	} );
 
 	const dropCenterX = NX * 0.5;
@@ -272,6 +282,13 @@ try {
 		// slider says. Equal densities is the control case, and the scene is
 		// deliberately shipped slightly away from it so the plume is the first
 		// thing a visitor sees.
+		//
+		// This is a per-CELL-average force (see grid_flip_solver2.js's own
+		// cellDensity), not a per-particle one -- a stray dyed particle that
+		// separates from the bulk plume, sharing its cell mostly with plain
+		// water, stops registering as "denser" there and all but stops
+		// sinking. Confirmed, not fixed -- see docs/project-history.md's own
+		// Open items entry for this example for the investigation.
 		ambientDensity: 1,
 		componentDensity: densityRatioUniform(),
 		// Lower than the 0.02 default. Damping is there to keep a FLIP
@@ -329,243 +346,118 @@ try {
 	canvas.style.width = `${ NX * ( 560 / NY ) }px`;
 	canvas.style.height = '560px';
 
-	vorticityCanvas.width = canvas.width;
-	vorticityCanvas.height = canvas.height;
-	vorticityCanvas.style.width = canvas.style.width;
-	vorticityCanvas.style.height = canvas.style.height;
+	// tsl_array_n.init() sized the renderer's own targets (including its
+	// depth buffer) from window.innerWidth/innerHeight, the right default
+	// for a detached compute-only canvas but wrong now that this canvas is
+	// the one actually on the page -- its internal buffers have to match
+	// the canvas's own backing-store resolution, not the window's. `false`
+	// so it does not also overwrite the CSS display size just set above.
+	renderer.setSize( canvas.width, canvas.height, false );
 
-	const ctx = canvas.getContext( '2d' );
-	const scale = PIXELS_PER_CELL;
-	const RADIUS = scale * 0.5 * 1.05; // slight overlap, so the bulk reads as liquid
+	// *** GPU-native rendering: a texture, not per-particle Canvas2D draws ***
+	//
+	// Two earlier directions were tried and shelved first -- see
+	// docs/project-history.md's Open items entry for this example for the
+	// full record (per-particle Canvas2D fill() cost, then colour-bucketed
+	// batching of it, then a scoped-but-not-built GPU sprite-instancing
+	// path). This is the third, and the one that shipped: instead of
+	// drawing individual particles at all, `flip.cellConcentration` --
+	// already computed every step for the density-coupling force, one
+	// value per grid cell -- is written straight into a small GPU texture
+	// and a plane samples it. No CPU readback, no Canvas2D, no per-particle
+	// anything; the picture this produces is a smooth field rather than
+	// discrete dots, which is a real, deliberate look change the user
+	// confirmed is fine here.
+	//
+	// The texture is deliberately grid-resolution (NX x NY), not
+	// canvas-resolution: StorageTexture defaults to LinearFilter, so the
+	// GPU's own bilinear sampling does the upscaling to canvas size for
+	// free, which is exactly the soft/abstract look asked for -- no blur
+	// pass to write.
+	const dyeTexture = new StorageTexture( NX, NY );
 
-	function clamp01( v ) {
+	// Same ramp the old per-particle draw used: rgb(38+t*214, 96+t*42,
+	// 140-t*78), deep water to hot dye, normalised to TSL's [0,1] colour
+	// space.
+	function dyeColorNode( c ) {
 
-		return Math.min( 1, Math.max( 0, v ) );
+		const t = clamp( c, 0, 1 );
+
+		return vec3(
+			float( 38 / 255 ).add( t.mul( 214 / 255 ) ),
+			float( 96 / 255 ).add( t.mul( 42 / 255 ) ),
+			float( 140 / 255 ).sub( t.mul( 78 / 255 ) )
+		);
 
 	}
 
-	// Deep water to hot dye. Two hues far apart so partial mixing reads as an
-	// obvious intermediate rather than as noise, and both bright enough to
-	// stay legible against the near-black background.
-	function dyeColor( c ) {
+	// Background colour for cells with no fluid in them at all -- without
+	// this every cell reads as pool water (concentration 0 is still a
+	// valid, coloured value), so the air above the water would render as
+	// water instead of the near-black background the old Canvas2D fillRect
+	// gave it. flip.fluidMask is the same field markFluidCellsKernel
+	// already refreshes every step for exactly this fluid/air distinction.
+	const BACKGROUND = vec3( 6 / 255, 8 / 255, 12 / 255 );
 
-		const t = clamp01( c );
-		return `rgb(${ Math.round( 38 + t * 214 ) },${ Math.round( 96 + t * 42 ) },${ Math.round( 140 - t * 78 ) })`;
+	const writeDyeTexture = tsl_array_n.kernel( [ NX, NY ], ( i, j ) => {
 
-	}
+		const isFluid = flip.fluidMask( i, j ).greaterThan( 0.5 );
+		const color = isFluid.select( dyeColorNode( flip.cellConcentration( i, j ) ), BACKGROUND );
 
-	// ------------------------------------------------- the vorticity panel
-	//
-	// *** Why this is worth a second canvas ***
-	//
-	// This page's own description says the mushroom's shape "comes from the
-	// impact -- the drop deposits vorticity and the vorticity rolls the dye
-	// up". The dye panel shows the consequence; it does not show the cause.
-	// Vorticity is what is actually being conserved and transported here, so
-	// the ring is visible in it a long time before the dye has wrapped
-	// around, and it stays visible after the dye has smeared out.
-	//
-	// *** Where it is evaluated ***
-	//
-	// On a staggered MAC grid, curl in 2D is naturally a *corner* quantity:
-	// the four faces around a node are exactly the four samples the two
-	// derivatives need, so nothing has to be interpolated first.
-	//
-	//     u lives at (i, j+1/2)  ->  index i + (NX+1) * j
-	//     v lives at (i+1/2, j)  ->  index i + NX * j
-	//
-	//     omega(i,j) = ( v(i+1/2,j) - v(i-1/2,j) ) / h
-	//                - ( u(i,j+1/2) - u(i,j-1/2) ) / h
-	//
-	// with h = 1 in this scene's cell units. Interpolating to cell centres
-	// instead would blur exactly the thin shear layer that is the whole
-	// point of looking.
-	const vorticity = new Float32Array( ( NX + 1 ) * ( NY + 1 ) );
+		textureStore( dyeTexture, uvec2( i, j ), vec4( color, 1 ) ).toWriteOnly();
 
-	function computeVorticity( uData, vData ) {
+	} );
 
-		const uStride = NX + 1;
+	// A flat scene: one textured plane, one orthographic camera spanning
+	// exactly the grid's own coordinates (0..NX, 0..NY) so no separate
+	// pixel<->cell scale factor is needed anywhere in this file the way the
+	// Canvas2D version needed `scale`.
+	const scene = new Scene();
+	const camera = new OrthographicCamera( 0, NX, NY, 0, -1, 1 );
 
-		for ( let j = 1; j < NY; j ++ ) {
+	const dyeMaterial = new MeshBasicNodeMaterial();
+	dyeMaterial.colorNode = texture( dyeTexture, uv() );
 
-			for ( let i = 1; i < NX; i ++ ) {
+	const dyePlane = new Mesh( new PlaneGeometry( NX, NY ), dyeMaterial );
+	dyePlane.position.set( NX / 2, NY / 2, 0 );
+	scene.add( dyePlane );
 
-				const dvdx = vData[ i + NX * j ] - vData[ ( i - 1 ) + NX * j ];
-				const dudy = uData[ i + uStride * j ] - uData[ i + uStride * ( j - 1 ) ];
+	function draw() {
 
-				vorticity[ i + ( NX + 1 ) * j ] = dvdx - dudy;
-
-			}
-
-		}
-
-		return vorticity;
+		writeDyeTexture();
+		renderer.render( scene, camera );
 
 	}
 
-	// The colour scale tracks the flow instead of being a constant, because
-	// no constant works for both ends of this scene: the impact produces
-	// vorticity a couple of orders of magnitude stronger than the ring that
-	// survives it, and a scale fixed to the impact leaves the interesting
-	// part black. It rises instantly to whatever the current frame needs and
-	// decays slowly, so the impact does not make the next hundred frames
-	// unreadable, and the panel is never renormalising visibly frame to
-	// frame. The floor stops an at-rest field from being amplified into
-	// noise.
+	// *** The NaN guard, without a full per-frame readback ***
 	//
-	// Scaled to a high percentile rather than the maximum. Vorticity here is
-	// concentrated in thin shear layers with a long tail, so the maximum is
-	// one cell and normalising by it puts the entire visible structure in
-	// the bottom few percent of the range -- measured, before this: 96% of
-	// the panel below 0.3% of peak, i.e. black. The percentile lets the
-	// tail clip, which is what clipping is for.
-	const VORTICITY_SCALE_DECAY = 0.985;
-	const VORTICITY_SCALE_FLOOR = 0.05;
-	const VORTICITY_SCALE_PERCENTILE = 0.99;
-	let vorticityScale = VORTICITY_SCALE_FLOOR;
+	// Rendering no longer needs particle data back on the host at all, so
+	// checkForNonFinite can no longer piggyback on a readback draw() was
+	// doing anyway. Same shape as grid_pressure_solver2.js's own circuit
+	// breaker: one atomic count of bad particles, computed on the GPU and
+	// read back as a single int, instead of the whole positions/
+	// concentration arrays. isNonFinite2/isNonFinite come from
+	// float_guards.js rather than a hand-rolled comparison -- see that
+	// file's own header comment for why a NaN check written any other way
+	// is not trustworthy on this hardware.
+	const badParticleAccum = tsl_array_n.array0( 'int' );
+	badParticleAccum.node.toAtomic();
 
-	// *** Log magnitude, not linear, and not a power law either ***
-	//
-	// Measured on this scene mid-run, over the 5985 interior nodes:
-	//
-	//     median 0.0004 | p90 0.199 | p99 1.548 | max 4.502
-	//
-	// Four orders of magnitude between the median and the top. Vorticity
-	// concentrates into thin shear layers and leaves the bulk of the pool
-	// almost irrotational, so any linear ramp -- and any gamma gentle
-	// enough to keep the cores from saturating -- puts nearly the whole
-	// panel at zero. Both were tried: 96% of pixels came back at
-	// background, then 93%.
-	//
-	// So the magnitude is mapped logarithmically over a fixed span below
-	// the scale, and everything quieter than that span is background. Two
-	// decades is what covers this field's actual structure (p90 lands
-	// around the middle of the ramp) without amplifying the near-still
-	// water into texture.
-	const VORTICITY_DECADES = 100;
+	const checkParticlesKernel = tsl_array_n.kernel( [ count ], ( p ) => {
 
-	// Reused across frames so the per-frame percentile costs no allocation.
-	const magnitudes = new Float32Array( ( NX + 1 ) * ( NY + 1 ) );
+		const isBad = float_guards.isNonFinite2( flip.positions( p ) ).or( float_guards.isNonFinite( flip.concentration( p ) ) );
+		atomicAdd( badParticleAccum(), isBad.select( int( 1 ), int( 0 ) ) );
 
-	function percentileMagnitude( field ) {
+	} );
 
-		let n = 0;
+	const badParticleZero = new Int32Array( [ 0 ] );
 
-		for ( let k = 0; k < field.length; k ++ ) {
+	async function countBadParticlesNow() {
 
-			const m = Math.abs( field[ k ] );
-			if ( Number.isFinite( m ) && m > 0 ) magnitudes[ n ++ ] = m;
-
-		}
-
-		if ( n === 0 ) return 0;
-
-		const sorted = magnitudes.subarray( 0, n ).sort();
-
-		return sorted[ Math.min( n - 1, Math.floor( n * VORTICITY_SCALE_PERCENTILE ) ) ];
-
-	}
-
-	const vorticityCtx = vorticityCanvas.getContext( '2d' );
-	const vorticityImage = vorticityCtx.createImageData( NX * PIXELS_PER_CELL, NY * PIXELS_PER_CELL );
-
-	function drawVorticity( uData, vData, fluidData ) {
-
-		const field = computeVorticity( uData, vData );
-
-		const level = percentileMagnitude( field );
-
-		vorticityScale = Math.max( level, vorticityScale * VORTICITY_SCALE_DECAY, VORTICITY_SCALE_FLOOR );
-
-		const pixels = vorticityImage.data;
-		const width = NX * PIXELS_PER_CELL;
-
-		for ( let py = 0; py < NY * PIXELS_PER_CELL; py ++ ) {
-
-			// The canvas has y down, the grid has y up.
-			const gy = NY - 1 - Math.floor( py / PIXELS_PER_CELL );
-
-			for ( let px = 0; px < width; px ++ ) {
-
-				const gx = Math.floor( px / PIXELS_PER_CELL );
-
-				// Cell colour from the mean of its four corners -- the field
-				// is defined on nodes, and showing one arbitrary corner per
-				// cell would shift the whole picture half a cell.
-				const w = 0.25 * (
-					field[ gx + ( NX + 1 ) * gy ] +
-					field[ ( gx + 1 ) + ( NX + 1 ) * gy ] +
-					field[ gx + ( NX + 1 ) * ( gy + 1 ) ] +
-					field[ ( gx + 1 ) + ( NX + 1 ) * ( gy + 1 ) ]
-				);
-
-				const o = ( py * width + px ) * 4;
-
-				// Outside the liquid the velocity field is extrapolated, so
-				// its curl is an artefact of the extrapolation rather than
-				// anything the fluid is doing. Drawn as background.
-				const inFluid = fluidData === null || fluidData[ gx + NX * gy ] > 0.5;
-				const magnitude = inFluid && Number.isFinite( w ) ? Math.abs( w ) : 0;
-				const quiet = vorticityScale / VORTICITY_DECADES;
-
-				// Diverging, through the same near-black the dye panel uses
-				// so the two read as one figure. Signed, because which way
-				// the ring turns is the thing worth seeing.
-				const shaped = magnitude <= quiet
-					? 0
-					: Math.min( 1, Math.log( magnitude / quiet ) / Math.log( VORTICITY_DECADES ) );
-
-				if ( w >= 0 ) {
-
-					pixels[ o ] = 6 + shaped * 249;
-					pixels[ o + 1 ] = 8 + shaped * 114;
-					pixels[ o + 2 ] = 12 + shaped * 54;
-
-				} else {
-
-					pixels[ o ] = 6 + shaped * 58;
-					pixels[ o + 1 ] = 8 + shaped * 148;
-					pixels[ o + 2 ] = 12 + shaped * 243;
-
-				}
-
-				pixels[ o + 3 ] = 255;
-
-			}
-
-		}
-
-		vorticityCtx.putImageData( vorticityImage, 0, 0 );
-
-	}
-
-	function draw( positionsData, concentrationData ) {
-
-		ctx.fillStyle = '#06080c';
-		ctx.fillRect( 0, 0, canvas.width, canvas.height );
-
-		// Dyed particles last, so a thin filament stays visible against the
-		// bulk instead of being painted over by whichever particle happens to
-		// come later in the buffer.
-		for ( const dyed of [ false, true ] ) {
-
-			for ( let p = 0; p < concentrationData.length; p ++ ) {
-
-				const c = concentrationData[ p ];
-				if ( ( c > 0.5 ) !== dyed ) continue;
-
-				ctx.fillStyle = dyeColor( c );
-				ctx.beginPath();
-				ctx.arc(
-					positionsData[ p * 2 ] * scale,
-					( NY - positionsData[ p * 2 + 1 ] ) * scale,
-					RADIUS, 0, Math.PI * 2
-				);
-				ctx.fill();
-
-			}
-
-		}
+		badParticleAccum.fromArray( badParticleZero );
+		checkParticlesKernel();
+		const [ badCount ] = await badParticleAccum.toArray();
+		return badCount;
 
 	}
 
@@ -616,20 +508,17 @@ try {
 	let frame = 0;
 	let nanDetected = false;
 
-	function checkForNonFinite( data, frameNumber ) {
+	async function checkForNonFinite( frameNumber ) {
 
 		if ( nanDetected ) return;
 
-		for ( let i = 0; i < data.length; i ++ ) {
+		const badCount = await countBadParticlesNow();
 
-			if ( ! Number.isFinite( data[ i ] ) ) {
+		if ( badCount > 0 ) {
 
-				nanDetected = true;
-				status( `non-finite value at frame ${ frameNumber } (index ${ i }, value ${ data[ i ] })`, true );
-				console.error( `fluxflow drop-into-pool: non-finite at frame ${ frameNumber }, index ${ i }:`, data[ i ] );
-				return;
-
-			}
+			nanDetected = true;
+			status( `non-finite value at frame ${ frameNumber } (${ badCount } particle${ badCount === 1 ? '' : 's' })`, true );
+			console.error( `fluxflow drop-into-pool: ${ badCount } non-finite particle(s) at frame ${ frameNumber }` );
 
 		}
 
@@ -664,23 +553,22 @@ try {
 
 		if ( ! nanDetected && frame % DRAW_INTERVAL === 0 ) {
 
-			// One Promise.all rather than sequential awaits: these are
-			// independent readbacks, and each one waits on the queue in
-			// front of it, so issuing them together is the difference
-			// between one stall and four.
-			const [ positionsData, concentrationData, uData, vData, fluidData ] = await Promise.all( [
-				flip.positions.toArray(),
-				flip.concentration.toArray(),
-				velocityGrid.dataU.toArray(),
-				velocityGrid.dataV.toArray(),
-				flip.fluidMask ? flip.fluidMask.toArray() : Promise.resolve( null )
-			] );
-
-			checkForNonFinite( positionsData, frame );
+			// The NaN guard rides on a single small readback (see
+			// countBadParticlesNow) instead of the full positions +
+			// concentration arrays draw() used to need every frame -- GPU
+			// rendering below needs neither back on the host at all.
+			await checkForNonFinite( frame );
 
 			if ( ! nanDetected ) {
 
 				if ( frame % diagnosticInterval === 0 ) {
+
+					// Only the diagnostic log still needs the full arrays,
+					// so only it still pays for reading them.
+					const [ positionsData, concentrationData ] = await Promise.all( [
+						flip.positions.toArray(),
+						flip.concentration.toArray()
+					] );
 
 					const s = stats( concentrationData, positionsData );
 					console.log(
@@ -693,8 +581,7 @@ try {
 
 				}
 
-				draw( positionsData, concentrationData );
-				drawVorticity( uData, vData, fluidData );
+				draw();
 
 			}
 
@@ -737,9 +624,9 @@ try {
 		// comment. flip.pressureSolver.settings carries the runtime switches.
 		renderer,
 		// Exposed so a driver that has paused the rAF loop can still render
-		// -- which is the only way to check the panels are not blank when
+		// -- which is the only way to check the panel is not blank when
 		// the page is not the foreground tab and rAF never fires.
-		draw, drawVorticity,
+		draw,
 		pause: async () => {
 
 			driverPaused = true;

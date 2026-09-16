@@ -1210,10 +1210,171 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	const iterationSelfStopping = [ ...iterationRecompute, convergenceKernel ];
 	const iterationBatchSelfStopping = tsl_array_n.createBatch( iterationSelfStopping );
 
+	// *** Fusing the V-cycle into the surrounding iteration, instead of
+	// calling it as its own submission ***
+	//
+	// applyPreconditionerToR has no .computeNode of its own -- it is a plain
+	// function, not a tsl_array_n.kernel() dispatcher -- so createBatch above
+	// cannot fold it into the runs of kernels on either side of it: planBatch
+	// treats it as a boundary, splitting every iteration into three
+	// queue.submit() calls (pre-V-cycle group, V-cycle, post-V-cycle group)
+	// instead of one. Measured on this machine: a chunk-read's cost tracks
+	// the number of prior submissions almost linearly (1 submission ~1 ms, 31
+	// ~3.7 ms, 60 ~4.9 ms), not the dispatch count or GPU time inside them
+	// (0.044 ms of real GPU work in a 6+ ms chunk-read) -- see
+	// docs/perf-investigation-cg-gpu-resident-alpha-beta.md. Three
+	// submissions per iteration, times a chunk's worth of iterations, is
+	// most of what the chunk-read at the end of every chunk waits through.
+	//
+	// A multigrid V-cycle is itself nothing but a fixed sequence of
+	// .computeNode-bearing dispatchers (multigrid.js's own `queue`, already
+	// fed to its own createBatch there) -- so splicing that queue directly
+	// into this iteration's list, in place of the opaque call, lets one
+	// createBatch see one continuous run and produce one submission for the
+	// whole iteration instead of three. Ordering is unchanged (a straight
+	// concatenation runs in exactly the sequence the opaque call would have),
+	// and this is the same "many different kernels, one pass" pattern the
+	// V-cycle's own batching already uses and already proved order-preserving
+	// -- not a new mechanism, just a longer run of it.
+	//
+	// Only possible when the preconditioner exposes .forms (multigrid does;
+	// Jacobi/identity do not, and iterationBatchSelfStopping above is the
+	// fallback for those, unchanged). Built for every combination multigrid's
+	// own runtime settings can select, keyed the same way and read off the
+	// same settings object, so the two stay in sync as that's toggled.
+	// Skipped whenever the preconditioner's own batchDispatches is off --
+	// that switch exists to measure the V-cycle unbatched, and fusing it here
+	// would silently defeat the measurement.
+	const fusedIterationSelfStopping = applyPreconditionerToR.forms === undefined ? null : ( () => {
+
+		const preVcycle = [
+			applyToP, dotPAp.dispatch, reducePAp, alphaKernel, updateX, applyToX, recomputeR,
+			dotRR.dispatch, reduceRR
+		];
+		const postVcycle = [ dotRZ.dispatch, reduceRZ, betaKernel, updateP, convergenceKernel ];
+
+		const built = { true: {}, false: {} };
+
+		for ( const coarse of [ true, false ] ) {
+
+			for ( const fold of [ true, false ] ) {
+
+				const vcycleQueue = applyPreconditionerToR.forms[ coarse ][ fold ].queue;
+				const fused = [ ...preVcycle, ...vcycleQueue, ...postVcycle ];
+
+				// `list` (the raw per-iteration dispatcher sequence, unbatched)
+				// is kept alongside `run` so a chunk of several iterations can
+				// be concatenated and submitted as one call -- see
+				// getChunkBatch below. `run`/`count` alone, as used by
+				// iterationBatch.selfStopping, still cover the case that
+				// mechanism can't: a chunk size that hasn't been seen before
+				// and isn't worth caching a whole batch for.
+				built[ coarse ][ fold ] = { run: tsl_array_n.createBatch( fused ), count: fused.length, list: fused };
+
+			}
+
+		}
+
+		return built;
+
+	} )();
+
+	// Paired-testable like every other switch in this file: on by default
+	// once measured, off to compare against the unfused (3-submissions-per-
+	// iteration) form it replaces.
+	settings.fuseVcycleIntoIteration = true;
+
+	// *** A whole chunk as one submission: built, correct, and measured
+	// SLOWER -- off by default ***
+	//
+	// The hypothesis fusing the V-cycle into an iteration (above) was built
+	// on: a chunk-read's cost tracks the number of submissions queued before
+	// it almost linearly (1 submission ~1 ms, 31 ~3.7 ms, 60 ~4.9 ms,
+	// measured on this machine with a microbenchmark, independent of what
+	// each submission carries), so collapsing a whole chunk's worth of
+	// iterations (still one submission per iteration even after the
+	// per-iteration fusion above) into one submission looked like the next
+	// win of the same shape. It is correct -- see below -- and it is not a
+	// win: paired, interleaved, example 15, submissionsPerFrame fell from
+	// ~16-20 to ~3 exactly as intended, and wallMsPerFrame rose from ~5.1 ms
+	// to ~7.6 ms, about 1.5x SLOWER. A direct check ruled out the first
+	// suspect -- cache churn from the chunk size drifting frame to frame --
+	// before trusting the regression: 200 frames of a settled scene needed
+	// only 12 distinct sizes, a 94% cache hit rate. The remaining
+	// explanation is that a single compute pass carrying 500-800 dispatches
+	// (a full chunk's worth) costs more than the same dispatches spread
+	// across ~15 separate passes, which the microbenchmark that motivated
+	// this never tested at that scale -- it measured submission count
+	// holding per-submission dispatch count small and roughly fixed. Not
+	// chased further; see docs/project-history.md's own Open items entry
+	// for this file for what that would take.
+	//
+	// Kept rather than deleted, same as every other measured-and-rejected
+	// change in this codebase's history: correct, cheap to keep behind a
+	// flag, and the mechanism (safe to overrun mid-chunk, same reasoning as
+	// the chunked loop's own comment -- alphaKernel/betaKernel freeze their
+	// outputs the moment a stop code is set, so concatenating N copies of
+	// one iteration's dispatcher sequence and running them in one
+	// submission is equivalent to N separate calls, convergence mid-chunk
+	// included) may still be worth another look if the "why" above is ever
+	// pinned down rather than inferred.
+	//
+	// Built lazily and cached by exact chunk size rather than a fixed set of
+	// bucket sizes -- confirmed above to hit 94% of the time on a settled
+	// scene, so this part of the design held up; it is the premise it was
+	// built to serve that did not.
+	const chunkBatchCache = { true: { true: new Map(), false: new Map() }, false: { true: new Map(), false: new Map() } };
+
+	function getChunkBatch( coarse, fold, n ) {
+
+		const cache = chunkBatchCache[ coarse ][ fold ];
+		let entry = cache.get( n );
+
+		if ( entry === undefined ) {
+
+			const perIteration = fusedIterationSelfStopping[ coarse ][ fold ].list;
+			const list = [];
+
+			for ( let i = 0; i < n; i ++ ) list.push( ...perIteration );
+
+			entry = { run: tsl_array_n.createBatch( list ), count: list.length };
+			cache.set( n, entry );
+
+		}
+
+		return entry;
+
+	}
+
+	// Off by default -- measured slower, not just unproven. See this
+	// mechanism's own header comment above for the numbers. Paired-testable
+	// like every other switch here, kept for whoever revisits it.
+	settings.fuseChunkIntoOneSubmission = false;
+
 	const iterationBatch = {
 		core: () => profileBatch( 'pcg-iteration', iterationCore.length - 1, iterationBatchCore ),
 		recompute: () => profileBatch( 'pcg-iteration', iterationRecompute.length - 1, iterationBatchRecompute ),
-		selfStopping: () => profileBatch( 'pcg-iteration', iterationSelfStopping.length - 1, iterationBatchSelfStopping )
+		selfStopping: () => {
+
+			const preconditionerSettings = applyPreconditioner.settings;
+			// isFusable is only present when applyPreconditionerToR is a
+			// wrapper that can switch between several preconditioners at
+			// runtime (grid_pressure_solver2.js's own) -- absent, a direct
+			// multigrid binding (examples 05/07/30) is always fusable.
+			const isFusable = applyPreconditionerToR.isFusable === undefined || applyPreconditionerToR.isFusable() === true;
+			const fused = settings.fuseVcycleIntoIteration === true
+				&& fusedIterationSelfStopping !== null
+				&& preconditionerSettings !== undefined
+				&& preconditionerSettings.batchDispatches !== false
+				&& isFusable
+				? fusedIterationSelfStopping[ !! preconditionerSettings.coarseSingleGroup ][ !! preconditionerSettings.foldClearIntoRestrict ]
+				: null;
+
+			return fused !== null
+				? profileBatch( 'pcg-iteration', fused.count, fused.run )
+				: profileBatch( 'pcg-iteration', iterationSelfStopping.length - 1, iterationBatchSelfStopping );
+
+		}
 	};
 
 	function runIterationUnbatched( recompute ) {
@@ -1459,6 +1620,36 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 			tolerance.value = tol;
 			relativeToleranceScale.value = relativeTolerance ? 1 : 0;
 
+			// Whether this chunk can go out as one submission instead of
+			// `chunk` of them -- see settings.fuseChunkIntoOneSubmission's own
+			// comment above for the mechanism and why overrunning inside it is
+			// safe. Falls back to the per-iteration loop for the same reasons
+			// fuseVcycleIntoIteration does: no multigrid preconditioner
+			// bound, or its own batchDispatches switched off for measurement.
+			function runChunk( chunk ) {
+
+				const preconditionerSettings = applyPreconditioner.settings;
+				const isFusable = applyPreconditionerToR.isFusable === undefined || applyPreconditionerToR.isFusable() === true;
+				const canFuseChunk = settings.fuseChunkIntoOneSubmission === true
+					&& settings.fuseVcycleIntoIteration === true
+					&& fusedIterationSelfStopping !== null
+					&& preconditionerSettings !== undefined
+					&& preconditionerSettings.batchDispatches !== false
+					&& isFusable;
+
+				if ( canFuseChunk ) {
+
+					const batch = getChunkBatch( !! preconditionerSettings.coarseSingleGroup, !! preconditionerSettings.foldClearIntoRestrict, chunk );
+					profileBatch( 'pcg-iteration', batch.count, batch.run );
+
+				} else {
+
+					for ( let i = 0; i < chunk; i ++ ) iterationBatch.selfStopping();
+
+				}
+
+			}
+
 			let ran = 0;
 
 			while ( ran < maxiter ) {
@@ -1466,12 +1657,8 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 				const target = Math.max( MIN_CHUNK, lastIterationCount + CHUNK_MARGIN );
 				const chunk = Math.min( Math.max( target - ran, MIN_CHUNK ), maxiter - ran );
 
-				for ( let i = 0; i < chunk; i ++ ) {
-
-					iterationBatch.selfStopping();
-					ran ++;
-
-				}
+				runChunk( chunk );
+				ran += chunk;
 
 				state.iterations = ran;
 

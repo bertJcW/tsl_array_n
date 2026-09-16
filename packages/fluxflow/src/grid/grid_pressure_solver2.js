@@ -347,7 +347,7 @@ export function createGridPressureSolver2( {
 	// paired inside one run -- see multigrid.js's own settings for the
 	// precedent. Off means the old, separate read; the check itself is
 	// identical either way.
-	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations, tolerance, checkBadCells: true, badCellsRideAlong: true, optimisticStopTest: true, gpuStopTest: true, gpuResidentSetup, relativeTolerance, residualRecomputeInterval, verifyConvergence };
+	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations, tolerance, checkBadCells: true, badCellsRideAlong: true, optimisticStopTest: true, gpuStopTest: true, fuseVcycleIntoIteration: true, fuseChunkIntoOneSubmission: false, gpuResidentSetup, relativeTolerance, residualRecomputeInterval, verifyConvergence };
 
 	const [ resolutionX, resolutionY ] = resolution;
 	const [ gridSpacingX, gridSpacingY ] = gridSpacing;
@@ -425,13 +425,35 @@ export function createGridPressureSolver2( {
 
 		}
 
-		return function dispatchSelectedPreconditioner() {
+		function dispatchSelectedPreconditioner() {
 
 			built[ settings.preconditioner ]();
 
-		};
+		}
+
+		// See linalg.js's fused iteration batch for what these are for.
+		// Both describe multigrid specifically -- the only one of the three
+		// preconditioners built above that exposes .forms -- and isFusable
+		// is a live check, not a snapshot, because settings.preconditioner
+		// can switch away from multigrid at runtime (the same
+		// paired-measurement convention every other switch here follows):
+		// running multigrid's own dispatchers while jacobi/none is the
+		// selected preconditioner would silently run the wrong one.
+		dispatchSelectedPreconditioner.forms = built.multigrid.forms;
+		dispatchSelectedPreconditioner.isFusable = () => settings.preconditioner === 'multigrid';
+
+		return dispatchSelectedPreconditioner;
 
 	}
+
+	// Mirrors settings.multigrid below: linalg.js reads batchDispatches /
+	// coarseSingleGroup / foldClearIntoRestrict off whatever it was given as
+	// its own applyPreconditioner parameter, which is this wrapper -- so the
+	// wrapper needs to carry multigrid's own settings object, the same one
+	// preconditionerBuilders.multigrid is read against everywhere else in
+	// this file.
+	applyPreconditioner.settings = preconditionerBuilders.multigrid.settings;
+
 	const cg = createPreconditionedConjugateGradientSolver( applyLaplacian, applyPreconditioner, b, pressureGrid.data, { atomicScale } );
 
 	// Updated after every project()-dispatch below, for diagnostics -- cg.solve()
@@ -779,6 +801,8 @@ export function createGridPressureSolver2( {
 			// harness -- see linalg.js's own settings for what it does.
 			cg.settings.optimisticStopTest = settings.optimisticStopTest === true;
 			cg.settings.gpuStopTest = settings.gpuStopTest === true;
+			cg.settings.fuseVcycleIntoIteration = settings.fuseVcycleIntoIteration === true;
+			cg.settings.fuseChunkIntoOneSubmission = settings.fuseChunkIntoOneSubmission === true;
 			diagnostics.converged = await timePhase( 'pressure-cg-solve', () => cg.solve(
 				settings.tolerance, settings.maxIterations,
 				settings.residualCheckInterval, settings.gpuResidentScalars, settings.batchIterations,

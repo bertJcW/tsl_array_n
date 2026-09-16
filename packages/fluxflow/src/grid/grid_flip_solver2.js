@@ -1710,127 +1710,140 @@ export function createGridFlipSolver2( {
 	// an in-run paired comparison means anything.
 	const settings = { batchStages: true };
 
-	async function onAdvanceTimeStep() {
+	// *** One submission per stage group, not one per stage -- and resolved
+	// once, not every frame. ***
+	//
+	// Every `renderer.compute()` call is its own command buffer, pass and
+	// queue submit, and one of them costs ~38.8 us of wall time on the
+	// development machine no matter how much work it carries (3 us of that
+	// JavaScript; 64 dispatches execute on the GPU in 0.052 ms). This step
+	// used to make about thirty of them, and only one break in the whole
+	// sequence is *required*: the readback at `projectDispatch()`, where
+	// the host has to see the CG result before deciding anything.
+	//
+	// So the stages between readbacks go out as batches. Stage entries that
+	// are plain dispatchers (most of them) are collected into one
+	// `renderer.compute(array)`; entries that are composite functions --
+	// `boundarySolver.constrainVelocity()`, the optional passes, a
+	// caller-supplied force -- have no `computeNode`, and tsl_array_n's
+	// planBatch calls those *in place*, which keeps the ordering exactly
+	// what calling the list one by one would have given.
+	//
+	// The three stage lists below are built once, here, rather than as
+	// fresh arrays inside onAdvanceTimeStep the way an earlier version of
+	// this file did -- which of these composite functions is *present* in
+	// each list depends only on constructor-time settings
+	// (reducedPressureEnabled, whether a force/resample hook was configured
+	// at all), never on anything that changes frame to frame, so rebuilding
+	// the list and re-walking planBatch on every single step bought nothing
+	// but repeated the same conclusion. createBatch() below performs that
+	// walk once and caches the result, the same convention linalg.js's own
+	// CG loop uses for its own per-iteration batches. What each composite
+	// entry actually *does* when its turn comes is unaffected either way --
+	// boundarySolver.constrainVelocity still resolves its own plan fresh
+	// against whatever the collider/inflow state is at call time.
+	function buildStageSet( stages ) {
 
-		// *** One submission per stage group, not one per stage. ***
-		//
-		// Every `renderer.compute()` call is its own command buffer, pass and
-		// queue submit, and one of them costs ~38.8 us of wall time on the
-		// development machine no matter how much work it carries (3 us of that
-		// JavaScript; 64 dispatches execute on the GPU in 0.052 ms). This step
-		// used to make about thirty of them, and only one break in the whole
-		// sequence is *required*: the readback at `projectDispatch()`, where
-		// the host has to see the CG result before deciding anything.
-		//
-		// So the stages between readbacks go out as batches. Stage entries that
-		// are plain dispatchers (most of them) are collected into one
-		// `renderer.compute(array)`; entries that are composite functions --
-		// `boundarySolver.constrainVelocity()`, the optional passes, a
-		// caller-supplied force -- have no `computeNode`, and tsl_array_n's
-		// planBatch calls those *in place*, which keeps the ordering exactly
-		// what calling the list one by one would have given.
-		//
-		// `resetAccumulators()` stays outside the batch deliberately: it is
-		// four CPU->GPU buffer uploads rather than dispatches, and a pending
-		// upload is only guaranteed to land before a dispatch that *begins* a
-		// pass. Keeping it between two batches is what makes the accumulators
-		// provably zero before `scatterU` reads them.
-		//
-		// `settings.batchStages` is the runtime switch (it lives on the
-		// returned object) so a paired measurement can compare both forms
-		// inside one run -- a constructor-time choice can only be compared
-		// across runs, and these scenes drift.
-		runStages( [
-			advectParticles,
-			pushOutOfCollider
-		] );
-
-		resetAccumulators();
-
-		const afterP2G = [
-			scatterU,
-			scatterV,
-			finalizeU,
-			finalizeV,
-
-			snapshotOldU,
-			snapshotOldV,
-
-			extrapolateWeightU,
-			extrapolateWeightV,
-			boundarySolver.constrainVelocity,
-
-			clearFluidMask,
-			markFluidCellsKernel,
-			computeUFluidAdjacent,
-			computeVFluidAdjacent,
-
-			resamplePass,
-
-			// After resampling (which can move particles) and before the
-			// projection, because this is what builds the density field beta is
-			// derived from.
-			concentrationGridPass
-		];
-
-		if ( reducedPressureEnabled ) {
-
-			// Gravity itself is carried by the pressure system's own boundary
-			// condition -- see dirichlet() -- so nothing is added here unless
-			// the density varies.
-			afterP2G.push( applyReducedGravityU, applyReducedGravityV );
-
-		} else {
-
-			afterP2G.push( applyGravityU, applyGravityV );
-
-		}
-
-		// Caller-supplied forces, in the force stage where a force belongs:
-		// after P2G has rebuilt the grid velocity from the particles (so
-		// nothing overwrites it) and before the projection (so the
-		// projection is what turns it into the pressure field it implies).
-		// Same spirit as grid_solver2.js's own stage hooks.
-		//
-		// Called rather than bound at construction so a force that needs one
-		// of this factory's own fields -- surface tension needs
-		// cellConcentration, which does not exist until this returns -- can
-		// be built afterwards and picked up by the closure. Being a plain
-		// function, it is a batch break rather than a batch member.
-		afterP2G.push( applyForces, boundarySolver.constrainVelocity );
-
-		runStages( afterP2G );
-
-		await projectDispatch();
-
-		runStages( [
-			boundarySolver.constrainVelocity,
-
-			extrapolatePressureU,
-			extrapolatePressureV,
-
-			g2pUpdate,
-
-			// After g2p: this changes what the particles carry, not how they
-			// move.
-			concentrationParticlePass
-		] );
+		return {
+			batched: tsl_array_n.createBatch( stages ),
+			unbatched: () => { for ( const stage of stages ) if ( stage ) stage(); }
+		};
 
 	}
 
-	// `null`/`undefined` entries are stage hooks this scene did not configure;
-	// tsl_array_n's planBatch skips them, and the unbatched path below has to
-	// as well.
-	function runStages( stages ) {
+	const preP2GStages = buildStageSet( [
+		advectParticles,
+		pushOutOfCollider
+	] );
 
-		if ( settings.batchStages ) {
+	const afterP2GList = [
+		scatterU,
+		scatterV,
+		finalizeU,
+		finalizeV,
 
-			tsl_array_n.dispatchBatch( stages );
-			return;
+		snapshotOldU,
+		snapshotOldV,
 
-		}
+		extrapolateWeightU,
+		extrapolateWeightV,
+		boundarySolver.constrainVelocity,
 
-		for ( const stage of stages ) if ( stage ) stage();
+		clearFluidMask,
+		markFluidCellsKernel,
+		computeUFluidAdjacent,
+		computeVFluidAdjacent,
+
+		resamplePass,
+
+		// After resampling (which can move particles) and before the
+		// projection, because this is what builds the density field beta is
+		// derived from.
+		concentrationGridPass
+	];
+
+	if ( reducedPressureEnabled ) {
+
+		// Gravity itself is carried by the pressure system's own boundary
+		// condition -- see dirichlet() -- so nothing is added here unless
+		// the density varies.
+		afterP2GList.push( applyReducedGravityU, applyReducedGravityV );
+
+	} else {
+
+		afterP2GList.push( applyGravityU, applyGravityV );
+
+	}
+
+	// Caller-supplied forces, in the force stage where a force belongs:
+	// after P2G has rebuilt the grid velocity from the particles (so
+	// nothing overwrites it) and before the projection (so the
+	// projection is what turns it into the pressure field it implies).
+	// Same spirit as grid_solver2.js's own stage hooks.
+	//
+	// Called rather than bound at construction so a force that needs one
+	// of this factory's own fields -- surface tension needs
+	// cellConcentration, which does not exist until this returns -- can
+	// be built afterwards and picked up by the closure. Being a plain
+	// function, it is a batch break rather than a batch member.
+	afterP2GList.push( applyForces, boundarySolver.constrainVelocity );
+
+	const afterP2GStages = buildStageSet( afterP2GList );
+
+	const postProjectStages = buildStageSet( [
+		boundarySolver.constrainVelocity,
+
+		extrapolatePressureU,
+		extrapolatePressureV,
+
+		g2pUpdate,
+
+		// After g2p: this changes what the particles carry, not how they
+		// move.
+		concentrationParticlePass
+	] );
+
+	// `settings.batchStages` is the runtime switch (it lives on the
+	// returned object) so a paired measurement can compare both forms
+	// inside one run -- a constructor-time choice can only be compared
+	// across runs, and these scenes drift.
+	function runStages( stageSet ) {
+
+		( settings.batchStages ? stageSet.batched : stageSet.unbatched )();
+
+	}
+
+	async function onAdvanceTimeStep() {
+
+		runStages( preP2GStages );
+
+		resetAccumulators();
+
+		runStages( afterP2GStages );
+
+		await projectDispatch();
+
+		runStages( postProjectStages );
 
 	}
 

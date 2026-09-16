@@ -1317,7 +1317,15 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 
 					for ( const step of queue ) step();
 
-				}
+				},
+				// The raw dispatcher list, every entry still carrying its own
+				// .computeNode (the same property createBatch above just read
+				// off it) -- exposed so a caller with dispatches of its own on
+				// either side of a V-cycle apply can splice this in and get
+				// ONE submission for all of it, rather than the V-cycle
+				// necessarily being its own separate submission. See
+				// linalg.js's fused iteration batch for the caller.
+				queue
 			};
 
 		}
@@ -1327,13 +1335,20 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 			false: { true: buildForm( false, true ), false: buildForm( false, false ) }
 		};
 
-		return function dispatch() {
+		const dispatchFn = function dispatch() {
 
 			const form = forms[ !! settings.coarseSingleGroup ][ !! settings.foldClearIntoRestrict ];
 
 			( settings.batchDispatches ? form.batched : form.unbatched )();
 
 		};
+
+		// Keyed exactly like `forms` above (and read against this same
+		// `settings` object) so a caller can always find the queue matching
+		// whatever form dispatch() itself would have chosen this call.
+		dispatchFn.forms = forms;
+
+		return dispatchFn;
 
 	};
 
