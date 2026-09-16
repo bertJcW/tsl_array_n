@@ -86,7 +86,7 @@
 //    run; the switch is `settings.batchIterations`.
 
 import * as tsl_array_n from 'tsl_array_n';
-import { float, Loop, If } from 'three/tsl';
+import { float, uniform, Loop, If } from 'three/tsl';
 import { instrumentDispatch, profileBatch, timePhase } from '../profiling.js';
 import { isNonFinite, isNonFiniteOrAbove } from '../float_guards.js';
 
@@ -136,7 +136,27 @@ export const DEFAULT_ATOMIC_DOT_SCALE = 65536;
 // specific addition remains structurally untested until either example
 // is grown large/ill-conditioned enough to actually take more than 50
 // iterations, or the residual genuinely increases at some point.
-const RESIDUAL_RECOMPUTE_INTERVAL = 50;
+// *** Now 1, and that is faster as well as more honest (2026-09-16) ***
+//
+// Recomputing b - Ax costs one operator apply -- a handful of dispatches
+// against a V-cycle's 38 -- and the GPU is busy under 1% of a solver step,
+// so on this hardware the extra work is close to free. What it buys is not
+// only trustworthiness (every residual the solver tests or reports is a
+// true one, so the drift that made this library report convergence it had
+// not achieved cannot accumulate at all) but *speed*: with the residual
+// always true, `verifyConvergence` never has to spend a second stop-test
+// cycle confirming a claim, so solves stop sooner.
+//
+// Paired, phase-alternated, 50 against 1:
+//
+//   example 15   1.43x / 1.15x / 1.19x    25.0 -> 16.8 iterations
+//   example 20   1.25x / 1.38x / 1.42x    24.3 -> 16.2 iterations
+//   example 28   1.29x / 1.20x / 1.35x    37.5 -> 30.6 iterations
+//
+// every arm converging 100% of the time. A machine where an operator apply
+// is expensive relative to a host round trip would want a larger value,
+// which is why it stays a setting.
+const RESIDUAL_RECOMPUTE_INTERVAL = 1;
 
 // *** Why the stop test can be asked less often ***
 //
@@ -774,7 +794,32 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	// only because a readback costs ~3 ms of latency against ~0.2 ms for an
 	// iteration. A machine where that ratio is very different would want it
 	// off, which is why it is a switch.
-	const settings = { optimisticStopTest: true };
+	// `gpuStopTest` runs the stop test on the GPU and lets the host look
+	// once per chunk instead of once per interval -- see the chunked path
+	// in solveWithGpuResidentScalars. On: 1.2x on example 15, 1.4x on
+	// example 20, 1.07x on example 28, paired, with every solve still
+	// converging. `optimisticStopTest` then has nothing to do; it is the
+	// better of the two host-in-the-loop forms and stays for the
+	// configurations that cannot take the GPU one (a recompute interval
+	// above 1, or a host-side setup).
+	const settings = { optimisticStopTest: true, gpuStopTest: true };
+
+	// How far past the last solve's iteration count a chunk reaches before
+	// the host looks. The trade is measurable in both directions:
+	// undershooting costs a whole readback (~3 ms), overshooting costs a
+	// frozen iteration each (~0.3 ms measured -- mostly three.js's
+	// per-dispatch uniform bookkeeping, not GPU work). A margin of 8 was
+	// the first guess and it was too generous: on example 15 it spent
+	// ~2.4 ms of frozen iterations to save ~3 ms of reads, which is a wash.
+	// Two is enough for a fluid scene, where consecutive frames need
+	// within an iteration or two of each other.
+	const CHUNK_MARGIN = 2;
+	const MIN_CHUNK = 4;
+
+	// What the last solve needed, so the next one can guess its own chunk.
+	// Fluid scenes change slowly frame to frame, which is what makes a
+	// one-frame-old guess a good one.
+	let lastIterationCount = MIN_CHUNK;
 
 	const applyToX = applyOperator( x, Ax );
 	const applyToP = applyOperator( p, Ap );
@@ -867,7 +912,13 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	// of the same snapshot it takes at every check -- so a relative
 	// criterion costs no extra round trip.
 	const SLOT_BB = 6;
-	const SCALAR_SLOT_COUNT = 7;
+	// The iteration counter and the iteration convergence was reached at,
+	// both kept on the GPU. They exist so the loop can stop *itself*: see
+	// convergenceKernel. The host reads them out of the same snapshot as
+	// everything else, so knowing when the solve finished costs nothing.
+	const SLOT_ITER = 7;
+	const SLOT_STOP_ITER = 8;
+	const SCALAR_SLOT_COUNT = 9;
 
 	// Defensive floor for the pAp growth baseline: a literal 0 baseline
 	// would make the first legitimate nonzero pAp look like infinite
@@ -881,12 +932,18 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	const STOP_PAP_GROWTH = 2;
 	const STOP_ALPHA_MAGNITUDE = 3;
 	const STOP_DEGENERATE_OLD_RZ = 4;
+	// Not a failure, unlike every code above it: the solve finished. It
+	// shares the slot because the slot's meaning is "the loop has a reason
+	// to stop", and because sharing it means one test freezes the iterate
+	// for both kinds of reason -- see alphaKernel.
+	const STOP_CONVERGED = 5;
 
 	const STOP_REASONS = {
 		[ STOP_DEGENERATE_PAP ]: 'degenerate-pAp',
 		[ STOP_PAP_GROWTH ]: 'pAp-growth',
 		[ STOP_ALPHA_MAGNITUDE ]: 'alpha-magnitude',
-		[ STOP_DEGENERATE_OLD_RZ ]: 'degenerate-oldRZ'
+		[ STOP_DEGENERATE_OLD_RZ ]: 'degenerate-oldRZ',
+		[ STOP_CONVERGED ]: 'converged'
 	};
 
 	const scalars = tsl_array_n.arrayN( 'float', [ SCALAR_SLOT_COUNT ] );
@@ -956,7 +1013,18 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		// 0 makes updateX and updateR no-ops, so a tripped guard leaves x
 		// and r exactly as they were -- the host breaks out one readback
 		// later having lost nothing but the rest of this iteration's work.
-		alpha().assign( stopCode.equal( STOP_NONE ).select( value, float( 0 ) ) );
+		//
+		// The `already` half is what lets the host stop asking every few
+		// iterations (see convergenceKernel and the chunked loop): once
+		// anything has written a stop reason, every further iteration is a
+		// no-op on the GPU, so running past the finish line cannot move x.
+		// Without it, over-running is not free -- the interval sweep in
+		// ../docs/perf-investigation-cg-gpu-resident-alpha-beta.md measured
+		// a solve driven 16 iterations past its stop test dropping to 47%
+		// converged.
+		const already = scalars( SLOT_STOP ).notEqual( float( STOP_NONE ) );
+
+		alpha().assign( already.or( stopCode.notEqual( float( STOP_NONE ) ) ).select( float( 0 ), value ) );
 
 		// *** Sticky: the first failure wins ***
 		//
@@ -993,7 +1061,13 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		// A restart is not an error -- it drops the search direction back to
 		// the preconditioned residual, which is what beta = 0 means. Only an
 		// unusable denominator stops the solve.
-		beta().assign( restart.select( float( 0 ), value ) );
+		//
+		// A solve that has already stopped gets 0 too, for the same reason
+		// alpha does: with both at 0 the whole iteration is a no-op and the
+		// host can be as late as it likes in noticing.
+		const alreadyStopped = scalars( SLOT_STOP ).notEqual( float( STOP_NONE ) );
+
+		beta().assign( alreadyStopped.or( restart ).select( float( 0 ), value ) );
 
 		// Only overwrite the stop slot when this kernel has something to
 		// say, so an alpha-time stop set earlier this iteration survives to
@@ -1031,6 +1105,52 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		scalars( SLOT_RZ_OLD ).assign( scalars( SLOT_RZ ) );
 		scalars( SLOT_PAP_BASELINE ).assign( scalars( SLOT_RR ).abs().max( float( PAP_BASELINE_FLOOR ) ) );
 		scalars( SLOT_STOP ).assign( float( STOP_NONE ) );
+		scalars( SLOT_ITER ).assign( float( 0 ) );
+		scalars( SLOT_STOP_ITER ).assign( float( 0 ) );
+
+	} );
+
+	// *** The stop test, on the GPU ***
+	//
+	// The same test the host applies -- sqrt(|r.r|) against
+	// max(tol * |b|, tol) -- evaluated where the numbers already are. What
+	// it changes is who has to wait: with the iterate frozen the moment
+	// this fires (see alphaKernel), the host can run a whole chunk of
+	// iterations and look once at the end, instead of stopping to look
+	// every few.
+	//
+	// It is only sound when the residual it tests is the true b - Ax. That
+	// is why the chunked loop below refuses to run unless the recompute
+	// interval is 1: a drifting residual would let this declare a
+	// convergence that never happened, which is the exact bug this library
+	// shipped and fixed.
+	const tolerance = uniform( 0 );
+	const relativeToleranceScale = uniform( 0 );
+
+	const convergenceKernel = tsl_array_n.kernel( [ 1 ], ( _thread ) => {
+
+		const iteration = scalars( SLOT_ITER ).add( float( 1 ) ).toVar();
+		scalars( SLOT_ITER ).assign( iteration );
+
+		// relativeToleranceScale is 1 when the criterion is relative and 0
+		// when it is absolute, so this is `max(tol * |b|, tol)` or `tol`
+		// with no branch.
+		const normB = scalars( SLOT_BB ).abs().sqrt();
+		const threshold = tolerance.mul( normB ).mul( relativeToleranceScale ).max( tolerance ).toVar();
+
+		const residual = scalars( SLOT_RR ).abs().sqrt();
+
+		// isNonFiniteOrAbove rather than a bare comparison: a NaN residual
+		// must not read as "smaller than the threshold". See float_guards.js
+		// for why the obvious spelling of that test cannot be trusted.
+		const converged = isNonFiniteOrAbove( residual, threshold ).not();
+
+		If( converged.and( scalars( SLOT_STOP ).equal( float( STOP_NONE ) ) ), () => {
+
+			scalars( SLOT_STOP ).assign( float( STOP_CONVERGED ) );
+			scalars( SLOT_STOP_ITER ).assign( iteration );
+
+		} );
 
 	} );
 
@@ -1083,9 +1203,17 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	// `length - 1`: the preconditioner reports its own dispatches, either as a
 	// batch or one per kernel, and double-counting them here would make the
 	// profiler's dispatch total disagree between the two settings.
+	// The same recompute iteration with the GPU's own stop test on the end.
+	// It goes last because it reads r.r, which reduceRR has just written;
+	// the iteration it fires on is therefore the one that converged, and
+	// every iteration after it is frozen by alphaKernel's `already`.
+	const iterationSelfStopping = [ ...iterationRecompute, convergenceKernel ];
+	const iterationBatchSelfStopping = tsl_array_n.createBatch( iterationSelfStopping );
+
 	const iterationBatch = {
 		core: () => profileBatch( 'pcg-iteration', iterationCore.length - 1, iterationBatchCore ),
-		recompute: () => profileBatch( 'pcg-iteration', iterationRecompute.length - 1, iterationBatchRecompute )
+		recompute: () => profileBatch( 'pcg-iteration', iterationRecompute.length - 1, iterationBatchRecompute ),
+		selfStopping: () => profileBatch( 'pcg-iteration', iterationSelfStopping.length - 1, iterationBatchSelfStopping )
 	};
 
 	function runIterationUnbatched( recompute ) {
@@ -1307,6 +1435,78 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		// an unawaited one would resolve into `state` during whatever solve
 		// happens to be running by then.
 		let pendingRead = null;
+
+		// *** Running a chunk and looking once ***
+		//
+		// With convergenceKernel writing the stop slot and alphaKernel
+		// freezing the iterate the moment it does, the host no longer has to
+		// be present for the decision. It runs a chunk of iterations sized
+		// from the last solve, looks once, and either finds the solve
+		// already finished (and at which iteration) or runs another chunk.
+		//
+		// The trade this makes is the opposite of the one every earlier
+		// version of this loop made: it spends GPU work and dispatch
+		// encoding -- both cheap, ~0.05 ms an iteration, with the GPU busy
+		// under 1% of a step -- to buy back host waits at ~3 ms each.
+		//
+		// Refused unless the residual being tested is the true b - Ax every
+		// iteration. A drifting residual would let the GPU declare a
+		// convergence that never happened, with no host check left to catch
+		// it -- which is this library's own worst bug, reintroduced with the
+		// safety net removed.
+		if ( settings.gpuStopTest === true && recomputeInterval === 1 && gpuResidentSetup ) {
+
+			tolerance.value = tol;
+			relativeToleranceScale.value = relativeTolerance ? 1 : 0;
+
+			let ran = 0;
+
+			while ( ran < maxiter ) {
+
+				const target = Math.max( MIN_CHUNK, lastIterationCount + CHUNK_MARGIN );
+				const chunk = Math.min( Math.max( target - ran, MIN_CHUNK ), maxiter - ran );
+
+				for ( let i = 0; i < chunk; i ++ ) {
+
+					iterationBatch.selfStopping();
+					ran ++;
+
+				}
+
+				state.iterations = ran;
+
+				const snapshot = await readScalars( 'solve-chunk-read' );
+				const stopCode = snapshot[ SLOT_STOP ];
+
+				state.residualSquared = snapshot[ SLOT_RR ];
+
+				if ( stopCode === STOP_CONVERGED ) {
+
+					// The iteration the GPU actually stopped at, not the
+					// chunk boundary the host happened to look at.
+					state.iterations = snapshot[ SLOT_STOP_ITER ];
+					lastIterationCount = state.iterations;
+
+					return true;
+
+				}
+
+				if ( stopCode !== STOP_NONE ) {
+
+					state.stoppedBy = STOP_REASONS[ stopCode ] ?? 'unknown';
+					lastIterationCount = ran;
+
+					return false;
+
+				}
+
+			}
+
+			lastIterationCount = ran;
+
+			return false;
+
+		}
 
 		// *** The stop decision, factored out ***
 		//

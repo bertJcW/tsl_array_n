@@ -284,8 +284,10 @@ export function createGridPressureSolver2( {
 	// true one -- see linalg.js at the stop test.
 	relativeTolerance = true,
 	// How often the CG loop recomputes the TRUE residual b - Ax instead of
-	// trusting its incremental r -= alpha*Ap. See linalg.js.
-	residualRecomputeInterval = 50,
+	// trusting its incremental r -= alpha*Ap. Every iteration, which is
+	// both the honest setting and -- measured, 1.15-1.43x on three scenes --
+	// the fast one. See linalg.js's RESIDUAL_RECOMPUTE_INTERVAL.
+	residualRecomputeInterval = 1,
 	// Recompute the true b - Ax before believing the incremental
 	// residual's claim to have converged. On by default: without it this
 	// solver reported convergence it had not achieved -- see linalg.js at
@@ -345,7 +347,7 @@ export function createGridPressureSolver2( {
 	// paired inside one run -- see multigrid.js's own settings for the
 	// precedent. Off means the old, separate read; the check itself is
 	// identical either way.
-	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations, tolerance, checkBadCells: true, badCellsRideAlong: true, optimisticStopTest: true, gpuResidentSetup, relativeTolerance, residualRecomputeInterval, verifyConvergence };
+	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations, tolerance, checkBadCells: true, badCellsRideAlong: true, optimisticStopTest: true, gpuStopTest: true, gpuResidentSetup, relativeTolerance, residualRecomputeInterval, verifyConvergence };
 
 	const [ resolutionX, resolutionY ] = resolution;
 	const [ gridSpacingX, gridSpacingY ] = gridSpacing;
@@ -776,6 +778,7 @@ export function createGridPressureSolver2( {
 			// Forwarded per solve so both are one switch to a measurement
 			// harness -- see linalg.js's own settings for what it does.
 			cg.settings.optimisticStopTest = settings.optimisticStopTest === true;
+			cg.settings.gpuStopTest = settings.gpuStopTest === true;
 			diagnostics.converged = await timePhase( 'pressure-cg-solve', () => cg.solve(
 				settings.tolerance, settings.maxIterations,
 				settings.residualCheckInterval, settings.gpuResidentScalars, settings.batchIterations,

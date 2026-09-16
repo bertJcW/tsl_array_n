@@ -2603,3 +2603,103 @@ Example 15, same scene and same machine as the 24.51 ms that started today's
 work: **11.12 ms/step**, about 2.2x, from four changes that between them
 removed 100 submissions, ~5 ms of three.js bookkeeping, one round trip and
 two thirds of what the rest of the round trips cost.
+
+# Proposal D: the stop test moves onto the GPU (2026-09-16)
+
+Two things had to be true before this was safe, and one of them turned out
+to be a speedup in its own right.
+
+## First: the true residual, every iteration
+
+The GPU can only be trusted to decide convergence if the residual it tests
+is the true `b - Ax`. Recomputing that costs one operator apply -- a handful
+of dispatches against a V-cycle's 38 -- and the GPU is busy under 1% of a
+step, so the question was whether it is affordable. It is better than
+affordable. Paired, phase-alternated, recompute interval 50 against 1:
+
+| scene | interval 50 | interval 1 | | iterations |
+| --- | --- | --- | --- | --- |
+| 15 flow past cylinder | 13.08 / 11.68 / 13.01 ms | 9.14 / 10.19 / 10.94 | **1.43 / 1.15 / 1.19x** | 25.0 -> 16.8 |
+| 20 FLIP dam break | 11.37 / 12.39 / 13.05 | 9.12 / 9.00 / 9.21 | **1.25 / 1.38 / 1.42x** | 24.3 -> 16.2 |
+| 28 drop into pool | 23.74 / 21.84 / 22.06 | 18.38 / 18.13 / 16.38 | **1.29 / 1.20 / 1.35x** | 37.5 -> 30.6 |
+
+Every arm converged 100% of the time. It is faster *because* it is honest:
+with the residual always true, `verifyConvergence` never spends a second
+stop-test cycle confirming a claim, so solves stop sooner. The default is
+now 1, and the residual-gap estimator parked in `project-history.md` is no
+longer worth building -- there is no gap left to estimate.
+
+## Then: the test itself, and the freeze
+
+`convergenceKernel` evaluates the same criterion the host did --
+`sqrt(|r.r|)` against `max(tol * |b|, tol)`, with `isNonFiniteOrAbove` so a
+NaN residual cannot read as convergence -- and writes `STOP_CONVERGED` into
+the sticky stop slot, along with the iteration it happened at.
+
+What makes that worth anything is the other half: `alphaKernel` and
+`betaKernel` now zero their outputs whenever the stop slot is set, not only
+when this iteration tripped a guard. Every iteration after the stop is a
+no-op, so the host can be arbitrarily late in noticing. That is exactly what
+the interval sweep said was impossible before -- a solve driven 16 iterations
+past its stop test dropped to 47% converged, because those iterations were
+real and they degraded the iterate.
+
+The host then runs a chunk sized from the previous solve (`lastIterationCount
++ 2`, floor 4) and looks once. The first margin tried was 8 and it was a
+wash: ~2.4 ms of frozen iterations to save ~3 ms of reads, on example 15. A
+frozen iteration is not free -- ~0.3 ms, mostly three.js's per-dispatch
+uniform bookkeeping rather than GPU work -- which is the same overhead
+proposal A left on the table.
+
+The chunked path refuses to run unless the recompute interval is 1 and the
+setup is GPU-resident. A drifting residual with no host check left to catch
+it is this library's own worst bug with the safety net removed.
+
+## Measured, against C rather than against nothing
+
+`settings.gpuStopTest`, paired, with `optimisticStopTest` (proposal C) as the
+baseline arm:
+
+| scene | host-in-the-loop | GPU stop test | | iterations |
+| --- | --- | --- | --- | --- |
+| 20 FLIP dam break | 9.75 / 10.46 / 9.65 ms | 6.82 / 6.79 / 7.77 | **1.43 / 1.54 / 1.24x** | 16.2 -> 10.8 |
+| 15 flow past cylinder | 9.89 / 9.95 / 9.52 | 7.31 / 8.16 / 9.19 | **1.35 / 1.22 / 1.04x** | 16.8 -> 11.7 |
+| 28 drop into pool | 17.76 / 18.27 / 18.58 | 18.12 / 16.03 / 16.84 | **0.98 / 1.14 / 1.10x** | 30.6 -> 24.9 |
+
+Iteration counts fall because the GPU tests every iteration, so a solve stops
+the moment it crosses the threshold instead of at the next multiple of four
+plus an interval's deferral.
+
+## Does it stop at the right place?
+
+The host no longer checks anything, so this is the question that matters.
+Over 120 consecutive steps on example 15, computing `|b|` independently on
+the host each frame and comparing the reported residual against
+`max(tol * |b|, tol)`:
+
+- **worst ratio of residual to threshold: 0.998**, and
+- **zero solves reported converged with a residual above the threshold.**
+
+It stops right at the criterion rather than past it, which is also why the
+reported residual on example 28 is now ~4.4e-4 against ~1.6e-4 before: the
+old path kept going for another few iterations after crossing. Both are
+inside `tol * |b|`, which is the contract.
+
+The NaN guard still fires in the same frame, checked by injection: the solve
+is rejected with `degenerate-pAp`, the field comes back finite, the next
+frame is clean.
+
+## Long runs on the new defaults
+
+| scene | steps | converged | rejected | |
+| --- | --- | --- | --- | --- |
+| 28 drop into pool | 400 | 400/400 | 0 | 17.95 ms/step, peak 16.766, finite |
+| 20 FLIP dam break | 300 | 300/300 | 0 | 8.51 ms/step, positions finite |
+| 23 moving collider | 250 | 250/250 | 0 | positions finite |
+| 26 dye free surface | 250 | 250/250 | 0 | peak **10.382**, its historical value to every digit |
+
+## Where the day ends
+
+Example 15, same scene, same machine: **24.51 ms -> 9.54 ms per step, 2.6x**,
+at 5 renderer calls and 12.2 iterations per step against 159 calls and 17
+iterations this morning.
