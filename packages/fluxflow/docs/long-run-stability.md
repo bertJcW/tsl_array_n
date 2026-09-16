@@ -11,6 +11,34 @@ over a run far longer than any demo.
 
 ---
 
+> ## ⚠ Read this before the table
+>
+> **The `converged` column below is not valid**, and the run has not been
+> repeated since. Two separate reasons, both documented in full further
+> down and in `perf-investigation-cg-gpu-resident-alpha-beta.md`:
+>
+> 1. **It was measured before the convergence bug was fixed** (the same
+>    day, a few commits later). The solver was reporting convergence
+>    against a residual that had drifted optimistically from the true
+>    `b - Ax` -- see "The real cause" below. Every convergence figure in
+>    that table is a claim the solver was not entitled to make.
+> 2. **The defaults it names no longer exist.** It ran with
+>    `residualRecomputeInterval: 50` and a host-side stop test. The
+>    current solver recomputes the true residual every iteration, runs its
+>    stop test on the GPU, and freezes the iterate when it fires
+>    (2026-09-16).
+>
+> What the table *is* still evidence for, because none of it depends on
+> the stop test: non-finite counts, rejection counts, peak pressures and
+> occupied-cell drift over 12,000 steps. Those columns held.
+>
+> Shorter runs on the current defaults (250-400 steps on examples 15, 20,
+> 23, 26 and 28) report 100% convergence with zero rejections, and
+> example 26's peak pressure is unchanged at 10.382. **A full 12,000-step
+> re-run is the outstanding item.**
+
+---
+
 ## Results
 
 | example | converged | rejected | mean iters | max iters | non-finite | peak pressure, first → last | occupied cells, first → last |

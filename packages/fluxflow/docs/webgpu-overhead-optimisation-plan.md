@@ -60,6 +60,33 @@ render passes only; the gap is a known, long-standing request
 specification. So in a browser the recordable part is not the command buffer
 -- it is everything *above* it, which is precisely where our ~5 ms sits.
 
+## STATUS, added after the fact (2026-09-16)
+
+**All four proposals below were built and measured the same day this was
+written.** The document is kept in its original "what to try next" form,
+because a plan that is rewritten after the results is no longer evidence
+about how good the reasoning was. What each one actually did:
+
+| | proposal | predicted | measured |
+| --- | --- | --- | --- |
+| A | prepared-dispatch fast path | up to 1.4x | **1.22x** (ex 15), 1.08x (ex 20), nothing on ex 28 |
+| B | fold the circuit breaker's read | ~0.8 ms, ~4% | **1.10x** (ex 28), ~1.045x (ex 15) |
+| C | optimistic continuation of the stop test | "hides ~1 ms per wait" | **1.37-1.81x** (ex 15) — much better than predicted, because the waits pipeline into each other |
+| D | GPU-side stop test, unlocked by A | qualitative | **1.24-1.54x** (ex 20) on top of C |
+
+Two things the plan got wrong, both recorded in
+`perf-investigation-cg-gpu-resident-alpha-beta.md`:
+
+- **C was underestimated.** The plan modelled the saving as one batch's
+  encode time. It is larger: consecutive waits overlap each other, so each
+  block settles at roughly a third of the full latency.
+- **D's precondition was not the one named here.** The plan said D needed
+  A, to make wasted iterations cheap. What it actually needed was for the
+  *iterate to freeze* at convergence, and for the residual being tested to
+  be the true `b - Ax` every iteration -- and that second requirement, once
+  measured, turned out to be 1.15-1.43x *faster* than the recompute
+  interval of 50 it replaced, not a cost at all.
+
 ## Proposals, in the order their measured value suggests
 
 ### A. A prepared-dispatch fast path in tsl_array_n (biggest, hardest)

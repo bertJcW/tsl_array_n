@@ -25,25 +25,35 @@ One **solver step** is:
 advect → external forces → boundary conditions → PRESSURE PROJECTION → transfer
 ```
 
-Measured on `examples/15-flow-past-cylinder/`, a 64×64 grid:
+Measured on `examples/15-flow-past-cylinder/`, a 64×64 grid. **Both
+columns are real; read the right one for the question you are asking.**
 
-| component | ms | share |
+| component | 2026-09-15 | 2026-09-16 |
 | --- | --- | --- |
-| everything except the pressure projection | 1.4 | **6%** |
-| pressure projection | 21.0 | **94%** |
-| — of which: CG iterations (~12 × 0.861 ms) | 10.3 | 46% |
-| — of which: fixed cost of one solve | ~9.1 | 40% |
+| whole solver step | 21.0–24.5 ms | **9.5 ms** |
+| everything except the pressure projection | ~1.4 ms (6%) | ~1.4 ms (15%) |
+| host round trips inside the solve | ~11 ms | ~3 ms (one per solve) |
+| three.js host-side dispatch machinery | ~6 ms | ~1.5 ms |
+| GPU compute | 0.10–0.22 ms | 0.10 ms |
 
 **The first thing to internalise: the non-pressure half of the solver is
-6% of it.** Optimising advection, forces or transfer cannot matter much.
+a small share of it.** Optimising advection, forces or transfer cannot
+matter much.
 
 **The second: the GPU is idle ~99% of the time.** Measured GPU compute is
-0.21–0.40 ms per step. The grid is 4096 cells; the arithmetic is
-microseconds. This is not a compute-bound program and never has been.
+0.10–0.22 ms per step, 0.5–0.8% of it, re-measured on 2026-09-16 after
+the step time more than halved — the ratio did not move, because every
+optimisation so far removed *host* work and shrank both sides. The grid
+is 4096 cells; the arithmetic is microseconds. This is not a
+compute-bound program and never has been.
 
-**The third: the time goes into waiting for the host.** Host round trips
-were 79% of a step before the most recent work. That is the axis along
-which every real win in this project has been found.
+**The third: the time goes into the host — but "host" is two different
+costs, and the balance between them has changed.** Waiting for readbacks
+(latency: ~3 ms per `mapAsync`, independent of size) and *encoding*
+(three.js resolving nodes, bindings and pipelines per dispatch: ~33 µs
+per `compute()` call plus ~3.5 µs per dispatch, against 0.56 µs and
+4.44 µs for the raw WebGPU calls underneath). Before 2026-09-16 only the
+first had been attacked. Both now have.
 
 ---
 
@@ -54,22 +64,34 @@ codebase, RTX-class desktop GPU, Chrome/WebGPU.
 
 | quantity | cost | how it was measured |
 | --- | --- | --- |
-| one GPU→CPU round trip (`toArray()` mid-solve) | **~1.1–1.2 ms** | ablating the circuit-breaker read; phase timing |
-| one `renderer.compute()` submission | **38.79 µs** | fixed workload, varying only submission count, least squares |
-| one CG iteration (marginal) | **0.861 ms** | iteration-cap sweep, R² 0.996 |
-| one multigrid V-cycle | **0.155 ms** | `multigrid` vs `none` preconditioner at a pinned 40 iterations |
-| one dispatch, CPU encoding | **~2.8 µs** | encode total ÷ dispatch count |
-| GPU compute, whole step | **0.21–0.40 ms** | WebGPU timestamp queries |
-| bare readback, idle queue, 4096 floats | 0.307 ms | direct |
+| one GPU→CPU round trip (`mapAsync`), **any size** | **2.7–3.4 ms** | raw WebGPU, 16 B and 64 KB within 12% of each other |
+| — the same, but 8 issued concurrently | **3.06 ms total** | they do not add: the cost is per *wait* |
+| — `queue.onSubmittedWorkDone()`, no readback | **0.155 ms** | so ~2.5 ms of a readback is `mapAsync` itself, not the GPU |
+| one dispatch encoded through three.js | **~3.5 µs** | wrapping `Renderer.compute` and its callees |
+| one `renderer.compute()` call, fixed cost | **~33 µs** | same instrumentation, per-call terms |
+| one dispatch encoded through **raw WebGPU** | **0.56 µs** | same page, same device |
+| one **raw** `queue.submit` of an empty buffer | **4.44 µs** | same |
+| one CG iteration (marginal) | **~0.3 ms** | chunk-margin experiment; was 0.861 ms before the dispatch work |
+| one multigrid V-cycle | **0.155 ms** | `multigrid` vs `none` at a pinned 40 iterations |
+| GPU compute, whole step | **0.10–0.22 ms** | WebGPU timestamp queries, resolved every step |
 
-Two consequences worth stating explicitly:
+Consequences worth stating explicitly:
 
-- **A dispatch is nearly free; a round trip is ~400× more expensive.**
-  Ideas that remove dispatches are usually worth nothing. Ideas that
-  remove round trips are usually worth a lot.
+- **A readback costs the same whatever it reads, and concurrent readbacks
+  are nearly free.** "Read fewer bytes" and "pool the staging buffer" are
+  both worthless here (measured). Only *not waiting* helps — either by
+  not needing the answer, or by having the wait overlap something.
+- **A dispatch is not free, but it is ~6× cheaper than three.js makes
+  it.** The gap between 0.56 µs and 3.5 µs, and between 4.44 µs and
+  33 µs, was worth 1.22× on its own (`prepared_dispatch.js`).
 - **A round trip's measured cost includes draining everything queued
   behind it.** So "where the wait is observed" and "what the work costs"
   are different questions. Do not add them.
+- **Superseded claim, kept because it was believed for months:** "a
+  dispatch is nearly free; a round trip is 400× more expensive, so ideas
+  that remove dispatches are worth nothing". The ratio was right and the
+  conclusion was wrong — dispatch *overhead*, at ~1000 dispatches and
+  ~160 submissions a step, was several milliseconds.
 
 ---
 
@@ -83,17 +105,31 @@ runs.**
 
 | setting | values | default | measured effect |
 | --- | --- | --- | --- |
-| `residualCheckInterval` | integer ≥ 1 | **4** | 1 → 4 is 1.16–1.52× faster. 8 pushes iterations 13 → 17 and gives it back. |
+| `gpuStopTest` | bool | **true** | the stop test runs on the GPU and the host looks once per chunk: 1.24–1.54× (ex 20), 1.04–1.35× (ex 15), 0.98–1.14× (ex 28). Requires `residualRecomputeInterval` 1 and `gpuResidentSetup`, and silently falls back otherwise |
+| `optimisticStopTest` | bool | **true** | host-in-the-loop fallback: issues a check's read before settling the previous one. 1.37–1.81× (ex 15), 1.52× (ex 28), 1.31× (ex 20). Unused while `gpuStopTest` is on |
+| `residualRecomputeInterval` | integer ≥ 1 | **1** | recomputing the true `b - Ax` every iteration is 1.15–1.43× *faster* than every 50, and is what makes the GPU stop test sound |
+| `badCellsRideAlong` | bool | **true** | circuit-breaker count travels with a read that is happening anyway: 1.10× (ex 28), ~1.045× (ex 15) |
+| `residualCheckInterval` | integer ≥ 1 | **4** | 1 → 4 is 1.16–1.52× faster. 8 pushes iterations 13 → 17 and gives it back. 16 and beyond **breaks convergence** (47% at 16). Inert while `gpuStopTest` is on |
 | `gpuResidentScalars` | bool | **true** | true is 1.13–1.24× against computing alpha/beta on the host |
 | `gpuResidentSetup` | bool | **true** | true is 1.14–1.30×; removes the two setup round trips |
 | `batchIterations` | bool | **true** | 15 → 5 submissions per iteration; 1.15–1.56× per solver step |
 | `preconditioner` | `'multigrid'` \| `'jacobi'` \| `'none'` | **multigrid** | multigrid needs ~20× fewer iterations and ~12× less time. The others are instruments, not options. |
 | `maxIterations` | integer ≥ 0 | 100 | measurement instrument: capping prices an iteration. 0 runs the setup only. |
 | `tolerance` | float ≥ 0 | 1e-5 | 0 makes a solve never converge, pinning both arms of a comparison to the same iteration count |
-| `checkBadCells` | bool | **true** | the circuit breaker's readback, 1.1 ms. **Safety, not a setting** — see §5 |
+| `checkBadCells` | bool | **true** | the circuit breaker. Its readback no longer costs a wait of its own (see `badCellsRideAlong`). **Safety, not a setting** — see §5 |
 | `settings.multigrid.batchDispatches` | bool | **true** | 1.53× and 1.74× |
 | `settings.multigrid.coarseSingleGroup` | bool | **true** | 1.09–1.10× |
 | `settings.multigrid.foldClearIntoRestrict` | bool | false | bit-identical, effect within noise |
+
+### Runtime-switchable — `tsl_array_n.dispatchSettings`
+
+| setting | values | default | measured effect |
+| --- | --- | --- | --- |
+| `preparedDispatch` | bool | **true** | encodes an already-resolved batch straight into a WebGPU pass instead of re-entering `renderer.compute()`: 1.22× (ex 15), 1.08× (ex 20), no effect on ex 28. Falls back automatically on the first run of a batch, on a non-WebGPU backend, and whenever `trackTimestamp` is on |
+
+**Consequence for measurement: `?profile=1` turns the fast path off**, because
+three.js writes its timestamp queries around its own passes. Wall-clock
+comparisons must be run without it.
 
 ### Construction-time — `createGridPressureSolver2({ multigrid: { … } })`
 
@@ -281,6 +317,21 @@ Do not re-derive these. Numbers are paired measurements unless noted.
 
 The first three, measured together off-against-on: **2.63× and 3.10×**.
 
+### Landed 2026-09-16 (the dispatch-overhead and latency round)
+
+| change | effect |
+| --- | --- |
+| batching three fixed dispatch sequences into one submission each | 1.23× (ex 15), 1.05× (ex 20) |
+| batching every remaining single-dispatch sequence | 1.04× further; submissions 159 → 67 per step |
+| `prepared_dispatch.js`: encode a resolved batch without re-entering three.js | 1.22× (ex 15), 1.08× (ex 20), nothing on ex 28 |
+| circuit-breaker count riding along with an existing read | 1.10× (ex 28) |
+| pipelined stop test (`optimisticStopTest`) | 1.37–1.81× (ex 15), 1.52× (ex 28), 1.31× (ex 20) |
+| true residual every iteration (`residualRecomputeInterval` 50 → 1) | 1.15–1.43×, **and** strictly more trustworthy |
+| GPU-side stop test with a frozen iterate (`gpuStopTest`) | 1.24–1.54× (ex 20), 1.04–1.35× (ex 15) |
+
+Together, on example 15: **24.51 → 9.54 ms per step, 2.6×**, with renderer
+calls 159 → 5 and iterations 17 → 12.2.
+
 ### Rejected, with the reason
 
 | idea | why it failed |
@@ -297,18 +348,36 @@ The first three, measured together off-against-on: **2.63× and 3.10×**.
 | FLIP stage submission batching | ~6% of submissions, time-neutral |
 | mass-weighted P2G | measured, rejected |
 
-**The pattern: everything that attacked dispatches or arithmetic failed.
-Everything that attacked host round trips worked.**
+**The pattern, as it stood on 2026-09-15: everything that attacked
+dispatches or arithmetic failed; everything that attacked host round trips
+worked.** That was true of everything tried up to then, and it was still
+the wrong generalisation. What had failed was attacking the *GPU-side*
+cost of dispatches (fewer, cheaper, better-shaped kernels) — which cannot
+matter while the GPU is 99% idle. Attacking the *host-side* cost of
+dispatches, the three.js machinery above each one, was worth 1.3× on its
+own and had simply never been tried. The durable form is: **the GPU is
+not the constraint; find whichever host cost is, and re-measure after
+each change, because removing one makes the next one dominant.**
 
 ---
 
 ## 8. Open items
 
-- **The remaining in-loop readback.** One round trip per checked
-  iteration. `residualCheckInterval` reduces how often; removing it
-  entirely means the host never learns whether to stop.
-- **The circuit breaker's read**, 1.1 ms per solve. Making it periodic is
-  a change in safety posture, not a free win.
+- ~~**The remaining in-loop readback.**~~ Closed 2026-09-16: the stop test
+  moved onto the GPU, which freezes the iterate the moment it fires, so
+  the host reads once per chunk instead of once per interval.
+- ~~**The circuit breaker's read.**~~ Closed 2026-09-16: it rides along
+  with the read the solver already does, and the guard was re-verified by
+  NaN injection rather than assumed.
+- **The ~1.5 ms of three.js bookkeeping still inside the fast path.**
+  `prepared_dispatch.js` keeps `nodes.updateForCompute` and
+  `bindings.updateForCompute` per dispatch (~2.2 µs each) because this
+  package re-exports three's `uniform()` and cannot see a caller changing
+  a value. A kernel that declared itself free of changing uniforms could
+  skip both; that is the next few hundred microseconds an iteration.
+- **The chunk predictor** is `lastIterationCount + 2`. A scene whose
+  iteration count jumps frame to frame pays an extra readback when it
+  undershoots. Nothing has been measured about how often that happens.
 - **`sandbox/jacobi-smoother/`** exists as a worked pattern for structural
   experiments, and is not wired into the library.
 - **mantaflow provenance** is verified at two points only — see
@@ -323,3 +392,8 @@ Everything that attacked host round trips worked.**
 - `docs/provenance-audit.md` — licence and copying audit.
 - `docs/realtime-fluid-tools-research.md` — how TouchDesigner and LiquiGen
   reach real time, and why it is algorithmic rather than API-level.
+- `docs/webgpu-overhead-optimisation-plan.md` — the 2026-09-16 survey of
+  what other WebGPU projects do about host overhead (ONNX Runtime Web's
+  graph capture, Babylon's snapshot rendering, the absence of compute
+  bundles) and the four proposals that came out of it, each now marked
+  with what it actually measured.

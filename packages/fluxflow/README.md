@@ -809,6 +809,21 @@ Verified by `examples/03-noise/`: renders all three as a 2D grayscale slice. Unl
 import { linalg } from 'fluxflow';
 ```
 
+> **Performance status, 2026-09-16.** The narrative further down this
+> section is kept in the order it was discovered, including the
+> measurements that were later corrected, so the numbers in it are
+> historical rather than current. Where the solver stands now: a step on
+> `examples/15-flow-past-cylinder/` is **9.54 ms**, against 24.51 ms
+> before the 2026-09-16 round and ~90 ms before any of the performance
+> work. The CG loop no longer asks the host whether to stop -- the stop
+> test runs on the GPU, the iterate freezes when it fires, and the host
+> reads once per chunk. The switches, all runtime and all on by default,
+> are `gpuStopTest`, `optimisticStopTest`, `badCellsRideAlong`,
+> `residualRecomputeInterval: 1`, plus `tsl_array_n.dispatchSettings.
+> preparedDispatch`. `docs/optimisation-agent-guide.md` §3 is the current
+> table; `docs/perf-investigation-cg-gpu-resident-alpha-beta.md` is the
+> full chronology.
+
 | File | Corresponding Python source | Contents |
 |---|---|---|
 | `linalg.js` | `linalg.py` | `createConjugateGradientSolver(applyOperator, b, x, options?)` -- matrix-free conjugate gradient, ported from Taichi Lang's own `matrixfree_cg.py` via the Python `fluxflow` project; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Also `createPreconditionedConjugateGradientSolver(applyOperator, applyPreconditioner, b, x, options?)` -- **original code, not a port** (see below) |

@@ -404,6 +404,45 @@ The compound exceeds the product of the parts (~2.1x) because each was
 measured with the other two *on*, and removing one optimisation from an
 already-fast configuration costs less than removing it from a slow one.
 
+### The second performance round (2026-09-16): host overhead, not host waits
+
+The first round had a slogan -- *attacking dispatches never works,
+attacking round trips always does* -- that was true of everything tried
+up to that point and was still the wrong generalisation. What had failed
+was attacking the **GPU-side** cost of dispatches, which cannot matter
+while the GPU is 0.5% busy. Nobody had measured the **host-side** cost of
+a dispatch until three.js's own `Renderer.compute` was instrumented:
+
+| | |
+| --- | --- |
+| a dispatch encoded through three.js | ~3.5 us |
+| the same dispatch through raw WebGPU | **0.56 us** |
+| a `renderer.compute()` call, fixed cost | ~33 us |
+| a raw `queue.submit` | **4.44 us** |
+| a step on example 15 | 999 dispatches in **159** calls, 107 of them carrying one dispatch |
+
+| Optimisation | Speedup | Note |
+| --- | --- | --- |
+| batching three fixed dispatch sequences | **1.23x, 1.05x** | bit-identical output, hashed over 150 steps |
+| batching every remaining single-dispatch sequence | **1.04x** | submissions 159 -> 67 |
+| `prepared_dispatch.js`: encode a resolved batch directly | **1.22x, 1.08x** | asks three.js for what it resolved, does not reimplement it |
+| circuit-breaker count riding along with an existing read | **1.10x** | concurrent readbacks cost what one costs |
+| pipelined stop test | **1.37-1.81x** | waits overlap each other, so each block settles at ~a third |
+| true residual every iteration (interval 50 -> 1) | **1.15-1.43x** | faster *because* honest: no verification cycle to spend |
+| GPU-side stop test with a frozen iterate | **1.24-1.54x** | host reads once per chunk |
+
+**Example 15: 24.51 -> 9.54 ms per step, 2.6x**, with every scene still
+converging 100% of the time and example 26's peak pressure unchanged at
+10.382.
+
+Two things are worth carrying forward more than the numbers. The first is
+that **removing one host cost makes the next one dominant** -- proposal C
+was worth 1.5x partly because A had already made the encode cheap enough
+that deferring a decision cost little. The second is that **the readback
+cost is per wait, not per read**: 16 bytes and 64 KB cost the same
+~3 ms, and eight concurrent maps cost what one costs. Every latency win
+in this round followed from that one measurement.
+
 ### What was rejected, by measurement
 
 Recorded because the reasoning recurs:
@@ -495,7 +534,13 @@ instrumentation.
   is ~800 dispatches, and alongside them ~272 `renderer.compute()` calls, which
   turned out to be the thing that mattered. See the Performance section.**
 - **CPU-side encoding: 2.28 ms of an 89.8 ms frame.** Encoding is not the
-  bottleneck, which retires dispatch fusion as a direction.
+  bottleneck, which retires dispatch fusion as a direction. **Wrong, and
+  corrected on 2026-09-16.** The figure came from the profiler's own
+  wrappers, which only covered part of the path; instrumenting three.js
+  directly found ~6 ms of host-side dispatch machinery in a ~20 ms step,
+  and removing most of it was worth 1.3x. What the number did establish
+  correctly is that *fusing kernels* is pointless -- the cost was never
+  the GPU's.
 - `cg-dot` runs three times per CG iteration -- `pAp` for alpha, `r.r` for
   the stop test, `r.z` for beta -- and each is a GPU-to-CPU round trip.
 - It is not the transfer that costs. A bare 4096-float readback on an idle
@@ -720,6 +765,12 @@ have said the same thing sooner.
   Krylov Subspace Iterative Methods* (SIAM J. Sci. Comput.), and Cools et
   al. on automated replacement for pipelined CG. Parked deliberately, not
   forgotten.
+
+- **The 12,000-step stability suite has not been re-run** since the
+  convergence fix or the 2026-09-16 solver changes. `long-run-stability.md`
+  now carries a banner saying which of its columns are still evidence and
+  which are not. Shorter runs (250-400 steps on five scenes) hold on the
+  current defaults; the long one is ~20 minutes of machine time.
 
 - **`src/grid/dye_field2.js`** is committed but deliberately not exported --
   a higher-resolution passive dye field, parked pending the agreed ordering
