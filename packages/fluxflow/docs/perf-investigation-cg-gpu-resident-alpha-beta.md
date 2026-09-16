@@ -2436,3 +2436,62 @@ steps from a fresh load, u/v/pressure hashing 857113263 / -742805524 /
 
 The five singles that remain are one-off kernels with host work on both
 sides of them; there is no sequence left to merge.
+
+# Proposal A, built and measured: encoding a batch without three.js (2026-09-16)
+
+`packages/tsl_array_n/src/prepared_dispatch.js`. `createBatch` still runs its
+first execution through `renderer.compute()`; afterwards it asks three.js for
+what that call resolved -- the bind groups, the pipeline and the workgroup
+counts three.js itself cached -- and encodes the pass directly with
+`setPipeline` / `setBindGroup` / `dispatchWorkgroups`, one command buffer,
+one submit.
+
+Nothing of three.js's implementation is reproduced. In particular the
+workgroup-count arithmetic is *not* reimplemented: it is read back from the
+value three.js computed and cached on the first run. What is skipped is the
+per-call encoder/pass/submission bookkeeping and the dispatch-time
+indirection; what is kept, on every dispatch, is `nodes.updateForCompute` and
+`bindings.updateForCompute`, because those upload changed uniforms and this
+package re-exports three's `uniform()` rather than wrapping it -- a stale
+`dt` would be a silent wrong answer.
+
+It falls back to `renderer.compute()` on the first run of a batch, on a
+non-WebGPU backend, on anything it cannot resolve, and -- deliberately --
+whenever `trackTimestamp` is on, because three.js writes its timestamp
+queries around its own passes and a pass encoded here would be invisible to
+them. **Consequence worth knowing: `?profile=1` measures the slow path.**
+Wall-clock comparisons have to be run without it.
+
+## Measured
+
+Paired, phase-alternated within one run, the switch being
+`tsl_array_n.dispatchSettings.preparedDispatch`:
+
+| scene | renderer calls/step | three.js path | prepared | |
+| --- | --- | --- | --- | --- |
+| 15 flow past cylinder | 67 -> 5 | 21.97 ms | 18.01 ms | **1.22x** |
+| 20 FLIP dam break | 48 -> 5 | 15.45 / 14.38 / 12.14 | 14.27 / 13.51 / 11.14 | **1.08x** (3 reps) |
+| 28 drop into pool | 109 -> 12 | 35.09 / 35.03 | 34.16 / 37.00 | **no effect** |
+
+Two honest notes on that table. The first example-20 run, 12 rounds on a
+still-settling scene, read 0.945x; three repetitions of 20 rounds each then
+read 1.082, 1.064 and 1.090, so the first was noise and the later figure is
+the one to believe. And example 28 shows nothing despite the fast path being
+active on 1627 of its 1649 dispatches -- at 35-42 ms/step with ~28 iterations
+its time is going somewhere else (seven serial stop-test reads is ~16 ms of
+it), and the host bookkeeping this removes is not what it is waiting on. The
+optimisation is worth what the scene was spending on dispatch overhead, which
+is a lot on example 15 and not much on example 28.
+
+## Correctness
+
+- **Bit identity on example 15:** 150 steps from a fresh load with the fast
+  path on and off, u/v/pressure hashing 857113263 / -742805524 / -914744686
+  in both -- the same values as before any of today's changes.
+- Example 20: 150 steps, 100% converged, particle positions all finite.
+- Example 28: 200 steps, 200/200 converged, zero rejections, all finite.
+- Example 23 (moving collider, kernels rebuilt every frame -- the case that
+  invalidates a cached plan): 250 steps, 250/250 converged, zero rejections,
+  and the scene renders correctly.
+- The timestamp fallback was verified rather than assumed: with `?profile=1`
+  the renderer sees all 67 calls again and GPU timestamps still resolve.

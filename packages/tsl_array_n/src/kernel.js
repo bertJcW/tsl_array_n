@@ -1,6 +1,7 @@
 import { Fn, instanceIndex } from 'three/tsl';
 import { getRenderer } from './context.js';
 import { normalizeShape } from './array.js';
+import { createPreparedDispatcher } from './prepared_dispatch.js';
 
 function unflattenNodeIndex( flatIndexNode, dims ) {
 
@@ -141,7 +142,18 @@ function planBatch( dispatchers ) {
  */
 export function createBatch( dispatchers ) {
 
-	const plan = planBatch( dispatchers );
+	const plan = planBatch( dispatchers ).map( ( segment ) => {
+
+		if ( Array.isArray( segment ) !== true ) return segment;
+
+		// A run of kernels is one compute() and one submit -- and, once
+		// three.js has resolved it, one directly encoded pass instead. See
+		// prepared_dispatch.js for what that skips and what it keeps.
+		const run = createPreparedDispatcher( segment, () => getRenderer().compute( segment ) );
+
+		return { run };
+
+	} );
 
 	return function dispatchPlannedBatch() {
 
@@ -149,10 +161,8 @@ export function createBatch( dispatchers ) {
 
 		for ( const segment of plan ) {
 
-			// An array is a run of kernels -- one compute(), one submit.
-			// Anything else is a dispatcher that has to run on its own.
-			if ( Array.isArray( segment ) ) renderer.compute( segment );
-			else segment();
+			if ( typeof segment === 'function' ) segment();
+			else segment.run( renderer );
 
 		}
 
