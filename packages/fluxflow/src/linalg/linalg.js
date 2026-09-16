@@ -761,7 +761,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	// the solve is expensive, or because it is doing eighty iterations?" is
 	// not answerable without it, and it was guessed at more than once before
 	// it was measurable.
-	const state = { residualSquared: 0, iterations: 0, stoppedBy: 'none' };
+	const state = { residualSquared: 0, iterations: 0, stoppedBy: 'none', companionValue: null };
 
 	const applyToX = applyOperator( x, Ax );
 	const applyToP = applyOperator( p, Ap );
@@ -1107,6 +1107,51 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 	}
 
+	// *** Riding along with a read that is happening anyway ***
+	//
+	// A mapAsync readback costs ~2.3 ms on this hardware whether it reads 16
+	// bytes or 64 KB, and eight of them issued together cost what one costs
+	// (3.06 vs 3.45 ms, measured) -- the cost is per *wait*, not per read. So
+	// a caller that needs one small value from the same moment the solver is
+	// already stopping to look at its scalars should not pay a second wait
+	// for it.
+	//
+	// The caller supplies a dispatcher to run before the read and a read of
+	// its own; both go out together and the value lands in
+	// `state.companionValue`. grid_pressure_solver2.js's circuit breaker is
+	// the case this exists for: `phases` priced its private round trip at
+	// 0.80 ms/step.
+	//
+	// Whatever the companion measures, it measures the x that the batch
+	// immediately before the read produced -- which for the read that ends
+	// the solve is the x the solver is about to return. That is the property
+	// the circuit breaker needs, and it is why the dispatch happens here
+	// rather than after solve() returns.
+	let readCompanion = null;
+
+	function setReadCompanion( companion ) {
+
+		readCompanion = companion;
+
+	}
+
+	async function readScalars( label ) {
+
+		if ( readCompanion === null ) return timePhase( label, () => scalars.toArray() );
+
+		readCompanion.dispatch();
+
+		const [ snapshot, value ] = await timePhase(
+			label,
+			() => Promise.all( [ scalars.toArray(), readCompanion.read() ] )
+		);
+
+		state.companionValue = value;
+
+		return snapshot;
+
+	}
+
 	const iterationBatchCore = tsl_array_n.createBatch( iterationCore );
 	const iterationBatchRecompute = tsl_array_n.createBatch( iterationRecompute );
 
@@ -1300,7 +1345,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 			if ( residualIsCurrent ) {
 
-				const snapshot = await timePhase( 'solve-iteration-read', () => scalars.toArray() );
+				const snapshot = await readScalars( 'solve-iteration-read' );
 				const stopCode = snapshot[ SLOT_STOP ];
 
 				newRTr = snapshot[ SLOT_RR ];
@@ -1386,7 +1431,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		// behind. See the host path's equivalent.
 		if ( ! residualIsCurrent ) {
 
-			const snapshot = await timePhase( 'solve-final-read', () => scalars.toArray() );
+			const snapshot = await readScalars( 'solve-final-read' );
 			const stopCode = snapshot[ SLOT_STOP ];
 
 			newRTr = snapshot[ SLOT_RR ];
@@ -1411,6 +1456,9 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	async function solve( tol, maxiter, residualCheckInterval = 1, gpuResidentScalars = false, batchIterations = true, gpuResidentSetup = false, relativeTolerance = false, recomputeInterval = RESIDUAL_RECOMPUTE_INTERVAL, verifyConvergence = true ) {
 
 		state.stoppedBy = 'none';
+		// Null until a read carrying the companion happens, so a caller can
+		// tell "no value from this solve" from "the value was zero".
+		state.companionValue = null;
 
 		// Only the GPU-resident loop has a batched form: the host loop below
 		// reads three scalars back per iteration, so its dispatches cannot be
@@ -1643,6 +1691,6 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 	}
 
-	return { solve, p, r, z, Ap, Ax, state, scalars };
+	return { solve, setReadCompanion, p, r, z, Ap, Ax, state, scalars };
 
 }

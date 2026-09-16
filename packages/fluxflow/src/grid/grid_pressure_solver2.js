@@ -338,7 +338,14 @@ export function createGridPressureSolver2( {
 	// this measurement does not work and the interventional one needs the
 	// cap to move inside a single run. A capped solve does not converge and
 	// is not a correctness configuration; see the tolerance note above.
-	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations, tolerance, checkBadCells: true, gpuResidentSetup, relativeTolerance, residualRecomputeInterval, verifyConvergence };
+	// `badCellsRideAlong`: whether the circuit breaker's count travels with
+	// the solver's own last readback (see setReadCompanion below) instead of
+	// taking a round trip of its own. A runtime switch rather than a
+	// constructor option because this project's performance comparisons are
+	// paired inside one run -- see multigrid.js's own settings for the
+	// precedent. Off means the old, separate read; the check itself is
+	// identical either way.
+	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations, tolerance, checkBadCells: true, badCellsRideAlong: true, gpuResidentSetup, relativeTolerance, residualRecomputeInterval, verifyConvergence };
 
 	const [ resolutionX, resolutionY ] = resolution;
 	const [ gridSpacingX, gridSpacingY ] = gridSpacing;
@@ -514,14 +521,48 @@ export function createGridPressureSolver2( {
 
 	} );
 
+	const badCountZero = new Int32Array( [ 0 ] );
+
 	async function countBadPressureCellsNow() {
 
-		badCountAccum.fromArray( new Int32Array( [ 0 ] ) );
+		badCountAccum.fromArray( badCountZero );
 		countBadPressureCells();
 		const [ count ] = await badCountAccum.toArray();
 		return count;
 
 	}
+
+	// *** The same check, without a round trip of its own ***
+	//
+	// The count above is one host wait (`phases` priced it at 0.80 ms/step)
+	// for one integer. The CG solver is already waiting on a readback at the
+	// moment it stops, and concurrent maps are nearly free -- eight cost what
+	// one costs, measured -- so the count rides along with that read instead.
+	// See linalg.js's setReadCompanion for why the value it produces
+	// describes exactly the pressure the solver is about to return.
+	//
+	// It stays *this* file's check: the same kernel, the same threshold, the
+	// same "reject and restore" decision. Only the wait is shared.
+	cg.setReadCompanion( {
+
+		dispatch: () => {
+
+			if ( settings.checkBadCells !== true || settings.badCellsRideAlong !== true ) return;
+
+			badCountAccum.fromArray( badCountZero );
+			countBadPressureCells();
+
+		},
+
+		read: () => {
+
+			if ( settings.checkBadCells !== true || settings.badCellsRideAlong !== true ) return null;
+
+			return badCountAccum.toArray().then( ( values ) => values[ 0 ] );
+
+		}
+
+	} );
 
 	// input/output: FaceCenteredGrid2 (grid_data2.js) -- typically the same
 	// grid passed twice (in place), safe because the correction step below
@@ -769,8 +810,17 @@ export function createGridPressureSolver2( {
 			// answer "what does the check cost?", and the answer may
 			// justify checking periodically rather than every solve. It
 			// does not justify not checking.
+			// The count normally arrives with the solver's own last readback
+			// (see setReadCompanion above), costing no wait of its own. The
+			// fallback is for a solve that never got that far -- a host-path
+			// solve that returned before any read, say -- where the check
+			// still has to happen, round trip and all.
+			const ridingCount = settings.badCellsRideAlong ? cg.state.companionValue : null;
+
 			diagnostics.rejected = settings.checkBadCells
-				? ( await timePhase( 'pressure-badcells-read', () => countBadPressureCellsNow() ) ) > 0
+				? ( ridingCount !== null && ridingCount !== undefined
+					? ridingCount > 0
+					: ( await timePhase( 'pressure-badcells-read', () => countBadPressureCellsNow() ) ) > 0 )
 				: false;
 
 			// Restore the last known-good field, or -- this solve having

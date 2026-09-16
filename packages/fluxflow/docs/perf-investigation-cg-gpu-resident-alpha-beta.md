@@ -2495,3 +2495,48 @@ is a lot on example 15 and not much on example 28.
   and the scene renders correctly.
 - The timestamp fallback was verified rather than assumed: with `?profile=1`
   the renderer sees all 67 calls again and GPU timestamps still resolve.
+
+# Proposal B: the circuit breaker stops taking a round trip of its own (2026-09-16)
+
+`countBadPressureCellsNow()` was one host wait for one integer -- `phases`
+priced it at 0.80 ms/step. The CG solver is already waiting on a readback
+every fourth iteration, and concurrent maps are nearly free (eight cost what
+one costs), so the count now rides along with that read: `cg.setReadCompanion`
+takes a dispatcher to run before the read and a read of its own, issues both
+together with `Promise.all`, and leaves the value in `state.companionValue`.
+
+The check itself did not move. Same kernel, same threshold, same
+reject-and-restore decision in `grid_pressure_solver2.js` -- only the wait is
+shared. `settings.badCellsRideAlong` switches it at runtime so the comparison
+can be paired, and the old separate read is still the fallback for a solve
+that ends before any read happens.
+
+Why the value is the right one: whatever the companion measures describes the
+x that the batch immediately before the read produced, and for the read that
+ends the solve that is the x the solver is about to return -- which is the
+property the guard needs. That is why the dispatch happens inside the solver
+rather than after `solve()` returns.
+
+## Measured
+
+Paired, phase-alternated on `badCellsRideAlong`:
+
+| scene | separate read | riding along | | |
+| --- | --- | --- | --- | --- |
+| 28 drop into pool | 35.53 / 33.20 / 29.02 ms | 31.11 / 31.74 / 26.08 ms | **1.10x** | +1.4 to +4.4 ms |
+| 15 flow past cylinder | 20.72 / 22.52 / 21.60 / 22.13 | 19.31 / 21.18 / 22.24 / 21.55 | **1.045x** (median) | +0.67 ms mean, one of four reps negative |
+
+Example 28 gains more because it waits more: ~28 iterations means seven stop
+tests per solve, and its bad-cell kernel covers a bigger field. On example 15
+the saving is real but close to that scene's noise -- four repetitions of 20
+rounds, three positive and one negative, is what a ~0.7 ms effect looks like
+on a ~21 ms step.
+
+## The guard still guards, checked directly
+
+The historical failure this check exists for is a NaN reaching velocity, so
+the test injects one: write a NaN into the pressure field, step once, and
+require that the solve is **rejected in that same frame**, the field comes
+back finite, and the next frame is clean and not rejected. All three hold.
+Five clean frames either side reject nothing, and example 28 runs 150 steps
+with 150/150 converged, zero rejections and every cell finite.
