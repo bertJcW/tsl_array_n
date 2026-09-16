@@ -2540,3 +2540,66 @@ require that the solve is **rejected in that same frame**, the field comes
 back finite, and the next frame is clean and not rejected. All three hold.
 Five clean frames either side reject nothing, and example 28 runs 150 steps
 with 150/150 converged, zero rejections and every cell finite.
+
+# Proposal C: asking the stop test one batch before listening to it (2026-09-16)
+
+The loop used to encode a batch, await its readback, decide, and only then
+encode the next batch. The readback's ~3 ms is latency, not work -- the GPU
+finished long before the map resolves -- so the loop now issues this check's
+read *before* settling the previous one. Two maps are in flight at once,
+which costs what one costs, and the batch of iterations encoded in between is
+time the wait no longer charges for.
+
+The waits also pipeline into each other, which is why the effect is bigger
+than "hide one batch's encode time": if each check blocks for X, the time
+between issuing a read and awaiting it is X plus the interval's encode, so X
+settles at roughly `latency - X - encode` -- about a third of the original
+wait rather than all of it.
+
+**What it costs:** the stop decision arrives one interval late, so a
+converged solve runs up to `residualCheckInterval` iterations it did not
+need -- measured as ~40% more iterations. The read issued at the check that
+decides to stop is awaited before breaking, so what the solver reports still
+describes the x it leaves behind, and no promise is left dangling to resolve
+into a later solve's state. The last two intervals before `maxIterations` are
+always asked synchronously: a solve near the cap cannot afford the overshoot,
+and would be reported as not converged for the sake of a hidden wait.
+
+`settings.optimisticStopTest`, on by default.
+
+## Measured
+
+Paired, phase-alternated, `mapAsync` latency on this machine measured at
+3.11 ms during the same session:
+
+| scene | synchronous | pipelined | | iterations |
+| --- | --- | --- | --- | --- |
+| 15 flow past cylinder | 16.5-21.2 ms | 11.0-14.3 ms | **1.37-1.81x** (7 reps) | 21 -> 29 |
+| 28 drop into pool | 29.7 / 29.1 / 26.6 | 19.3 / 19.2 / 17.5 | **1.52x** | 30 -> 38 |
+| 20 FLIP dam break | 15.5 / 15.5 / 15.3 | 11.4 / 11.8 / 12.1 | **1.31x** | |
+| 26 dye free surface | 17.0 / 19.2 | 15.1 / 10.1 | faster, unpaired | 14-18 -> 21-27 |
+
+One run of three repetitions on example 15, taken earlier in the session,
+read 1.097 / 0.904 / 0.985 -- a wash. It is recorded here because it did not
+reproduce: two later harnesses, seven repetitions between them, all read
+1.37x or better, and the baseline arm in the anomalous run was itself
+unusually fast (14 ms against 19-21 ms later). Readback latency is a browser
+and driver state, not a constant, and this optimisation is worth exactly what
+that latency costs at the time.
+
+## Convergence, which is the thing this could have broken
+
+| scene | steps | converged | rejected | |
+| --- | --- | --- | --- | --- |
+| 28 drop into pool | 300 | 300/300 | 0 | all finite, 36.2 mean iterations |
+| 20 FLIP dam break | 200 | 200/200 | 0 | positions finite |
+| 23 moving collider | 200 | 200/200 | 0 | positions finite |
+| 26 dye free surface | 100 + 100 | 100% both arms | 0 | |
+| 15 flow past cylinder | 100 + 100 | 100% both arms | 0 | 16.9 -> 24.1 iterations |
+
+## Where the step time stands
+
+Example 15, same scene and same machine as the 24.51 ms that started today's
+work: **11.12 ms/step**, about 2.2x, from four changes that between them
+removed 100 submissions, ~5 ms of three.js bookkeeping, one round trip and
+two thirds of what the rest of the round trips cost.

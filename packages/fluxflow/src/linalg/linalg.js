@@ -763,6 +763,19 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	// it was measurable.
 	const state = { residualSquared: 0, iterations: 0, stoppedBy: 'none', companionValue: null };
 
+	// Runtime-switchable behaviour, the same shape multigrid.js uses and for
+	// the same reason: a comparison this project trusts is paired inside one
+	// run, which a constructor option cannot be.
+	//
+	// `optimisticStopTest` pipelines the stop test -- see its use in the
+	// loop. On, because the measurement says so: 1.37-1.81x on example 15
+	// and 1.52x on example 28, paired, with every solve still converging.
+	// It buys that by running ~40% more iterations, which is a good trade
+	// only because a readback costs ~3 ms of latency against ~0.2 ms for an
+	// iteration. A machine where that ratio is very different would want it
+	// off, which is why it is a switch.
+	const settings = { optimisticStopTest: true };
+
 	const applyToX = applyOperator( x, Ax );
 	const applyToP = applyOperator( p, Ap );
 	const applyPreconditionerToR = applyPreconditioner( r, z );
@@ -1192,6 +1205,8 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	 */
 	async function solveWithGpuResidentScalars( tol, maxiter, residualCheckInterval, batchIterations, gpuResidentSetup, relativeTolerance, recomputeInterval = RESIDUAL_RECOMPUTE_INTERVAL, verifyConvergence = true ) {
 
+		const optimisticStopTest = settings.optimisticStopTest === true;
+
 		let newRTr;
 		let oldRTr;
 
@@ -1287,6 +1302,99 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		// instead of chasing a threshold of zero.
 		let stopThreshold = tol;
 
+		// The read issued but not yet listened to, under optimisticStopTest.
+		// Every read that is issued is awaited before this function returns:
+		// an unawaited one would resolve into `state` during whatever solve
+		// happens to be running by then.
+		let pendingRead = null;
+
+		// *** The stop decision, factored out ***
+		//
+		// Two paths reach it now: the loop awaiting its own read, and --
+		// under `optimisticStopTest` -- the loop settling a read it issued a
+		// batch earlier. `residualWasTrue` travels with the snapshot instead
+		// of being read off the loop, because once a read is deferred the two
+		// no longer describe the same iteration. Returns true to stop.
+		function applySnapshot( snapshot, residualWasTrue ) {
+
+			const stopCode = snapshot[ SLOT_STOP ];
+
+			newRTr = snapshot[ SLOT_RR ];
+
+			if ( stopCode !== STOP_NONE ) {
+
+				// A guard tripping on an already-converged residual is
+				// not a failure: there is nothing left to solve, p is
+				// ~0 so p.Ap is ~0, and alpha being forced to 0 leaves
+				// x exactly where it belongs. Without the pre-loop read
+				// that case now reaches the loop, and calling it
+				// 'degenerate-pAp' would be alarming and wrong.
+				if ( Math.sqrt( Math.abs( newRTr ) ) >= stopThreshold ) {
+
+					state.stoppedBy = STOP_REASONS[ stopCode ] ?? 'unknown';
+
+				}
+
+				return true;
+
+			}
+
+			if ( relativeTolerance ) {
+
+				const normB = Math.sqrt( Math.abs( snapshot[ SLOT_BB ] ) );
+				stopThreshold = Math.max( tol * normB, tol );
+
+			}
+
+			if ( Math.sqrt( Math.abs( newRTr ) ) < stopThreshold ) {
+
+				// *** Do not take the incremental residual's word for it ***
+				//
+				// CG tracks r by `r -= alpha * Ap` rather than
+				// recomputing `b - Ax`, and that estimate drifts --
+				// optimistically, and by more as r gets small, because
+				// the update is a near-cancellation of two similar
+				// quantities. Measured on examples/28-drop-into-pool/,
+				// same frame, only the recompute interval varying:
+				//
+				//   recompute every 50 (the default): the loop stops at
+				//     iteration 32 reporting 7.40e-6, while the true
+				//     residual is 3.571e-4 -- optimistic by 48x.
+				//   every 5, 2 or 1: the reported residual matches the
+				//     true one to three significant figures, and the
+				//     solve runs to its iteration cap without ever
+				//     reaching 1e-5, because ~2e-4 is the floor there.
+				//
+				// So that scene never converged; it reported that it
+				// had, because a typical solve finishes in ~33
+				// iterations and the drift was only checked every 50.
+				// The handful of "failures" were the solves that
+				// happened to run past 50, got corrected, and told the
+				// truth.
+				//
+				// Verifying costs one Laplacian apply and one dot
+				// product per solve -- cheaper than a V-cycle, which is
+				// 0.155 ms -- and it only happens once, when the
+				// tracked residual first claims success.
+				if ( residualWasTrue || ! verifyConvergence ) return true;
+
+				verifyFailed = true;
+
+				// Recompute next iteration and test again. No risk of
+				// looping: after a recompute `residualWasTrue` is set,
+				// so the next pass either breaks or carries on as
+				// normal.
+				forceResidualRecompute = true;
+
+			}
+
+			if ( newRTr > oldRTr ) forceResidualRecompute = true;
+			oldRTr = newRTr;
+
+			return false;
+
+		}
+
 		for ( let iter = 0; iter < maxiter; iter ++ ) {
 
 			state.iterations = iter + 1;
@@ -1345,82 +1453,90 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 			if ( residualIsCurrent ) {
 
-				const snapshot = await readScalars( 'solve-iteration-read' );
-				const stopCode = snapshot[ SLOT_STOP ];
+				// Deferring the decision costs an interval's worth of extra
+				// iterations, and a solve that is already near the cap cannot
+				// afford them -- it would be pushed over and reported as not
+				// converged for the sake of a hidden wait. So the last two
+				// intervals before the cap are always asked synchronously.
+				const pipeline = optimisticStopTest && iter + 2 * residualCheckInterval < maxiter;
 
-				newRTr = snapshot[ SLOT_RR ];
+				if ( pipeline ) {
 
-				if ( stopCode !== STOP_NONE ) {
+					// *** Ask now, listen one batch later ***
+					//
+					// A readback's ~2.3 ms is latency, not work: the GPU has
+					// finished long before the map resolves. Issuing this
+					// check's read *before* settling the previous one puts
+					// both in flight together -- and concurrent maps cost
+					// what one costs (8 for 3.06 ms against 3.45 ms for one,
+					// measured) -- so the batch of iterations encoded since
+					// the last check is time the wait no longer costs.
+					//
+					// What it costs: the stop decision arrives one interval
+					// late, so a converged solve runs up to
+					// `residualCheckInterval` iterations it did not need.
+					// That overshoot is the same size as running at twice
+					// the interval, which the sweep in
+					// ../docs/perf-investigation-cg-gpu-resident-alpha-beta.md
+					// measured as safe at 8 and unsafe at 16.
+					//
+					// The read issued here is awaited before breaking, so
+					// what the solver reports still describes the x it
+					// leaves behind -- and no promise is left dangling to
+					// resolve into the next solve's state.
+					const issued = readScalars( 'solve-iteration-read' );
+					const issuedResidualIsTrue = residualIsTrue;
 
-					// A guard tripping on an already-converged residual is
-					// not a failure: there is nothing left to solve, p is
-					// ~0 so p.Ap is ~0, and alpha being forced to 0 leaves
-					// x exactly where it belongs. Without the pre-loop read
-					// that case now reaches the loop, and calling it
-					// 'degenerate-pAp' would be alarming and wrong.
-					if ( Math.sqrt( Math.abs( newRTr ) ) >= stopThreshold ) {
+					if ( pendingRead !== null ) {
 
-						state.stoppedBy = STOP_REASONS[ stopCode ] ?? 'unknown';
+						const settled = await pendingRead.promise;
+
+						if ( applySnapshot( settled, pendingRead.residualWasTrue ) ) {
+
+							applySnapshot( await issued, issuedResidualIsTrue );
+							pendingRead = null;
+							break;
+
+						}
 
 					}
 
-					break;
+					pendingRead = { promise: issued, residualWasTrue: issuedResidualIsTrue };
+
+					// Nothing settled for the current x yet.
+					residualIsCurrent = false;
+
+				} else {
+
+					// Settle anything still in flight first: its snapshot is
+					// older, so it gets its decision before this one does.
+					if ( pendingRead !== null ) {
+
+						const settled = await pendingRead.promise;
+						const settledResidualWasTrue = pendingRead.residualWasTrue;
+						pendingRead = null;
+
+						if ( applySnapshot( settled, settledResidualWasTrue ) ) break;
+
+					}
+
+					const snapshot = await readScalars( 'solve-iteration-read' );
+
+					if ( applySnapshot( snapshot, residualIsTrue ) ) break;
 
 				}
-
-				if ( relativeTolerance ) {
-
-					const normB = Math.sqrt( Math.abs( snapshot[ SLOT_BB ] ) );
-					stopThreshold = Math.max( tol * normB, tol );
-
-				}
-
-				if ( Math.sqrt( Math.abs( newRTr ) ) < stopThreshold ) {
-
-					// *** Do not take the incremental residual's word for it ***
-					//
-					// CG tracks r by `r -= alpha * Ap` rather than
-					// recomputing `b - Ax`, and that estimate drifts --
-					// optimistically, and by more as r gets small, because
-					// the update is a near-cancellation of two similar
-					// quantities. Measured on examples/28-drop-into-pool/,
-					// same frame, only the recompute interval varying:
-					//
-					//   recompute every 50 (the default): the loop stops at
-					//     iteration 32 reporting 7.40e-6, while the true
-					//     residual is 3.571e-4 -- optimistic by 48x.
-					//   every 5, 2 or 1: the reported residual matches the
-					//     true one to three significant figures, and the
-					//     solve runs to its iteration cap without ever
-					//     reaching 1e-5, because ~2e-4 is the floor there.
-					//
-					// So that scene never converged; it reported that it
-					// had, because a typical solve finishes in ~33
-					// iterations and the drift was only checked every 50.
-					// The handful of "failures" were the solves that
-					// happened to run past 50, got corrected, and told the
-					// truth.
-					//
-					// Verifying costs one Laplacian apply and one dot
-					// product per solve -- cheaper than a V-cycle, which is
-					// 0.155 ms -- and it only happens once, when the
-					// tracked residual first claims success.
-					if ( residualIsTrue || ! verifyConvergence ) break;
-
-					verifyFailed = true;
-
-					// Recompute next iteration and test again. No risk of
-					// looping: after a recompute `residualIsTrue` is set,
-					// so the next pass either breaks or carries on as
-					// normal.
-					forceResidualRecompute = true;
-
-				}
-
-				if ( newRTr > oldRTr ) forceResidualRecompute = true;
-				oldRTr = newRTr;
 
 			}
+
+		}
+
+		// A pipelined read that the loop ran out of iterations before
+		// listening to. Settling it is not optional: its promise would
+		// otherwise resolve into `state` during a later solve.
+		if ( pendingRead !== null ) {
+
+			applySnapshot( await pendingRead.promise, pendingRead.residualWasTrue );
+			pendingRead = null;
 
 		}
 
@@ -1691,6 +1807,6 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 	}
 
-	return { solve, setReadCompanion, p, r, z, Ap, Ax, state, scalars };
+	return { solve, setReadCompanion, settings, p, r, z, Ap, Ax, state, scalars };
 
 }

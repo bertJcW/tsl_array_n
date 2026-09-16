@@ -345,7 +345,7 @@ export function createGridPressureSolver2( {
 	// paired inside one run -- see multigrid.js's own settings for the
 	// precedent. Off means the old, separate read; the check itself is
 	// identical either way.
-	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations, tolerance, checkBadCells: true, badCellsRideAlong: true, gpuResidentSetup, relativeTolerance, residualRecomputeInterval, verifyConvergence };
+	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations, tolerance, checkBadCells: true, badCellsRideAlong: true, optimisticStopTest: true, gpuResidentSetup, relativeTolerance, residualRecomputeInterval, verifyConvergence };
 
 	const [ resolutionX, resolutionY ] = resolution;
 	const [ gridSpacingX, gridSpacingY ] = gridSpacing;
@@ -773,6 +773,9 @@ export function createGridPressureSolver2( {
 			// grid_blocked_boundary_condition_solver2.js's constrainVelocity
 			// for what a bare dispatch costs and why merging is safe.
 			buildSystemBatch();
+			// Forwarded per solve so both are one switch to a measurement
+			// harness -- see linalg.js's own settings for what it does.
+			cg.settings.optimisticStopTest = settings.optimisticStopTest === true;
 			diagnostics.converged = await timePhase( 'pressure-cg-solve', () => cg.solve(
 				settings.tolerance, settings.maxIterations,
 				settings.residualCheckInterval, settings.gpuResidentScalars, settings.batchIterations,
