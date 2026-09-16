@@ -688,7 +688,19 @@ have said the same thing sooner.
 
 ## Open items
 
-- **Estimate the residual gap instead of recomputing on a fixed schedule.**
+- ~~**Estimate the residual gap instead of recomputing on a fixed
+  schedule.**~~ **Closed 2026-09-16, by removing the gap rather than
+  estimating it.** Recomputing the true `b - Ax` *every* iteration was
+  measured at 1.15-1.43x faster than the interval of 50 on three scenes,
+  not slower: an operator apply is a handful of dispatches against a
+  V-cycle's 38, the GPU is busy under 1% of a step, and with the residual
+  always true the convergence verification never spends a second stop-test
+  cycle. There is no accumulated gap left for an estimator to estimate,
+  and the stop test could then be moved onto the GPU entirely. The
+  reasoning that motivated the item is kept below because it is still the
+  right description of what went wrong.
+
+  ORIGINAL ITEM:
   The convergence bug fixed on 2026-09-15 was a textbook one -- the
   recursively updated residual drifting from the true `b - Ax`, known in
   the literature as the *residual gap* -- and the code already had the
