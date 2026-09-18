@@ -216,7 +216,7 @@ export function createGridPressureSolver3( {
 
 	applyPreconditioner.settings = preconditionerBuilders.multigrid.settings;
 
-	const refreshPreconditionerMask = preconditionerBuilders.multigrid.refreshDirichletLevels;
+	const refreshPreconditionerMask = preconditionerBuilders.multigrid.refreshCoarseLevels;
 
 	const cg = createPreconditionedConjugateGradientSolver( applyLaplacian, applyPreconditioner, b, pressureGrid.data, { atomicScale } );
 
@@ -438,12 +438,13 @@ export function createGridPressureSolver3( {
 		return async function dispatch() {
 
 			buildSystemBatch();
-			// The multigrid preconditioner keeps one Dirichlet mask field
-			// per coarse level, coarsened from the mask buildSystemBatch
-			// just refreshed -- see multigrid.js's own level-mask comment
-			// for why the coarse levels need it at all. Dispatched once per
-			// solve, here, rather than inside the V-cycle, which runs once
-			// per CG iteration.
+			// The multigrid preconditioner keeps a Dirichlet mask, and
+			// face weights where there are any, per coarse level --
+			// coarsened from what buildSystemBatch just refreshed. See
+			// multigrid.js's own level-mask comment for why the coarse
+			// levels need them at all. Dispatched once per solve, here,
+			// rather than inside the V-cycle, which runs once per CG
+			// iteration.
 			if ( refreshPreconditionerMask ) refreshPreconditionerMask();
 			cg.settings.optimisticStopTest = settings.optimisticStopTest === true;
 			cg.settings.gpuStopTest = settings.gpuStopTest === true;

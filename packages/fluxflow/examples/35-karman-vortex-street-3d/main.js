@@ -110,7 +110,7 @@ try {
 	const cylCenterX = 10;
 	const cylCenterY = NY / 2 - 3; // deliberate asymmetry, same reasoning as example 16's own offset -- breaks the top/bottom symmetry a centred obstacle would otherwise preserve indefinitely
 	const cylCenterZ = NZ / 2;
-	const vorticityColorScale = 15; // measured, not example 16's own 0.3 -- this scene's own 3D vortex shedding generates stronger peak vorticity near the obstacle than 2D's smooth-cylinder scale accounts for; this value was picked by looking at a real run, not guessed
+	const vorticityColorScale = 1.5; // measured on a real run, and re-measured after the preconditioner fix: 15 was read off a field that was pinned at the velocity clamp, and against a healthy one it renders an almost empty box. |vorticity.z| now peaks at 7.6 domain-wide, 1.9 in the wake itself, with the 99th percentile at 1.0 -- so 1.5 puts the wake in range and lets the few cells around the sphere saturate
 
 	const scene = new Scene();
 	scene.background = new Color( 0x0b0b12 );
@@ -228,32 +228,49 @@ try {
 		// be several times that, so that a frame hitting it is a signal
 		// rather than routine.
 		//
-		// *** What is still wrong, and it is not the same thing ***
+		// *** The second half of the same fix, and what it leaves ***
 		//
-		// The scene no longer fails by never converging. It now converges
-		// on most frames and misses on the rest, and over several hundred
-		// frames the missed ones accumulate until every velocity component
-		// sits at this solver's own clamp: measured over a 10-minute
-		// headless run, 105 of the first 508 frames converged, and the
-		// field was saturated well before the run ended.
+		// Carrying the mask down was not enough on its own: the scene then
+		// converged on most frames, missed on the rest, and saturated at
+		// the velocity clamp within a few hundred frames anyway. The
+		// remaining piece was the other scope cut in the same file --
+		// faceWeights also stopped at level 0, and a collider reaches the
+		// pressure system only through those weights, so the preconditioner
+		// could not see this scene's obstacle at all. Coarsening them too
+		// is what makes this scene steady.
 		//
-		// The one thing isolated so far is that it depends on the
-		// fractional collider weights. With `colliderWeights: null` (the
-		// binary marker alone, which is what the 2D examples use) the field
-		// is still bounded and sane after 569 frames -- maxU 2.97 against
-		// an inflow of 2 -- while converging on a similar fraction of
-		// frames. With them, it saturates. The coarse levels are
-		// constant-coefficient (multigrid.js decision 4: faceWeights stop
-		// at level 0), so the preconditioner cannot see the obstacle at
-		// all, which is the obvious next thing to try and has not been
-		// tried yet.
+		// Measured over a 10-minute headless run, 18,414 frames: velocity
+		// bounded from roughly frame 1700 onward (maxV and maxW hold at
+		// 1.54 and never move), pressure peaking at 0.43, no rejected
+		// frames, nothing non-finite, and net flux through the middle of
+		// the domain at 1153.9 against a fixed inflow of 1152.0 -- the mass
+		// balance that used to read -50000. It also runs about three times
+		// faster, at ~30 fps rather than ~10, because a solve that
+		// converges in 11-30 iterations replaces one that ground through
+		// its whole iteration budget every frame.
 		//
-		// Ruled out on real hardware, so the next session does not repeat
-		// them: the CG fast-path switches (GPU-resident scalars and setup,
-		// batched iterations, the GPU stop test, the fused V-cycle) --
-		// turning all of them off leaves the same pattern of missed frames;
-		// and the iteration cap -- the missed frames are missed by a wide
-		// margin, not by a little.
+		// Two things are worth knowing before reading this scene's numbers:
+		//
+		// 1. Roughly a quarter of frames still do not reach the 1e-5
+		// relative tolerance within 100 iterations. That is not what the
+		// old failure was -- those frames miss narrowly and the field stays
+		// bounded across 18,000 of them -- but it is not nothing either.
+		//
+		// 2. The two outflow-boundary u columns (x = 47 and x = 48) sit at
+		// ~17.5 rather than the ~2.2 the rest of the domain runs at, which
+		// is where this scene's outflow flux being ~8.7x its inflow comes
+		// from. It is a fixed point, not a drift: 17.65 at frame 1301,
+		// 17.49 at 1677, 17.52 at 7688. Those faces are inside the outflow
+		// region, so they are Dirichlet-pinned in pressure and receive no
+		// correction, and the convective boundary condition leaves them
+		// reading each other -- the outflow SDF's gradient points *toward*
+		// the fluid, so grid_outflow_solver3.js's own `pt.sub(n * h)` puts
+		// the "upstream" sample downstream of the face. Flipping that sign
+		// is not the answer and this has now been tested on a working
+		// solver rather than a broken one: with the flip the whole domain
+		// blows up, pressure at 2e4 including at the inflow end. The
+		// artefact stays in those two columns and the interior is unharmed,
+		// which the mid-domain flux above is the direct evidence for.
 		//
 		// Numbers in the header comment above that predate the
 		// preconditioner fix are not evidence of anything about this scene
@@ -268,7 +285,7 @@ try {
 		pressure: {
 			multigrid: { numberOfLevels: 4, numberOfSmoothingIterationsDown: 3, numberOfSmoothingIterationsUp: 3, numberOfCoarsestIterations: 30 },
 			tolerance: 1e-5,
-			maxIterations: 600
+			maxIterations: 100
 		}
 	} );
 

@@ -92,12 +92,17 @@
 //    createMultigridPreconditioner's own level-mask comment for the
 //    measurements, the ALL-not-ANY coarsening rule, and
 //    `options.coarseDirichletMask`, which keeps collider bookkeeping out
-//    of what gets coarsened). Coarse levels are still constant-coefficient
-//    -- `faceWeights` really does stop at level 0, per decision 4 -- so a
-//    coarse level knows where the boundary conditions are but not where a
-//    collider is.
+//    of what gets coarsened). `faceWeights` is coarsened alongside it, for
+//    the reason the same measurements gave: with the mask carried down but
+//    the weights left at level 0, a coarse level knows where the boundary
+//    conditions are and not where the collider is, and example 35 still
+//    saturated within a few hundred frames. Coarsening both leaves it
+//    steady over 18,000.
 // 4. **Optional per-face coefficients (`options.faceWeights`), a partial
-//    walk-back of decision 1's own constant-coefficient scope cut.** Added
+//    walk-back of decision 1's own constant-coefficient scope cut.** These
+//    started as a finest-level-only option and are now coarsened per level
+//    (see decision 3's own note, and buildFaceWeightCoarsenKernel for the
+//    averaging rule and what it gives up). Added
 //    for grid_two_phase_flip_solver2.js, whose variable-density pressure
 //    Poisson equation is `div(beta grad(p)) = div(u*)` with
 //    `beta = rho_liquid/rho` jumping by the whole liquid/gas density ratio
@@ -1051,40 +1056,130 @@ export function buildCorrectKernel( coarser, finer, fineShape, dirichletMask ) {
 // examples/35-karman-vortex-street-3d/ that turned a scene that merely
 // failed to converge into one that blew up inside three frames --
 // pAp-growth on every frame, pressure at 1e7 by frame 3.
-function buildMaskCoarsenKernel( fineMask, coarseField, coarseShape ) {
+// coarseWeights: this level's own coarsened face weights, when there are
+// any. A coarse cell every one of whose faces coarsened to zero is fully
+// enclosed by solid -- an all-zero row, with a zero diagonal that relax
+// would divide by -- so it is pinned here for the same reason and by the
+// same mechanism grid_pressure_solver3.js pins its fine-level counterpart.
+// Coarsening weights without this guard puts NaNs in the V-cycle on the
+// first frame a collider is fully inside one coarse cell.
+function buildMaskCoarsenKernel( fineMask, coarseField, coarseShape, coarseWeights ) {
 
 	return buildElementwiseKernel( coarseShape, ( I ) => {
 
-		let combos = [ [] ];
+		let masked = null;
 
-		for ( let axis = 0; axis < I.length; axis ++ ) {
+		if ( fineMask ) {
 
-			const base = I[ axis ].mul( 2 );
-			const next = [];
+			let combos = [ [] ];
 
-			for ( const combo of combos ) {
+			for ( let axis = 0; axis < I.length; axis ++ ) {
 
-				next.push( [ ...combo, base ] );
-				next.push( [ ...combo, base.add( 1 ) ] );
+				const base = I[ axis ].mul( 2 );
+				const next = [];
+
+				for ( const combo of combos ) {
+
+					next.push( [ ...combo, base ] );
+					next.push( [ ...combo, base.add( 1 ) ] );
+
+				}
+
+				combos = next;
 
 			}
 
-			combos = next;
+			for ( const combo of combos ) {
+
+				const m = fineMask( ...combo );
+				masked = masked === null ? m : masked.and( m );
+
+			}
 
 		}
 
-		let all = null;
+		if ( coarseWeights ) {
+
+			let total = null;
+
+			for ( let axis = 0; axis < I.length; axis ++ ) {
+
+				const upper = I.map( ( v, a ) => ( a === axis ? v.add( 1 ) : v ) );
+				const pair = coarseWeights[ axis ]( ...I ).add( coarseWeights[ axis ]( ...upper ) );
+				total = total === null ? pair : total.add( pair );
+
+			}
+
+			const enclosed = total.lessThan( 1e-6 );
+			masked = masked === null ? enclosed : masked.or( enclosed );
+
+		}
+
+		coarseField( ...I ).assign( masked.select( float( 1 ), float( 0 ) ) );
+
+	}, 'mg-coarsen-mask' );
+
+}
+
+// coarseField = the average of the 2^(d-1) fine faces that make up each
+// coarse face on `axis`. Arithmetic averaging, matching how the operator
+// itself is re-discretized per level rather than assembled as R*A*P: a
+// coarse face's conductance is how open that face is on average, which is
+// what the coarse cell's own flux balance needs. (Harmonic averaging is
+// the better choice for a density ratio jumping across an interface; this
+// is not that, and a caller combining both kinds of weight into one
+// accessor is accepting the cruder of the two on coarse levels.)
+//
+// A face array for `axis` has the level's own shape with one more entry
+// along that axis, so coarse index I maps to fine face 2*I[axis] -- in
+// range at the boundary, where 2*coarseShape[axis] is exactly the fine
+// level's own last face -- and to both of 2*I[b], 2*I[b]+1 on every other
+// axis.
+function buildFaceWeightCoarsenKernel( fineWeight, coarseField, coarseShape, axis ) {
+
+	const faceShape = coarseShape.map( ( n, a ) => ( a === axis ? n + 1 : n ) );
+
+	return buildElementwiseKernel( faceShape, ( I ) => {
+
+		let combos = [ [] ];
+
+		for ( let a = 0; a < I.length; a ++ ) {
+
+			const base = I[ a ].mul( 2 );
+
+			if ( a === axis ) {
+
+				combos = combos.map( ( combo ) => [ ...combo, base ] );
+
+			} else {
+
+				const next = [];
+
+				for ( const combo of combos ) {
+
+					next.push( [ ...combo, base ] );
+					next.push( [ ...combo, base.add( 1 ) ] );
+
+				}
+
+				combos = next;
+
+			}
+
+		}
+
+		let sum = null;
 
 		for ( const combo of combos ) {
 
-			const m = fineMask( ...combo );
-			all = all === null ? m : all.and( m );
+			const value = fineWeight( ...combo );
+			sum = sum === null ? value : sum.add( value );
 
 		}
 
-		coarseField( ...I ).assign( all.select( float( 1 ), float( 0 ) ) );
+		coarseField( ...I ).assign( sum.div( combos.length ) );
 
-	}, 'mg-coarsen-mask' );
+	}, 'mg-coarsen-face-weight' );
 
 }
 
@@ -1108,7 +1203,7 @@ function buildMaskCoarsenKernel( fineMask, coarseField, coarseShape ) {
 // Gauss-Seidel, no over-relaxation).
 // options.dirichletMask: see decision 3 in the file header comment. The
 // finest level uses it directly; coarser levels use a coarsened copy,
-// refreshed by the returned function's own refreshDirichletLevels().
+// refreshed by the returned function's own refreshCoarseLevels().
 // options.coarseDirichletMask: the subset of dirichletMask worth
 // coarsening, default all of it -- see its own comment below.
 //
@@ -1167,23 +1262,24 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 	// enclosed-cell guard), and the fine operator has already removed it
 	// from the problem by zeroing the faces around it.
 	//
-	// Coarsening the second kind is actively harmful, and measurably so:
-	// the coarse levels are constant-coefficient (decision 4 -- faceWeights
-	// stop at level 0), so a coarse level has no idea a collider is there
-	// and sees the pinned blob as a Dirichlet island sitting in open fluid.
-	// It then hands back a correction with a strong spurious gradient
-	// wrapped around the obstacle. On examples/35-karman-vortex-street-3d/
-	// that is the difference between a solve that converges in ~45
-	// iterations and one that reports pAp-growth on frame 1 with the
-	// pressure field at 1e3 and every velocity component pinned to the
-	// scene's own clamp.
+	// Coarsening the second kind is actively harmful, and measurably so.
+	// A coarse level's weights are averages, so the cells around an
+	// obstacle stay partly open there; pinning them to zero error on top of
+	// that makes the coarse level hand back a correction with a strong
+	// spurious gradient wrapped around the obstacle. On
+	// examples/35-karman-vortex-street-3d/ that was the difference between
+	// a solve that converges in ~45 iterations and one that reports
+	// pAp-growth on frame 1 with the pressure field at 1e3 and every
+	// velocity component pinned to the scene's own clamp. The enclosed
+	// cells do still get pinned on coarse levels -- by the coarsened
+	// weights themselves, where they really do average to zero, which is
+	// the guard in buildMaskCoarsenKernel rather than this.
 	const coarseDirichletMask = options.coarseDirichletMask ?? dirichletMask;
-	// Evaluated at the finest level (level 0) only -- unlike dirichletMask,
-	// which is now coarsened, these are not. See decision 4 in the file
-	// header comment for why the coarse levels deliberately stay
-	// constant-coefficient, and what that costs. It is also why
-	// coarseDirichletMask exists: a coarse level that cannot see a collider
-	// must not be told about the cells that collider has pinned.
+	// Coarsened per level alongside the mask, by averaging each coarse
+	// face's own fine faces -- see buildFaceWeightCoarsenKernel. Decision 4
+	// in the file header comment describes these stopping at level 0, which
+	// is what they used to do; the coarse levels are no longer
+	// constant-coefficient when a caller passes weights.
 	const faceWeights = options.faceWeights;
 
 	const levelShapes = computeLevelShapes( shape, numberOfLevels );
@@ -1211,33 +1307,59 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 	// the wrong way, and level 0's own relax spent the cycle undoing it.
 	//
 	// So each level gets its own mask field, coarsened from the level above
-	// it. The fields are filled by `refreshDirichletLevels()` rather than
+	// it. The fields are filled by `refreshCoarseLevels()` rather than
 	// from inside the V-cycle: the preconditioner is applied once per CG
 	// iteration and the mask changes at most once per solve, so folding
 	// these dispatches into the cycle would pay for them hundreds of times
 	// over. A caller whose mask can change MUST dispatch it after updating
 	// the mask and before solving; a caller that never dispatches it gets
 	// all-zero coarse masks, which is exactly the old behaviour.
+	// A coarse level needs a mask as soon as it has weights, even when the
+	// caller passed no mask at all: coarsened weights can leave a coarse
+	// cell fully enclosed, and that cell's row has no diagonal to relax
+	// against. See buildMaskCoarsenKernel's own coarseWeights comment.
+	const coarseningMasks = dirichletMask || faceWeights;
 	const levelMaskFields = [];
-	const maskCoarsenKernels = [];
+	const levelFaceWeightFields = [];
+	const coarsenKernels = [];
 
-	if ( dirichletMask ) {
+	if ( coarseningMasks ) {
 
 		levelMaskFields.push( null ); // level 0 reads the caller's own mask
 
 		for ( let level = 1; level < numberOfLevels; level ++ ) {
 
-			const field = tsl_array_n.arrayN( 'float', levelShapes[ level ] );
-			field.fromArray( new Float32Array( levelShapes[ level ].reduce( ( total, dim ) => total * dim, 1 ) ) );
-			levelMaskFields.push( field );
+			levelMaskFields.push( zeroedField( levelShapes[ level ] ) );
 
 		}
 
 	}
 
+	if ( faceWeights ) {
+
+		levelFaceWeightFields.push( null ); // level 0 reads the caller's own weights
+
+		for ( let level = 1; level < numberOfLevels; level ++ ) {
+
+			levelFaceWeightFields.push( levelShapes[ level ].map(
+				( n, axis ) => zeroedField( levelShapes[ level ].map( ( m, a ) => ( a === axis ? m + 1 : m ) ) )
+			) );
+
+		}
+
+	}
+
+	function zeroedField( fieldShape ) {
+
+		const field = tsl_array_n.arrayN( 'float', fieldShape );
+		field.fromArray( new Float32Array( fieldShape.reduce( ( total, dim ) => total * dim, 1 ) ) );
+		return field;
+
+	}
+
 	function levelMask( level ) {
 
-		if ( ! dirichletMask ) return undefined;
+		if ( ! coarseningMasks ) return undefined;
 		if ( level === 0 ) return dirichletMask;
 		if ( level >= numberOfLevels ) return undefined;
 
@@ -1246,17 +1368,43 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 
 	}
 
+	function levelFaceWeights( level ) {
+
+		if ( ! faceWeights ) return undefined;
+		if ( level === 0 ) return faceWeights;
+		if ( level >= numberOfLevels ) return undefined;
+
+		return levelFaceWeightFields[ level ].map( ( field ) => ( ...I ) => field( ...I ) );
+
+	}
+
+	// Order matters inside the batch: a level's weights must be coarsened
+	// before its mask, which reads them for the enclosed-cell guard, and
+	// both must be done before the next level down reads either.
 	for ( let level = 1; level < numberOfLevels; level ++ ) {
 
-		if ( ! dirichletMask ) break;
-		const source = level === 1 ? coarseDirichletMask : levelMask( level - 1 );
-		maskCoarsenKernels.push( buildMaskCoarsenKernel( source, levelMaskFields[ level ], levelShapes[ level ] ) );
+		if ( faceWeights ) {
+
+			for ( let axis = 0; axis < shape.length; axis ++ ) {
+
+				coarsenKernels.push( buildFaceWeightCoarsenKernel(
+					levelFaceWeights( level - 1 )[ axis ], levelFaceWeightFields[ level ][ axis ], levelShapes[ level ], axis
+				) );
+
+			}
+
+		}
+
+		if ( ! coarseningMasks ) continue;
+
+		const maskSource = ! dirichletMask ? undefined : level === 1 ? coarseDirichletMask : levelMask( level - 1 );
+		coarsenKernels.push( buildMaskCoarsenKernel( maskSource, levelMaskFields[ level ], levelShapes[ level ], levelFaceWeights( level ) ) );
 
 	}
 
 	applyMultigridPreconditioner.settings = settings;
-	applyMultigridPreconditioner.refreshDirichletLevels = maskCoarsenKernels.length > 0
-		? tsl_array_n.createBatch( maskCoarsenKernels )
+	applyMultigridPreconditioner.refreshCoarseLevels = coarsenKernels.length > 0
+		? tsl_array_n.createBatch( coarsenKernels )
 		: null;
 
 	return applyMultigridPreconditioner;
@@ -1274,21 +1422,21 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 			const b = level === 0 ? input : tsl_array_n.arrayN( 'float', levelShape );
 			const buffer = tsl_array_n.arrayN( 'float', levelShape );
 			const mask = levelMask( level );
-			const levelFaceWeights = level === 0 ? faceWeights : undefined;
+			const weights = levelFaceWeights( level );
 
 			levels.push( {
 				x, b, buffer,
-				relaxColor0: buildRelaxKernel( levelShape, levelSpacing, sorFactor, 0, x, b, mask, levelFaceWeights ),
-				relaxColor1: buildRelaxKernel( levelShape, levelSpacing, sorFactor, 1, x, b, mask, levelFaceWeights ),
+				relaxColor0: buildRelaxKernel( levelShape, levelSpacing, sorFactor, 0, x, b, mask, weights ),
+				relaxColor1: buildRelaxKernel( levelShape, levelSpacing, sorFactor, 1, x, b, mask, weights ),
 				// Only ever used for the coarsest level, and only while it
 				// fits in one workgroup -- see buildCoarseSweepKernel. Cell
 				// count is a product over every axis, not just the first
 				// two -- levelShape[0]*levelShape[1] silently ignored a
 				// third dimension in 3D (see that function's own comment).
 				coarseSweeps: ( levelShape.reduce( ( total, dim ) => total * dim, 1 ) <= COARSE_SINGLE_GROUP_MAX_CELLS )
-					? buildCoarseSweepKernel( levelShape, levelSpacing, sorFactor, numberOfCoarsestIterations, x, b, mask, levelFaceWeights )
+					? buildCoarseSweepKernel( levelShape, levelSpacing, sorFactor, numberOfCoarsestIterations, x, b, mask, weights )
 					: null,
-				residual: buildResidualKernel( levelShape, levelSpacing, x, b, buffer, mask, levelFaceWeights ),
+				residual: buildResidualKernel( levelShape, levelSpacing, x, b, buffer, mask, weights ),
 				zeroX: buildZeroKernel( levelShape, x ),
 			} );
 
