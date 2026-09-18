@@ -198,100 +198,73 @@ try {
 		// requirement, not an internal constant tuned to make the solver
 		// merely work).
 		//
-		// *** maxIterations:600, not the original 40 -- root-caused, not
-		// guessed, in two stages. A real-hardware investigation (triggered
-		// by a user report: the flow looked stable for a while, then
-		// "exploded" starting from the outflow side) found the true cause
-		// via a minimal repro -- a spatially uniform force in an otherwise
-		// perfectly Z-symmetric channel, no obstacle at all -- which
-		// should physically keep W-velocity at ~0 but instead grew it to
-		// the same order of magnitude as U/V. Systematically ruled out:
-		// the outflow velocity extrapolation (disabling it made things
-		// WORSE, not better -- it's protective); tricubic vs trilinear
-		// advection interpolation (trilinear delayed the failure but
-		// still failed); stronger multigrid smoothing at a low iteration
-		// cap (made it fail faster, not slower). What actually fixed that
-		// minimal repro: raising maxIterations alone -- 40 diverges by
-		// ~frame 175, 100 by ~575, 200 recovers several times before
-		// still failing by ~775, 300 held for the full 900-frame test.
+		// *** maxIterations is 100 and is not what was wrong here. ***
 		//
-		// That 300 was NOT enough once the real collider was added back in
-		// (see this file's own header comment, "the obstacle is a
-		// sphere" section, for the box-vs-sphere half of this
-		// investigation) -- collider+force together needed more than
-		// either alone: 300 still pinned at this solver's own velocity
-		// clamp indefinitely with a sphere present, while 600 shows a
-		// transient spike (briefly hitting the clamp around frame 150-300)
-		// that recovers into bounded, decaying values by frame 325+,
-		// the same qualitative "real transient, not runaway" signature
-		// the sphere-alone case already showed. This solver's own CG
-		// never reported converged:true at ANY tested iteration cap in
-		// this scene -- meaning every frame's pressure solve was being cut
-		// off mid-iteration, leaving a small amount of real, uncorrected
-		// divergence that compounded frame over frame until it blew up.
-		// This is a materially harder Poisson problem for CG than
-		// examples/16-karman-vortex-street/'s own comparable-cell-count 2D
-		// domain, not a coding bug in any single file -- documented here
-		// rather than silently accepted, since 600 iterations is a real,
-		// measured per-frame cost (see this file's own real-hardware fps
-		// numbers, if recorded).
+		// It was 600, arrived at by an earlier session raising it in stages
+		// (40, 100, 200, 300, 600) because each rise pushed the frame at
+		// which this scene blew up further out, and 600 pushed it past
+		// ~4700. That reading -- "a materially harder Poisson problem for
+		// CG than 2D, not a coding bug in any single file" -- was wrong.
+		// The pressure solve was not slow. It was not converging at all, on
+		// any frame, at any iteration count: unpreconditioned CG on the
+		// same system reached a relative residual of 2e-6 while MGPCG sat
+		// at 4e-2 after 300 iterations, which is a broken preconditioner
+		// and not a hard problem.
 		//
-		// *** maxIterations:600 delays the failure by ~27x (from ~175
-		// frames to ~4700+) but does NOT fully eliminate it -- read this
-		// before treating the scene as solved. ***
+		// The cause was in multigrid.js: a Dirichlet mask was evaluated at
+		// the finest level only, so every coarse level solved a zero-flux
+		// problem that had no way to represent an error field vanishing at
+		// this scene's outflow -- and that whole-domain, low-frequency mode
+		// is exactly what the coarse levels exist to supply. The file said
+		// so itself, filed under convergence speed; in 2D it costs 6
+		// iterations against 16, and in 3D it costs everything. Each level
+		// now carries a coarsened mask (see that file's own level-mask
+		// comment, and packages/fluxflow/sandbox/poisson-3d-dirichlet/,
+		// which measures the operator and the preconditioner against a
+		// system that is consistent by construction).
 		//
-		// A further real-hardware investigation, prompted directly by a
-		// user pushing back on "still eventually gets stuck" and asking
-		// specifically about the outflow mechanism, measured net volumetric
-		// flux at the true inflow face (x=0, always exactly 1152 = fixed
-		// inflowSpeed x NY x NZ, by construction) against the true outflow
-		// face (x=NX) over a 5200-frame run. Two real, concrete findings,
-		// neither of which is a resolved fix:
+		// With that fixed, this scene's solve converges in roughly 11-30
+		// iterations on the frames it converges on. 100 is a cap chosen to
+		// be several times that, so that a frame hitting it is a signal
+		// rather than routine.
 		//
-		// 1. Even in the LONG "stable-looking" plateau (roughly frame
-		// 600-4600), outflowFlux settles at ~10600 -- nearly 9x the fixed
-		// inflow rate -- while mid-domain flux sits at ~2100, itself
-		// already ~1.8x inflow. This gap is too large to be explained by
-		// the constant force's own legitimate cumulative acceleration
-		// over the fluid's transit time (a back-of-envelope bound puts
-		// that around 1.15 units of extra velocity, nowhere near a 9x
-		// flux multiplier) -- meaning even the frames this file's own
-		// fps/stability numbers call "stable" are very likely sitting at
-		// a self-consistent but NON-physical fixed point of the coupled
-		// force+pressure+outflow system, not the true solution CG simply
-		// hasn't found yet. The eventual frame-~4700 failure is this
-		// fixed point finally getting perturbed hard enough (very likely
-		// by a genuine shedding event) that CG can no longer track it.
+		// *** What is still wrong, and it is not the same thing ***
 		//
-		// 2. A collider-free, force-free version of this exact scene (pure
-		// inflow -> obstacle-free channel -> outflow, no continuous push)
-		// showed outflowFlux reading EXACTLY 0 for the entire length of a
-		// separate 5200-frame run, while mid-domain flux still grew to
-		// ~38000 (also clamp-pinned) -- meaning the true boundary face
-		// was receiving zero net correction from the outflow mechanism at
-		// all in that configuration, a stronger and more direct symptom
-		// than the 9x-overshoot case above. Checked directly, not
-		// inferred: the outflow SDF's own sampled value and gradient at
-		// that exact boundary face were both confirmed correct (sdf=-1.5,
-		// correctly "inside"; gradient length exactly 1, not degenerate).
-		// The one concrete hypothesis this ruled out: `upstreamPt`'s own
-		// sign (`pt.sub(n.mul(spacing))`, grid_outflow_solver3.js) is NOT
-		// backwards -- flipping it to `.add(...)` and re-running the full
-		// force+collider scene made the failure occur roughly 30x SOONER
-		// (frame ~140 instead of ~4700), the opposite of a fix, confirming
-		// the existing sign (unchanged, matching grid_outflow_solver2.js's
-		// own real-hardware-confirmed 2D convention) is the right one.
-		// Reverted immediately; grid_outflow_solver3.js carries no residual
-		// change from this experiment.
+		// The scene no longer fails by never converging. It now converges
+		// on most frames and misses on the rest, and over several hundred
+		// frames the missed ones accumulate until every velocity component
+		// sits at this solver's own clamp: measured over a 10-minute
+		// headless run, 105 of the first 508 frames converged, and the
+		// field was saturated well before the run ended.
 		//
-		// Neither finding points to a specific wrong line still to fix --
-		// both are evidence that this scene sits closer to a genuine
-		// numerical-robustness edge (a strongly-forced, obstacle-wake,
-		// long-domain-fill-up 3D configuration) than a resolvable coding
-		// bug, at least with the investigation done so far. Recorded in
-		// full because "300/600 helps a lot" was reported as a fix once
-		// already and turned out not to be one -- the honest status is
-		// "substantially mitigated, not eliminated."
+		// The one thing isolated so far is that it depends on the
+		// fractional collider weights. With `colliderWeights: null` (the
+		// binary marker alone, which is what the 2D examples use) the field
+		// is still bounded and sane after 569 frames -- maxU 2.97 against
+		// an inflow of 2 -- while converging on a similar fraction of
+		// frames. With them, it saturates. The coarse levels are
+		// constant-coefficient (multigrid.js decision 4: faceWeights stop
+		// at level 0), so the preconditioner cannot see the obstacle at
+		// all, which is the obvious next thing to try and has not been
+		// tried yet.
+		//
+		// Ruled out on real hardware, so the next session does not repeat
+		// them: the CG fast-path switches (GPU-resident scalars and setup,
+		// batched iterations, the GPU stop test, the fused V-cycle) --
+		// turning all of them off leaves the same pattern of missed frames;
+		// and the iteration cap -- the missed frames are missed by a wide
+		// margin, not by a little.
+		//
+		// Numbers in the header comment above that predate the
+		// preconditioner fix are not evidence of anything about this scene
+		// any more. That includes both flux findings (the ~9x outflow
+		// overshoot, and the collider-free case reading exactly 0 at the
+		// boundary face) and, less obviously, the box-vs-sphere conclusion:
+		// every one of those runs was made while every frame's pressure
+		// solve was being cut off mid-iteration. The sphere is kept because
+		// it is a better approximation of 2D's own cylinder regardless, but
+		// "a box collider cannot be stabilised here" is now an untested
+		// claim rather than a measured one.
 		pressure: {
 			multigrid: { numberOfLevels: 4, numberOfSmoothingIterationsDown: 3, numberOfSmoothingIterationsUp: 3, numberOfCoarsestIterations: 30 },
 			tolerance: 1e-5,

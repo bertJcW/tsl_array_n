@@ -1,0 +1,33 @@
+backend: WebGPUBackend
+scene started, running for 600 s...
+frame=602 elapsed=22.7s fps=26.4 rejected=0 converged=105 notConverged=496 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57555.4 outflow=57600.0
+frame=1201 elapsed=42.8s fps=28.1 rejected=0 converged=105 notConverged=1095 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57542.0 outflow=57600.0
+frame=1800 elapsed=62.8s fps=28.7 rejected=0 converged=105 notConverged=1694 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57529.6 outflow=57600.0
+frame=2400 elapsed=82.8s fps=29.0 rejected=0 converged=105 notConverged=2294 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57500.4 outflow=57600.0
+frame=2999 elapsed=102.8s fps=29.2 rejected=0 converged=105 notConverged=2894 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57470.1 outflow=57600.0
+frame=3598 elapsed=122.9s fps=29.3 rejected=0 converged=105 notConverged=3493 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57479.1 outflow=57600.0
+frame=4198 elapsed=142.9s fps=29.4 rejected=0 converged=105 notConverged=4093 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57471.1 outflow=57600.0
+frame=4799 elapsed=162.9s fps=29.5 rejected=0 converged=105 notConverged=4693 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57458.6 outflow=57600.0
+frame=5399 elapsed=182.9s fps=29.5 rejected=0 converged=105 notConverged=5294 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57516.0 outflow=57600.0
+frame=5997 elapsed=202.9s fps=29.6 rejected=0 converged=105 notConverged=5892 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57439.3 outflow=57600.0
+frame=6598 elapsed=223.0s fps=29.6 rejected=0 converged=105 notConverged=6492 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57461.8 outflow=57600.0
+frame=7196 elapsed=243.0s fps=29.6 rejected=0 converged=105 notConverged=7090 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57503.5 outflow=57600.0
+frame=7796 elapsed=263.0s fps=29.6 rejected=0 converged=105 notConverged=7690 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57514.6 outflow=57600.0
+frame=8395 elapsed=283.0s fps=29.7 rejected=0 converged=105 notConverged=8290 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57424.0 outflow=57600.0
+frame=8997 elapsed=303.1s fps=29.7 rejected=0 converged=105 notConverged=8891 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57515.2 outflow=57600.0
+frame=9596 elapsed=323.1s fps=29.7 rejected=0 converged=105 notConverged=9490 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57480.5 outflow=57600.0
+frame=10195 elapsed=343.1s fps=29.7 rejected=0 converged=105 notConverged=10090 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57378.0 outflow=57600.0
+frame=10794 elapsed=363.1s fps=29.7 rejected=0 converged=105 notConverged=10689 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57390.0 outflow=57600.0
+frame=11394 elapsed=383.1s fps=29.7 rejected=0 converged=105 notConverged=11288 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57490.9 outflow=57600.0
+frame=11994 elapsed=403.2s fps=29.7 rejected=0 converged=105 notConverged=11888 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57520.2 outflow=57600.0
+frame=12592 elapsed=423.2s fps=29.8 rejected=0 converged=105 notConverged=12486 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57473.4 outflow=57600.0
+frame=13192 elapsed=443.2s fps=29.8 rejected=0 converged=105 notConverged=13087 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57455.5 outflow=57600.0
+frame=13791 elapsed=463.2s fps=29.8 rejected=0 converged=105 notConverged=13685 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57484.3 outflow=57600.0
+frame=14392 elapsed=483.3s fps=29.8 rejected=0 converged=105 notConverged=14286 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57217.4 outflow=57600.0
+frame=14991 elapsed=503.3s fps=29.8 rejected=0 converged=105 notConverged=14886 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57204.5 outflow=57600.0
+frame=15592 elapsed=523.3s fps=29.8 rejected=0 converged=105 notConverged=15486 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57107.4 outflow=57600.0
+frame=16190 elapsed=543.3s fps=29.8 rejected=0 converged=105 notConverged=16085 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57059.4 outflow=57600.0
+frame=16791 elapsed=563.4s fps=29.8 rejected=0 converged=105 notConverged=16685 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57271.9 outflow=57600.0
+frame=17390 elapsed=583.4s fps=29.8 rejected=0 converged=105 notConverged=17284 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57002.0 outflow=57600.0
+frame=17989 elapsed=603.4s fps=29.8 rejected=0 converged=105 notConverged=17883 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=57069.6 outflow=57600.0
+done
