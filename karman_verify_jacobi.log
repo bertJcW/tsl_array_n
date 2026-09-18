@@ -1,0 +1,7 @@
+backend: WebGPUBackend
+scene started, running for 600 s...
+frame=201 elapsed=23.4s fps=8.6 rejected=181 converged=5 notConverged=195 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=-12132.2 outflow=25377.9
+frame=440 elapsed=43.4s fps=10.1 rejected=420 converged=5 notConverged=434 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=-12132.2 outflow=18628.7
+frame=678 elapsed=63.5s fps=10.7 rejected=658 converged=5 notConverged=672 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=-12132.2 outflow=17095.0
+frame=916 elapsed=83.5s fps=11.0 rejected=896 converged=5 notConverged=910 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=-12132.2 outflow=14223.2
+frame=1140 elapsed=103.6s fps=11.0 rejected=1121 converged=5 notConverged=1135 maxU=100.00 maxV=100.00 maxW=100.00 allFinite=true inflow=1152.0 mid=-12133.5 outflow=25764.6
