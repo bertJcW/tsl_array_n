@@ -26,51 +26,50 @@
 // flickered -- see that file's own header comment for the full
 // investigation; applied here directly rather than re-discovering it.
 //
-// *** The obstacle is a sphere, not the box-cornered rod this file
-// started with -- a real, root-caused fix, not a cosmetic choice. ***
+// *** The obstacle is a spanwise rod again, and the case against it was
+// measured on a broken solver ***
 //
-// The first version used a box (primitive_sdf3.js has no native cylinder
-// primitive) stretched along the full Z extent, approximating 2D's own
-// circular cylinder as a square-cross-section rod. Left running, the
-// flow periodically "exploded" -- a user-reported symptom, root-caused
-// via a long real-hardware investigation (see this file's own
-// pressure.maxIterations comment below for the *other* half of this same
-// investigation, the force/outflow-related convergence issue found
-// first). Once that fix (maxIterations:300) still left this scene
-// pinned at its own velocity clamp indefinitely -- unlike the force-only
-// repro, which settled into a genuine bounded equilibrium -- a further
-// isolation swept every other variable (obstacle size, whether it
-// touched the domain's own Z walls, sphere vs box) and found the one
-// that mattered: a SPHERE collider (identical position, comparable size,
-// same everything else) recovers from its own transient spikes into
-// bounded, decaying behavior; the box does not, regardless of size, of
-// whether it touches the domain walls, or of how many CG iterations it's
-// given (more iterations made the box case fail *faster*, not slower --
-// a real, confirmed-on-real-hardware sign that CG was converging toward
-// a bad answer, not merely converging slowly).
+// A Karman vortex street is what a bluff body spanning the flow sheds. A
+// sphere does not shed one -- its wake is a hairpin/ring structure, not an
+// alternating street -- so for the scene this file is named after, the
+// obstacle has to be a rod across the full Z extent. primitive_sdf3.js has
+// no cylinder primitive, so it is a box with a square cross-section, the
+// same approximation this file started with.
 //
-// The actual mechanism: sdf_collider3.js's own face-marking step (see
-// grid_blocked_boundary_condition_solver3.js's own makeMarkAndProject)
-// estimates how much of a velocity face lies inside the collider via
-// level_set_utils.js's own fractionInsideSdf -- a LINEAR interpolation
-// between two SDF samples straddling that face, a standard, widely-used
-// technique (Bridson, *Fluid Simulation for Computer Graphics*) that
-// assumes the SDF varies smoothly between those two points. A sphere's
-// SDF genuinely does. A box's does not: its distance function has a
-// real discontinuity in its gradient at every edge and corner (kinks
-// there are precisely why box(), primitive_sdf3.js's own textbook
-// signed-distance formula, both is and must be piecewise, not the bug),
-// and this rod put four such edges running the entire length of the
-// domain -- far more edge-adjacent cells than a compact box would have.
-// 2D's own example 16 approximates its circle as a 48-sided polygon
-// (makeCirclePolygon), not a literal sharp square -- shallow enough per-
-// corner that this same linear-fraction assumption never meaningfully
-// breaks there, which is why the 2D reference this file is based on
-// never surfaced this at all. This is a genuine, inherent limitation of
-// the linear-fraction technique for sharp/elongated geometry, not
-// something a quick formula fix resolves -- documented in
-// primitive_sdf3.js's own header comment for the next caller reaching
-// for box() as a collider, not just fixed quietly here.
+// It was replaced by a sphere by an earlier session, on what looked like
+// strong evidence: with a box the flow "exploded", a sphere of comparable
+// size recovered from the same transients, and more CG iterations made the
+// box case fail *sooner* -- read at the time as CG converging toward a bad
+// answer, and pinned on fractionInsideSdf's linear interpolation between
+// two SDF samples, which a box's gradient discontinuity at every edge
+// genuinely does violate.
+//
+// All of it was measured while the multigrid preconditioner was carrying
+// neither the Dirichlet mask nor the collider's face weights to its coarse
+// levels, i.e. while every frame's pressure solve was being cut off
+// mid-iteration. Re-measured on the fixed solver, the box is stable:
+// 14,643 frames over ten minutes of real WebGPU, maxV holding at 3.2 and
+// maxW at 1.7 from frame ~1100 onward, net flux through the middle of the
+// domain at 1154.9 against a fixed inflow of 1152.0, nothing non-finite,
+// and 15 rejected frames all inside the opening transient with none after.
+//
+// It also does what the sphere could not. The sphere's wake is essentially
+// steady -- a shear layer with maxV at 1.54 and only mild fluctuation --
+// while the rod's sheds: maxV 3.2, and vorticity structures that visibly
+// advect downstream between frames rather than sitting still.
+//
+// What the rod does cost is convergence. Roughly half its frames reach the
+// 1e-5 relative tolerance inside 100 iterations, against about
+// three-quarters of the sphere's, and it runs at ~24 fps rather than ~30.
+// That is a harder pressure problem, which is what a sharp-cornered
+// obstacle should be, and it is now a cost rather than a failure.
+//
+// The concern about linear face fractions on sharp geometry is real and is
+// not retracted -- fractionInsideSdf does assume the SDF varies smoothly
+// between the two samples straddling a face, and a box's does not at its
+// edges (the kinks are why primitive_sdf3.js's box() both is and must be
+// piecewise; that is the formula being correct, not a bug). What is
+// retracted is that this is what made the scene diverge.
 
 import * as tsl_array_n from 'tsl_array_n';
 import { grid } from 'fluxflow';
@@ -106,11 +105,11 @@ try {
 	const dt = 0.05;
 	const inflowSpeed = 2;
 	const pushStrength = 0.05; // small whole-domain push, offsetting numerical dissipation -- same reasoning as example 16's own mode-0 force
-	const radius = 3; // sphere radius -- see this file's own header comment ("box vs sphere") for why this is a sphere, not the rod this file started with
+	const halfWidth = 3; // half the rod's square cross-section, so a 6x6 rod across the full Z extent -- see this file's own header comment for why this is a rod and not the sphere an earlier session replaced it with
 	const cylCenterX = 10;
 	const cylCenterY = NY / 2 - 3; // deliberate asymmetry, same reasoning as example 16's own offset -- breaks the top/bottom symmetry a centred obstacle would otherwise preserve indefinitely
 	const cylCenterZ = NZ / 2;
-	const vorticityColorScale = 1.5; // measured on a real run, and re-measured after the preconditioner fix: 15 was read off a field that was pinned at the velocity clamp, and against a healthy one it renders an almost empty box. |vorticity.z| now peaks at 7.6 domain-wide, 1.9 in the wake itself, with the 99th percentile at 1.0 -- so 1.5 puts the wake in range and lets the few cells around the sphere saturate
+	const vorticityColorScale = 2.5; // measured, and re-measured twice: 15 came off a field pinned at the velocity clamp and renders an almost empty box against a healthy one, and 1.5 was right for the sphere this scene briefly used. With the rod, |vorticity.z| runs to 8.4 domain-wide with its 99th percentile at 2.0 and its 95th at 1.3, so 2.5 shows the wake without saturating most of it
 
 	const scene = new Scene();
 	scene.background = new Color( 0x0b0b12 );
@@ -131,7 +130,7 @@ try {
 	scene.add( domainOutline );
 
 	const obstacleMesh = new Mesh(
-		new SphereGeometry( radius, 24, 16 ),
+		new BoxGeometry( halfWidth * 2, halfWidth * 2, NZ ),
 		new MeshBasicNodeMaterial( { color: 0xf87171 } )
 	);
 	obstacleMesh.position.set( cylCenterX, cylCenterY, cylCenterZ );
@@ -150,7 +149,10 @@ try {
 	const velocityGrid = grid.createFaceCenteredGrid3( NX, NY, NZ, ...gridSpacing, ...origin );
 
 	const collider = grid.createSDFStaticCollider3( NX, NY, NZ, ...gridSpacing, ...origin );
-	collider.addShape( grid.sphere( [ cylCenterX, cylCenterY, cylCenterZ ], radius ) );
+	// Z half-extent NZ, not NZ/2: the rod runs past both Z walls rather than
+	// stopping flush against them, so no sliver of fluid is left between its
+	// end and the wall for the flow to squeeze through.
+	collider.addShape( grid.box( [ cylCenterX, cylCenterY, cylCenterZ ], [ halfWidth, halfWidth, NZ ] ) );
 
 	// Same padding technique as example 16's own makeWallStripPolygon --
 	// see that file's own header comment for the real, confirmed-on-real-
