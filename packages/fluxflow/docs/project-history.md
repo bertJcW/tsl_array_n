@@ -386,6 +386,37 @@ The general lesson is the one this project keeps re-learning: the expensive thin
 was not the work, it was *preparing* to do the work, and it was invisible from
 every counter except a pipeline-creation hook.
 
+### 13. Two multigrid scope cuts that were survivable in 2D and fatal in 3D
+
+Full account in `docs/3d-solver-investigation.md`, including the retractions
+it forced. In outline: `multigrid.js` evaluated its Dirichlet mask, and
+later its face weights, at the finest level only, both recorded in the file
+as costing convergence speed and nothing else. On a 48x24x24 grid with a
+two-cell outflow slab, MGPCG then does not converge at any iteration count,
+while unpreconditioned CG on the identical system reaches 2e-6 -- a
+preconditioner beaten by no preconditioner, and beaten worse the more levels
+it is given. The same mask in 2D costs 6 iterations against 16, which is why
+it survived: every shipped scene that used a mask was 2D.
+
+Both are now coarsened per level. `examples/35-karman-vortex-street-3d/`
+went from 600 iterations and no convergence on every frame, with a
+mid-domain flux of -50000 against an inflow of 1152, to 8-30 iterations and
+1153.9.
+
+Two things the fix needed that reasoning alone would have got wrong. The
+coarsening rule has to be ALL rather than ANY, or a collider's enclosed
+cells grow a halo per level and pin the error to zero in real fluid. And
+cells pinned only because a collider closed their faces must be kept out of
+coarsening entirely (`options.coarseDirichletMask`), because a coarse level
+cannot see the collider that justifies them.
+
+### 14. A scene reported as stable that blows up at frame 532
+
+Also in `docs/3d-solver-investigation.md`, section 5.1. The failure is
+deterministic -- five fresh runs, identical frame numbers -- and it was
+reported as fixed twice before anyone looked at the right frames. What made
+that possible is in the methodology section below.
+
 ## Performance
 
 The full arc is in `docs/perf-investigation-cg-gpu-resident-alpha-beta.md`,
@@ -695,6 +726,33 @@ breakthrough.** Both the V-cycle repetition probe (4.5x) and the early
 stop-test numbers (1.45x) were celebrations of a solver doing less work.
 The habit that catches it: before believing a speedup, check that the thing
 still converges and still produces a divergence-free field.
+
+**A run whose closing readings are bounded is not a stable run.** A
+ten-minute run of `examples/35-karman-vortex-street-3d/` was reported as
+stable on the strength of its last few polls: velocity bounded, flux balance
+correct, nothing non-finite. The scene blows up at frame 532, saturates its
+velocity clamp and then recovers into a different flow, and every reading
+quoted came from after that. The warning was in the same log as a count of
+rejected frames, written off in the report as a harmless opening transient.
+Read a run from frame zero. Treat any nonzero count of circuit-breaker
+rejections or CG breakdowns as a failure to explain before quoting anything
+else from that run. And run it several times from scratch, which is what
+separates "deterministic" from "got lucky" -- here, five identical failures.
+
+**Polling a scene from outside cannot see what it does.** With nothing
+reading back from it, a 48x24x24 scene runs at several hundred frames a
+second, so a poll every second lands thousands of frames in and samples
+whatever it happens to hit. Two separate "stable for N frames" readings were
+sampling artefacts. Recording from inside the page, by intercepting the
+probe's own assignment before the first frame, costs nothing and is honest.
+
+**A picture is not a measurement of a periodic phenomenon.** "The wake
+sheds, the structures visibly advect downstream" was said from two
+screenshots a few hundred frames apart. The wake does shed, but establishing
+it took a time series at three stations, a period, a Strouhal number and a
+cross-correlation showing the pattern travelling downstream rather than
+upstream -- the last of which is the only thing that separates shedding from
+the boundary reflection the same scene also has.
 
 **Price the ceiling before building the machine.** Several directions were
 retired for the cost of a measurement rather than an implementation. The
