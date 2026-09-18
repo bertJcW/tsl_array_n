@@ -47,14 +47,32 @@
 // All of it was measured while the multigrid preconditioner was carrying
 // neither the Dirichlet mask nor the collider's face weights to its coarse
 // levels, i.e. while every frame's pressure solve was being cut off
-// mid-iteration. Re-measured on the fixed solver, the box is stable:
-// 14,643 frames over ten minutes of real WebGPU, maxV holding at 3.2 and
-// maxW at 1.7 from frame ~1100 onward, net flux through the middle of the
-// domain at 1154.9 against a fixed inflow of 1152.0, nothing non-finite,
-// and 15 rejected frames all inside the opening transient with none after.
+// mid-iteration, so none of it is evidence about the obstacle. But the box
+// is NOT stable on the fixed solver either, and an earlier version of this
+// comment claimed it was, on the strength of a ten-minute run whose closing
+// readings were all bounded. Read from frame zero instead, and repeated
+// five times from scratch with identical numbers every time:
+//
+//   frame 532   CG breaks down (pAp-growth), 19 times over the next frames
+//   frame 535   the pressure circuit breaker begins rejecting, 15 frames
+//   frame 540   every velocity component sits at this solver's own clamp
+//   frame ~560  the solve converges again and the field recovers
+//
+// The run that was called stable was measuring the flow that came out the
+// far side of that. Its bounded maxU of ~17.5 is not a healthy scene's
+// number; it is what this one settles into afterwards.
+//
+// A sphere does not do this. Run the same way it never rejects a frame and
+// never reaches the clamp: maxU ramps smoothly from 2 to ~18 between frames
+// 800 and 960 and then holds, with the interior staying at 2 to 2.5 and
+// only the two outflow columns large. Both obstacles end up with those same
+// outflow columns, which is the separate defect described further down;
+// only the rod adds a bang on the way.
 //
 // It also does what the sphere could not, and this is measured rather than
-// looked at. The sphere's wake is essentially steady -- a shear layer with
+// looked at -- though note that all of it was measured after frame 532, so
+// it describes the flow this scene recovers into rather than one that ran
+// cleanly from the start. The sphere's wake is essentially steady -- a shear layer with
 // maxV at 1.54 and only mild fluctuation. The rod's sheds periodically:
 // sampling transverse velocity on the rod's own centre line over 4293
 // frames gives a regular oscillation with a period of ~270 frames at
@@ -84,11 +102,22 @@
 // which is how an earlier claim in this file's own history got made on
 // evidence that did not support it.
 //
-// What the rod does cost is convergence. Roughly half its frames reach the
-// 1e-5 relative tolerance inside 100 iterations, against about
-// three-quarters of the sphere's, and it runs at ~24 fps rather than ~30.
-// That is a harder pressure problem, which is what a sharp-cornered
-// obstacle should be, and it is now a cost rather than a failure.
+// What breaks at frame 532 is the pressure system becoming roughly three
+// orders of magnitude harder, not the iteration cap being too low. Freezing
+// the scene at frame 524 and re-solving that one system every way
+// available: MGPCG reaches a relative residual of 1.8e-3 in 100 iterations,
+// 6.9e-4 in 600 and 1.9e-4 in 3000, against a 1e-5 target -- while frame
+// 510, fourteen frames earlier, converges in 8. Jacobi manages 1.1e-2 in
+// 3000 and unpreconditioned CG 5.5e-2, so multigrid is still much the best
+// of them and it is the system that went wrong, not the preconditioner.
+//
+// Why it gets that much harder that fast is not known. The standing
+// suspect, a hypothesis with no measurement behind it yet, is this
+// obstacle's own sharp edges: fractionInsideSdf estimates a face's open
+// fraction by linear interpolation between two SDF samples, a box's SDF has
+// a gradient discontinuity along every edge, and a nearly closed face
+// carries a nearly singular row -- which is why sdf_collider3.js floors
+// those weights at 0.01 at all, following jet's own kMinWeight.
 //
 // The concern about linear face fractions on sharp geometry is real and is
 // not retracted -- fractionInsideSdf does assume the SDF varies smoothly

@@ -4,7 +4,7 @@
 // the walls rather than to the scene as a whole.
 import { chromium } from 'playwright-core';
 
-const URL = 'http://localhost:5190/examples/35-karman-vortex-street-3d/';
+const URL = 'http://localhost:5200/examples/35-karman-vortex-street-3d/';
 const SECONDS = Number( process.argv[ 2 ] ?? 30 );
 
 const browser = await chromium.launch( { headless: true, executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe',
