@@ -1068,6 +1068,64 @@ levels constant-coefficient, exactly as the pre-existing `dirichletMask`
 already does. That tradeoff, and what it costs, is documented in that file's
 own decision 4.
 
+### jet/fluid-engine-dev (MIT) — `src/grid/level_set_utils.js`'s `fractionInsideCpu`, `src/grid/sdf_collider3.js`'s `computeFaceWeights`, `src/grid/grid_pressure_solver3.js`'s `colliderWeights`, direct, no Python intermediary
+
+`fractionInsideCpu` (`src/grid/level_set_utils.js`) is ported directly from
+jet/fluid-engine-dev's own `fractionInside`
+(`include/jet/detail/level_set_utils-inl.h`) — the same local copy as the
+other direct-from-jet entries above. jet's own comment on that function
+credits it further upstream, to Christopher Batty's own variational-fluids
+code
+(http://www.cs.ubc.ca/labs/imager/tr/2007/Batty_VariationalFluids/,
+https://github.com/christopherbatty/Fluid3D) — the reference implementation
+for Batty, Bertails & Bridson, *A fast variational framework for accurate
+solid-fluid coupling*, ACM TOG 2007, which is the formulation jet's own
+`GridFractionalSinglePhasePressureSolver3` (and this port's own
+`colliderWeights`, below) implements. Same direct chain as the other
+jet-sourced `src/grid/`/`src/linalg/` entries (no Python intermediary):
+
+```
+Batty/Bertails/Bridson variational-fluids code (C++, research code, Christopher Batty)
+  -> fluid-engine-dev (C++, MIT, Doyub Kim)
+    -> fluxflow (this package, JS/TSL, Apache-2.0, bert wang)
+```
+
+- **Source:** https://github.com/doyubkim/fluid-engine-dev/blob/master/include/jet/detail/level_set_utils-inl.h
+- **License:** MIT — full text already reproduced above, under "fluid-engine-dev (MIT) — via fluxflow (Python)"; not repeated a second time.
+
+What's ported directly, and what's this port's own extension:
+
+- `fractionInsideCpu`'s own four-corner marching-squares sub-cell area
+  formula (the `insideCount` 0/1/2/3/4 branches, including the diagonal
+  disambiguation by the quad's own centre value) is a faithful port of
+  jet's `fractionInside`, translated to plain JS for CPU-side use (a static
+  collider's own face weights only need computing once, at setup time —
+  see `sdf_collider3.js`'s own `computeFaceWeights` header comment) rather
+  than the TSL/GPU path the rest of `level_set_utils.js` uses; one
+  deliberate departure: jet's own unbounded `while` search for a matching
+  corner is replaced with a capped loop (that file's own comment explains
+  why — this runs as uncompiled JS, not GPU-dispatched code).
+- `computeFaceWeights` (`sdf_collider3.js`) is this port's own — jet's own
+  sampling geometry (a face's own cross-section corners, offset ±half a
+  cell along the two axes it is not staggered on) and its `kMinWeight`
+  floor (`grid_fractional_single_phase_pressure_solver3.cpp`'s own
+  `buildWeights`) are read directly and reproduced, but the surrounding
+  code (evaluating the collider's own analytic `primitivesDistanceCpu`
+  rather than jet's stored `boundarySdf`, and the factory/closure shape) is
+  original to this port.
+- `colliderWeights` (`grid_pressure_solver3.js`) reuses this port's own
+  pre-existing `faceWeights` mechanism (see "`faceWeights` (original)"
+  above) for the pressure system itself, rather than adding a second matrix
+  representation the way jet's own `GridFractionalSinglePhasePressureSolver3`
+  does — an architectural simplification specific to this port, not taken
+  from jet. Where this DOES follow jet closely is the velocity-correction
+  step's own semantics: jet's `applyPressureGradient` uses its own collider
+  weight purely as a `> 0` gate on whether to apply the correction at all,
+  never as a multiplicative scale on the correction itself (unlike
+  `faceWeights`' density-beta scaling, which jet's own code also does via
+  `1/rho`) — this port's own `colliderWeights` gate in the same three
+  correction kernels matches that distinction exactly.
+
 ## Design and architecture references (not a code dependency)
 
 Sources consulted for **architectural information only** — which stages a solver has,

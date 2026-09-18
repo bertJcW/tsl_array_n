@@ -28,6 +28,15 @@ export const DIRECTION_DOWN  = 1 << 2;
 export const DIRECTION_UP    = 1 << 3;
 export const DIRECTION_ALL   = DIRECTION_LEFT | DIRECTION_RIGHT | DIRECTION_DOWN | DIRECTION_UP;
 
+// The two extra walls a 3D domain has and a 2D one doesn't -- added here,
+// not in a separate constant3.js, because this file already has no "2"
+// suffix and every 2D-specific symbol above is untouched by this addition
+// (DIRECTION_ALL still means exactly the 4 bits 2D code has always meant
+// by it; 3D solvers use DIRECTION_ALL_3D instead).
+export const DIRECTION_BACK  = 1 << 4;
+export const DIRECTION_FRONT = 1 << 5;
+export const DIRECTION_ALL_3D = DIRECTION_LEFT | DIRECTION_RIGHT | DIRECTION_DOWN | DIRECTION_UP | DIRECTION_BACK | DIRECTION_FRONT;
+
 export const DEFAULT_GRAVITY = -9.81;
 
 // Corresponds to the two lines in the source's initConstant():

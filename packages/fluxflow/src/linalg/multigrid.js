@@ -666,15 +666,27 @@ const COARSE_SINGLE_GROUP_MAX_CELLS = 256;
 
 function buildCoarseSweepKernel( shape, spacing, sorFactor, sweeps, x, b, dirichletMask, faceWeights ) {
 
-	const [ nx ] = shape;
-	const cells = shape[ 0 ] * shape[ 1 ];
+	const cells = shape.reduce( ( total, dim ) => total * dim, 1 );
 
 	const sweep = tsl_array_n.kernel( [ cells ], ( flat ) => {
 
-		// Same unflattening idiom tsl_array_n's own kernel() uses.
-		const i = flat.mod( nx );
-		const j = flat.div( nx );
-		const I = [ i, j ];
+		// Same unflattening idiom tsl_array_n's own kernel() uses
+		// (mod/div per axis), generalised to shape.length axes rather than
+		// the 2 this originally assumed -- the fixed 2-axis version was a
+		// real bug, not a documented 2D-only scope: it silently miscounted
+		// `cells` and misread `x`/`b` the moment a 3D shape reached this
+		// function, caught by examples/31-conjugate-gradient-3d/'s first
+		// real run ("expected 3 index(es), got 2" from laplacianAt).
+		const I = [];
+		let remaining = flat;
+
+		for ( let axis = 0; axis < shape.length; axis ++ ) {
+
+			I.push( remaining.mod( shape[ axis ] ) );
+			remaining = remaining.div( shape[ axis ] );
+
+		}
+
 		const isColor0 = colorOf( I ).equal( 0 );
 
 		// Rebuilt per colour rather than hoisted: the node graph has to read
@@ -684,11 +696,11 @@ function buildCoarseSweepKernel( shape, spacing, sorFactor, sweeps, x, b, dirich
 
 			const Ax = laplacianAt( x, spacing, shape, I, dirichletMask, faceWeights );
 			const diagonal = laplacianDiagonalAt( spacing, shape, I, dirichletMask, faceWeights );
-			const updated = x( i, j ).add( b( i, j ).sub( Ax ).div( diagonal ).mul( sorFactor ) );
+			const updated = x( ...I ).add( b( ...I ).sub( Ax ).div( diagonal ).mul( sorFactor ) );
 
 			If( writeThisColour, () => {
 
-				x( i, j ).assign( updated );
+				x( ...I ).assign( updated );
 
 			} );
 
@@ -1100,8 +1112,11 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 				relaxColor0: buildRelaxKernel( levelShape, levelSpacing, sorFactor, 0, x, b, levelMask, levelFaceWeights ),
 				relaxColor1: buildRelaxKernel( levelShape, levelSpacing, sorFactor, 1, x, b, levelMask, levelFaceWeights ),
 				// Only ever used for the coarsest level, and only while it
-				// fits in one workgroup -- see buildCoarseSweepKernel.
-				coarseSweeps: ( levelShape[ 0 ] * levelShape[ 1 ] <= COARSE_SINGLE_GROUP_MAX_CELLS )
+				// fits in one workgroup -- see buildCoarseSweepKernel. Cell
+				// count is a product over every axis, not just the first
+				// two -- levelShape[0]*levelShape[1] silently ignored a
+				// third dimension in 3D (see that function's own comment).
+				coarseSweeps: ( levelShape.reduce( ( total, dim ) => total * dim, 1 ) <= COARSE_SINGLE_GROUP_MAX_CELLS )
 					? buildCoarseSweepKernel( levelShape, levelSpacing, sorFactor, numberOfCoarsestIterations, x, b, levelMask, levelFaceWeights )
 					: null,
 				residual: buildResidualKernel( levelShape, levelSpacing, x, b, buffer, levelMask, levelFaceWeights ),

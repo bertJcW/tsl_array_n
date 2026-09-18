@@ -91,6 +91,15 @@ export function isNonFinite2( value ) {
 }
 
 /**
+ * True when a vec3 node has a non-finite value in any component.
+ */
+export function isNonFinite3( value ) {
+
+	return isNonFinite( value.x ).or( isNonFinite( value.y ) ).or( isNonFinite( value.z ) );
+
+}
+
+/**
  * True when a float node is non-finite OR larger in magnitude than `limit`.
  * The bound is written as a negated "within range" test on purpose -- see
  * this file's header comment on why `abs(x) > limit` is not equivalent.
