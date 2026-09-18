@@ -69,26 +69,33 @@
 //    special-casing at all: its value is whatever's genuinely in `field`
 //    at that index, which is correct regardless of whether that neighbor
 //    happens to be a normal fluid cell or a pinned one, as long as the
-//    pinned cell's own row keeps it correct. The mask itself is only ever
-//    *evaluated* at the finest level (level 0) -- coarser levels have no
-//    concept of it at all, an intentional scope cut (see decision 1: no
-//    per-level operator storage to make a coarser "masked row" mean
-//    anything). What that requires, confirmed the hard way via real-
-//    hardware regression testing (see buildRestrictKernel's and
-//    buildCorrectKernel's own header comments for the full investigation,
-//    cross-checked against mantaflow's own mature multigrid solver,
-//    source/multigrid.h/.cpp's GridMg, consulted specifically for this):
-//    a masked cell's *own* row being fixed at level 0 is not, by itself,
-//    sufficient for correctness elsewhere -- the coarse-oblivious restrict
-//    and correct steps must additionally be told to leave a masked cell's
-//    residual out of what gets sent *to* the coarse levels, and its
-//    coarse-derived correction out of what gets written *back*, or the
-//    coarse machinery (silently, slowly, over many frames of live
+//    pinned cell's own row keeps it correct. What that requires, confirmed
+//    the hard way via real-hardware regression testing (see
+//    buildRestrictKernel's and buildCorrectKernel's own header comments
+//    for the full investigation, cross-checked against mantaflow's own
+//    mature multigrid solver, source/multigrid.h/.cpp's GridMg, consulted
+//    specifically for this): a masked cell's *own* row being fixed at
+//    level 0 is not, by itself, sufficient for correctness elsewhere --
+//    the restrict and correct steps must additionally be told to leave a
+//    masked cell's residual out of what gets sent *to* the coarse levels,
+//    and its coarse-derived correction out of what gets written *back*,
+//    or the coarse machinery (silently, slowly, over many frames of live
 //    Dirichlet-region use) corrupts *fluid* cells near the mask, which
-//    nothing downstream ever corrects. Only convergence *speed* for a
-//    large Dirichlet region is still an accepted, un-optimized tradeoff of
-//    the coarser levels never seeing it at all -- correctness at the only
-//    level a caller ever reads no longer depends on that tradeoff.
+//    nothing downstream ever corrects.
+//
+//    The mask used to stop there, evaluated at the finest level only, with
+//    convergence *speed* for a large Dirichlet region written down as the
+//    accepted cost. In 3D that cost turned out to be total rather than
+//    partial -- MGPCG on a 48x24x24 grid with a two-cell outflow slab does
+//    not converge at all, at any iteration count -- so each level now
+//    carries its own coarsened mask instead (see
+//    createMultigridPreconditioner's own level-mask comment for the
+//    measurements, the ALL-not-ANY coarsening rule, and
+//    `options.coarseDirichletMask`, which keeps collider bookkeeping out
+//    of what gets coarsened). Coarse levels are still constant-coefficient
+//    -- `faceWeights` really does stop at level 0, per decision 4 -- so a
+//    coarse level knows where the boundary conditions are but not where a
+//    collider is.
 // 4. **Optional per-face coefficients (`options.faceWeights`), a partial
 //    walk-back of decision 1's own constant-coefficient scope cut.** Added
 //    for grid_two_phase_flip_solver2.js, whose variable-density pressure
@@ -831,9 +838,9 @@ function restrictionTapsForAxis( coarseIdx, coarseCount ) {
 // cell has no need to participate in the coarse-grid correction loop at
 // all -- level 0's own relax already pins it to `target` every single
 // sub-pass, unconditionally, regardless of any coarser-level input.
-// dirichletMask: only ever meaningful restricting *from* level 0 (see
-// createMultigridPreconditioner's own construction loop) -- matches the
-// "finest level only" scope already established throughout this file.
+// dirichletMask: the mask of the level being restricted *from* -- level 0's
+// is the caller's own, every coarser level's is the coarsened copy
+// createMultigridPreconditioner keeps (it used to be level 0's only).
 // Exported for one measurement only: whether restriction and prolongation
 // are an adjoint pair. A V-cycle is a symmetric operator only if they are
 // -- `(Ru, v)` must equal `(u, Pv)` -- and PCG requires a symmetric
@@ -841,7 +848,17 @@ function restrictionTapsForAxis( coarseIdx, coarseCount ) {
 // is not). Nothing in the library calls these from outside; they are
 // exported so the property can be measured on the real kernels rather than
 // on a transcription of them.
-export function buildRestrictKernel( finer, coarser, coarseShape, dirichletMask, coarseX ) {
+// coarseMask: the *coarse* level's own Dirichlet mask, when the caller
+// coarsens one (see createMultigridPreconditioner's own level-mask
+// construction). The coarse problem solves for the fine problem's ERROR,
+// and the error at a Dirichlet cell is exactly 0 -- so a coarse cell that
+// covers any Dirichlet fine cell gets its restricted right-hand side
+// pinned to 0 here, which is what makes the coarse row `-x = b = 0` hold
+// it at 0 through every coarse relax sweep. Without it a coarse masked
+// cell would inherit a nonzero average of its unmasked children's
+// residuals and then be "solved" to a nonzero error the fine level has to
+// undo again.
+export function buildRestrictKernel( finer, coarser, coarseShape, dirichletMask, coarseX, coarseMask ) {
 
 	return buildElementwiseKernel( coarseShape, ( I ) => {
 
@@ -877,7 +894,7 @@ export function buildRestrictKernel( finer, coarser, coarseShape, dirichletMask,
 
 		}
 
-		coarser( ...I ).assign( sum );
+		coarser( ...I ).assign( coarseMask ? coarseMask( ...I ).select( float( 0 ), sum ) : sum );
 
 		// Optionally zero the coarse level's x in the same dispatch. The
 		// V-cycle always clears x immediately after restricting into b, and
@@ -1017,6 +1034,60 @@ export function buildCorrectKernel( coarser, finer, fineShape, dirichletMask ) {
 
 }
 
+// coarseField(I) = 1 when ALL 2^d fine cells under coarse cell I are
+// Dirichlet, else 0.
+//
+// ALL, not ANY, and this was measured rather than reasoned: what the
+// coarse level is being told is "the error is exactly zero throughout this
+// cell", which is true only when every fine cell it covers is pinned. ANY
+// looks attractive -- it keeps a thin Dirichlet boundary alive on every
+// level instead of letting it thin out and vanish -- and on a synthetic
+// Poisson problem whose only mask is a slab at the domain edge it does
+// converge slightly faster. It is wrong the moment a mask has an interior:
+// a static collider pins the cells it encloses (see
+// grid_pressure_solver3.js's own enclosed-cell guard), and under ANY that
+// blob grows a cell of halo per level, pinning the error to zero in
+// genuine fluid cells right where a wake's pressure varies fastest. On
+// examples/35-karman-vortex-street-3d/ that turned a scene that merely
+// failed to converge into one that blew up inside three frames --
+// pAp-growth on every frame, pressure at 1e7 by frame 3.
+function buildMaskCoarsenKernel( fineMask, coarseField, coarseShape ) {
+
+	return buildElementwiseKernel( coarseShape, ( I ) => {
+
+		let combos = [ [] ];
+
+		for ( let axis = 0; axis < I.length; axis ++ ) {
+
+			const base = I[ axis ].mul( 2 );
+			const next = [];
+
+			for ( const combo of combos ) {
+
+				next.push( [ ...combo, base ] );
+				next.push( [ ...combo, base.add( 1 ) ] );
+
+			}
+
+			combos = next;
+
+		}
+
+		let all = null;
+
+		for ( const combo of combos ) {
+
+			const m = fineMask( ...combo );
+			all = all === null ? m : all.and( m );
+
+		}
+
+		coarseField( ...I ).assign( all.select( float( 1 ), float( 0 ) ) );
+
+	}, 'mg-coarsen-mask' );
+
+}
+
 // shape, gridSpacing: arrays of equal length (1-3), the *finest* level.
 // `shape` must be exactly divisible by 2^(numberOfLevels-1) in every
 // dimension (matches jet's own constraint, documented in
@@ -1035,8 +1106,11 @@ export function buildCorrectKernel( coarser, finer, fineShape, dirichletMask ) {
 // from the other levels' correction-iteration count; see mg-inl.h).
 // options.sorFactor: SOR over-relaxation factor, default 1.0 (plain
 // Gauss-Seidel, no over-relaxation).
-// options.dirichletMask: see decision 3 in the file header comment --
-// applied at the finest level (level 0) only, never coarsened.
+// options.dirichletMask: see decision 3 in the file header comment. The
+// finest level uses it directly; coarser levels use a coarsened copy,
+// refreshed by the returned function's own refreshDirichletLevels().
+// options.coarseDirichletMask: the subset of dirichletMask worth
+// coarsening, default all of it -- see its own comment below.
 //
 // Returns an applyPreconditioner-compatible (input, output) => dispatcher
 // -- pass directly as createPreconditionedConjugateGradientSolver's
@@ -1080,15 +1154,110 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 	const numberOfFinalIterations = options.numberOfFinalIterations ?? 2;
 	const sorFactor = options.sorFactor ?? 1.0;
 	const dirichletMask = options.dirichletMask;
-	// Like dirichletMask, only ever evaluated at the finest level (level 0)
-	// -- see decision 4 in the file header comment for why the coarse levels
-	// deliberately stay constant-coefficient, and what that costs.
+	// options.coarseDirichletMask: the part of `dirichletMask` that is a
+	// genuine boundary condition, and so is worth telling the coarse levels
+	// about. Defaults to the whole mask.
+	//
+	// The distinction exists because a caller's mask can hold two unrelated
+	// kinds of pinned cell. One is a real Dirichlet boundary -- an outflow
+	// vent, a pressure vent -- where the pressure is genuinely known and
+	// the error genuinely vanishes. The other is bookkeeping: a cell every
+	// one of whose faces a collider has closed is pinned only because its
+	// row would otherwise be all zeros (see grid_pressure_solver3.js's own
+	// enclosed-cell guard), and the fine operator has already removed it
+	// from the problem by zeroing the faces around it.
+	//
+	// Coarsening the second kind is actively harmful, and measurably so:
+	// the coarse levels are constant-coefficient (decision 4 -- faceWeights
+	// stop at level 0), so a coarse level has no idea a collider is there
+	// and sees the pinned blob as a Dirichlet island sitting in open fluid.
+	// It then hands back a correction with a strong spurious gradient
+	// wrapped around the obstacle. On examples/35-karman-vortex-street-3d/
+	// that is the difference between a solve that converges in ~45
+	// iterations and one that reports pAp-growth on frame 1 with the
+	// pressure field at 1e3 and every velocity component pinned to the
+	// scene's own clamp.
+	const coarseDirichletMask = options.coarseDirichletMask ?? dirichletMask;
+	// Evaluated at the finest level (level 0) only -- unlike dirichletMask,
+	// which is now coarsened, these are not. See decision 4 in the file
+	// header comment for why the coarse levels deliberately stay
+	// constant-coefficient, and what that costs. It is also why
+	// coarseDirichletMask exists: a coarse level that cannot see a collider
+	// must not be told about the cells that collider has pinned.
 	const faceWeights = options.faceWeights;
 
 	const levelShapes = computeLevelShapes( shape, numberOfLevels );
 	const levelSpacings = computeLevelSpacings( gridSpacing, numberOfLevels );
 
+	// *** The Dirichlet mask is carried to every level, not just level 0 ***
+	//
+	// It used to stop at the finest level, with only convergence *speed*
+	// for a large Dirichlet region written down as the cost (see decision 3
+	// in this file's own header comment). Measured on real hardware, in 3D,
+	// that cost is not a slowdown but a wall: on a 48x24x24 grid with a
+	// two-cell outflow slab, MGPCG with four levels sat at a relative
+	// residual of 4e-2 after 300 iterations and never converged, while
+	// three levels reached 2e-3 and unpreconditioned CG -- the same
+	// operator, the same right-hand side -- reached 2e-6. The same mask on
+	// a comparable 2D grid cost 6 iterations against 16, which is why this
+	// went unnoticed for as long as it did.
+	//
+	// The mechanism is not subtle once the levels are written out: a
+	// mask-oblivious coarse operator has zero-flux boundaries everywhere,
+	// so its correction has no way to represent an error field that must
+	// vanish at the vent -- and a pressure solve's outflow *is* the
+	// low-frequency, whole-domain mode that the coarse levels exist to
+	// supply. Every V-cycle therefore handed level 0 a correction pulling
+	// the wrong way, and level 0's own relax spent the cycle undoing it.
+	//
+	// So each level gets its own mask field, coarsened from the level above
+	// it. The fields are filled by `refreshDirichletLevels()` rather than
+	// from inside the V-cycle: the preconditioner is applied once per CG
+	// iteration and the mask changes at most once per solve, so folding
+	// these dispatches into the cycle would pay for them hundreds of times
+	// over. A caller whose mask can change MUST dispatch it after updating
+	// the mask and before solving; a caller that never dispatches it gets
+	// all-zero coarse masks, which is exactly the old behaviour.
+	const levelMaskFields = [];
+	const maskCoarsenKernels = [];
+
+	if ( dirichletMask ) {
+
+		levelMaskFields.push( null ); // level 0 reads the caller's own mask
+
+		for ( let level = 1; level < numberOfLevels; level ++ ) {
+
+			const field = tsl_array_n.arrayN( 'float', levelShapes[ level ] );
+			field.fromArray( new Float32Array( levelShapes[ level ].reduce( ( total, dim ) => total * dim, 1 ) ) );
+			levelMaskFields.push( field );
+
+		}
+
+	}
+
+	function levelMask( level ) {
+
+		if ( ! dirichletMask ) return undefined;
+		if ( level === 0 ) return dirichletMask;
+		if ( level >= numberOfLevels ) return undefined;
+
+		const field = levelMaskFields[ level ];
+		return ( ...I ) => field( ...I ).greaterThan( 0.5 );
+
+	}
+
+	for ( let level = 1; level < numberOfLevels; level ++ ) {
+
+		if ( ! dirichletMask ) break;
+		const source = level === 1 ? coarseDirichletMask : levelMask( level - 1 );
+		maskCoarsenKernels.push( buildMaskCoarsenKernel( source, levelMaskFields[ level ], levelShapes[ level ] ) );
+
+	}
+
 	applyMultigridPreconditioner.settings = settings;
+	applyMultigridPreconditioner.refreshDirichletLevels = maskCoarsenKernels.length > 0
+		? tsl_array_n.createBatch( maskCoarsenKernels )
+		: null;
 
 	return applyMultigridPreconditioner;
 
@@ -1104,22 +1273,22 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 			const x = level === 0 ? output : tsl_array_n.arrayN( 'float', levelShape );
 			const b = level === 0 ? input : tsl_array_n.arrayN( 'float', levelShape );
 			const buffer = tsl_array_n.arrayN( 'float', levelShape );
-			const levelMask = level === 0 ? dirichletMask : undefined;
+			const mask = levelMask( level );
 			const levelFaceWeights = level === 0 ? faceWeights : undefined;
 
 			levels.push( {
 				x, b, buffer,
-				relaxColor0: buildRelaxKernel( levelShape, levelSpacing, sorFactor, 0, x, b, levelMask, levelFaceWeights ),
-				relaxColor1: buildRelaxKernel( levelShape, levelSpacing, sorFactor, 1, x, b, levelMask, levelFaceWeights ),
+				relaxColor0: buildRelaxKernel( levelShape, levelSpacing, sorFactor, 0, x, b, mask, levelFaceWeights ),
+				relaxColor1: buildRelaxKernel( levelShape, levelSpacing, sorFactor, 1, x, b, mask, levelFaceWeights ),
 				// Only ever used for the coarsest level, and only while it
 				// fits in one workgroup -- see buildCoarseSweepKernel. Cell
 				// count is a product over every axis, not just the first
 				// two -- levelShape[0]*levelShape[1] silently ignored a
 				// third dimension in 3D (see that function's own comment).
 				coarseSweeps: ( levelShape.reduce( ( total, dim ) => total * dim, 1 ) <= COARSE_SINGLE_GROUP_MAX_CELLS )
-					? buildCoarseSweepKernel( levelShape, levelSpacing, sorFactor, numberOfCoarsestIterations, x, b, levelMask, levelFaceWeights )
+					? buildCoarseSweepKernel( levelShape, levelSpacing, sorFactor, numberOfCoarsestIterations, x, b, mask, levelFaceWeights )
 					: null,
-				residual: buildResidualKernel( levelShape, levelSpacing, x, b, buffer, levelMask, levelFaceWeights ),
+				residual: buildResidualKernel( levelShape, levelSpacing, x, b, buffer, mask, levelFaceWeights ),
 				zeroX: buildZeroKernel( levelShape, x ),
 			} );
 
@@ -1131,13 +1300,18 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 
 		for ( let level = 0; level < numberOfLevels - 1; level ++ ) {
 
-			// dirichletMask only ever applies to the finest level (level 0)
-			// -- these are the *only* restrict/correct calls that touch it
-			// (see buildRestrictKernel's and buildCorrectKernel's own header
-			// comments for why each needs it).
-			restrictDispatchers.push( buildRestrictKernel( levels[ level ].buffer, levels[ level + 1 ].b, levelShapes[ level + 1 ], level === 0 ? dirichletMask : undefined ) );
-			restrictAndClearDispatchers.push( buildRestrictKernel( levels[ level ].buffer, levels[ level + 1 ].b, levelShapes[ level + 1 ], level === 0 ? dirichletMask : undefined, levels[ level + 1 ].x ) );
-			correctDispatchers.push( buildCorrectKernel( levels[ level + 1 ].x, levels[ level ].x, levelShapes[ level ], level === 0 ? dirichletMask : undefined ) );
+			// Every level's own mask now, not just level 0's -- see this
+			// function's own level-mask comment above, and
+			// buildRestrictKernel's and buildCorrectKernel's own header
+			// comments for what each does with one. Restriction additionally
+			// takes the *coarse* mask, so a coarse cell covering Dirichlet
+			// fine cells starts from a zero right-hand side.
+			const fineMask = levelMask( level );
+			const coarseMask = levelMask( level + 1 );
+
+			restrictDispatchers.push( buildRestrictKernel( levels[ level ].buffer, levels[ level + 1 ].b, levelShapes[ level + 1 ], fineMask, undefined, coarseMask ) );
+			restrictAndClearDispatchers.push( buildRestrictKernel( levels[ level ].buffer, levels[ level + 1 ].b, levelShapes[ level + 1 ], fineMask, levels[ level + 1 ].x, coarseMask ) );
+			correctDispatchers.push( buildCorrectKernel( levels[ level + 1 ].x, levels[ level ].x, levelShapes[ level ], fineMask ) );
 
 		}
 

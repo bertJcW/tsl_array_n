@@ -93,6 +93,11 @@ export function createGridPressureSolver3( {
 	const b = tsl_array_n.arrayN( 'float', shape );
 
 	let dirichletMaskField, dirichletTargetField, updateDirichletFields, dirichletMask;
+	// The caller's own Dirichlet cells, without the enclosed-cell guard's
+	// additions -- the only part of the mask the multigrid preconditioner
+	// coarsens. See its own options.coarseDirichletMask comment for why a
+	// collider-enclosed cell must not be coarsened.
+	let ventMaskField, coarseDirichletMask;
 
 	// A cell every one of whose six faces has zero collider weight is fully
 	// enclosed by solid -- entirely decoupled from the rest of the system
@@ -117,6 +122,7 @@ export function createGridPressureSolver3( {
 
 		dirichletMaskField = tsl_array_n.arrayN( 'float', shape );
 		dirichletTargetField = tsl_array_n.arrayN( 'float', shape );
+		ventMaskField = tsl_array_n.arrayN( 'float', shape );
 
 		updateDirichletFields = tsl_array_n.kernel( shape, ( i, j, k ) => {
 
@@ -132,17 +138,20 @@ export function createGridPressureSolver3( {
 
 				dirichletMaskField( i, j, k ).assign( finalActive.select( float( 1 ), float( 0 ) ) );
 				dirichletTargetField( i, j, k ).assign( finalTarget );
+				ventMaskField( i, j, k ).assign( active.select( float( 1 ), float( 0 ) ) );
 
 			} else {
 
 				dirichletMaskField( i, j, k ).assign( enclosed.select( float( 1 ), float( 0 ) ) );
 				dirichletTargetField( i, j, k ).assign( float( 0 ) );
+				ventMaskField( i, j, k ).assign( float( 0 ) );
 
 			}
 
 		} );
 
 		dirichletMask = ( i, j, k ) => dirichletMaskField( i, j, k ).greaterThan( 0.5 );
+		coarseDirichletMask = ( i, j, k ) => ventMaskField( i, j, k ).greaterThan( 0.5 );
 
 	}
 
@@ -171,7 +180,7 @@ export function createGridPressureSolver3( {
 	const applyLaplacian = createLaplacianOperator( shape, gridSpacing, { dirichletMask, faceWeights: faceWeightAccessors } );
 
 	const preconditionerBuilders = {
-		multigrid: createMultigridPreconditioner( shape, gridSpacing, { ...multigrid, dirichletMask, faceWeights: faceWeightAccessors } ),
+		multigrid: createMultigridPreconditioner( shape, gridSpacing, { ...multigrid, dirichletMask, coarseDirichletMask, faceWeights: faceWeightAccessors } ),
 		jacobi: createJacobiPreconditioner( shape, gridSpacing, { dirichletMask, faceWeights: faceWeightAccessors } ),
 		none: createIdentityPreconditioner( shape )
 	};
@@ -206,6 +215,8 @@ export function createGridPressureSolver3( {
 	}
 
 	applyPreconditioner.settings = preconditionerBuilders.multigrid.settings;
+
+	const refreshPreconditionerMask = preconditionerBuilders.multigrid.refreshDirichletLevels;
 
 	const cg = createPreconditionedConjugateGradientSolver( applyLaplacian, applyPreconditioner, b, pressureGrid.data, { atomicScale } );
 
@@ -427,6 +438,13 @@ export function createGridPressureSolver3( {
 		return async function dispatch() {
 
 			buildSystemBatch();
+			// The multigrid preconditioner keeps one Dirichlet mask field
+			// per coarse level, coarsened from the mask buildSystemBatch
+			// just refreshed -- see multigrid.js's own level-mask comment
+			// for why the coarse levels need it at all. Dispatched once per
+			// solve, here, rather than inside the V-cycle, which runs once
+			// per CG iteration.
+			if ( refreshPreconditionerMask ) refreshPreconditionerMask();
 			cg.settings.optimisticStopTest = settings.optimisticStopTest === true;
 			cg.settings.gpuStopTest = settings.gpuStopTest === true;
 			cg.settings.fuseVcycleIntoIteration = settings.fuseVcycleIntoIteration === true;
