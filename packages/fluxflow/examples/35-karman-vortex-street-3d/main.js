@@ -53,10 +53,36 @@
 // domain at 1154.9 against a fixed inflow of 1152.0, nothing non-finite,
 // and 15 rejected frames all inside the opening transient with none after.
 //
-// It also does what the sphere could not. The sphere's wake is essentially
-// steady -- a shear layer with maxV at 1.54 and only mild fluctuation --
-// while the rod's sheds: maxV 3.2, and vorticity structures that visibly
-// advect downstream between frames rather than sitting still.
+// It also does what the sphere could not, and this is measured rather than
+// looked at. The sphere's wake is essentially steady -- a shear layer with
+// maxV at 1.54 and only mild fluctuation. The rod's sheds periodically:
+// sampling transverse velocity on the rod's own centre line over 4293
+// frames gives a regular oscillation with a period of ~270 frames at
+// x=22, x=30 and x=40 alike (2, 3.3 and 5 rod widths downstream), which
+// with D=6 and U=2 is a Strouhal number of 0.22 -- the textbook value for
+// a cylinder. Right behind the rod, at x=16, the signal is weaker (std
+// 0.18 against 1.29 at x=30) and less regular, which is the wake not
+// having rolled up yet rather than a disagreement.
+//
+// That the period is the same at three widely separated probes is not by
+// itself enough, since this scene is known to reflect disturbances off its
+// outflow (below), and a reflection would also show up as a periodic
+// signal. What separates them is direction: cross-correlating the probes
+// puts x=30 a consistent +117 frames behind x=22 and x=40 the same +117
+// behind x=30, i.e. the pattern travels DOWNSTREAM at 1.37 and 1.71
+// units/time, 0.69 and 0.86 of the free stream. A reflection travels the
+// other way and would lag negative.
+//
+// Worth knowing before quoting that Strouhal number at anyone: the domain
+// is 8 rod widths long and the rod blocks a quarter of the channel height,
+// and blockage that severe normally raises St. The number establishes that
+// periodic shedding is there; it is not a calibration.
+//
+// tools: karman_shedding.mjs at the repo root is what produced all of the
+// above, and is the honest way to answer "is it shedding" for this or any
+// similar scene -- two screenshots taken a few hundred frames apart cannot,
+// which is how an earlier claim in this file's own history got made on
+// evidence that did not support it.
 //
 // What the rod does cost is convergence. Roughly half its frames reach the
 // 1e-5 relative tolerance inside 100 iterations, against about
