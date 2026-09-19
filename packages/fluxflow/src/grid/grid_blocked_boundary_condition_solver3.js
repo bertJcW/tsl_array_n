@@ -52,7 +52,15 @@ export function createGridBlockedBoundaryConditionSolver3(
 	velocity,
 	resolutionX, resolutionY, resolutionZ, gridSpacingX, gridSpacingY, gridSpacingZ, originX, originY, originZ,
 	colliderSDF = null,
-	inflows = null
+	inflows = null,
+	// The collider's own per-face open-area fractions, when the caller has
+	// computed them for the pressure system (sdf_collider3.js's
+	// computeFaceWeights). Given them, this file decides which faces are
+	// solid by reading the same stored values rather than by sampling the
+	// collider SDF a second time -- see makeMarkAndProject's own comment for
+	// what the two tests disagreed about and what that cost. Omitted, every
+	// kernel here behaves exactly as it did before.
+	colliderFaceWeights = null
 ) {
 
 	const nx = resolutionX;
@@ -216,7 +224,7 @@ export function createGridBlockedBoundaryConditionSolver3(
 
 		} );
 
-		function makeMarkAndProject( size, positionFn, axisOffset, dataComponent, markerField, component ) {
+		function makeMarkAndProject( size, positionFn, axisOffset, dataComponent, markerField, component, weightField ) {
 
 			return tsl_array_n.kernel( size, ( i, j, k ) => {
 
@@ -224,12 +232,33 @@ export function createGridBlockedBoundaryConditionSolver3(
 				const h = velocity.gridSpacing;
 				const offset = axisOffset( h );
 
-				const phi0 = collider.sample( pt.sub( offset ) );
-				const phi1 = collider.sample( pt.add( offset ) );
+				// *** Which faces are solid is decided by the collider's own
+				// face weights when the caller has them, not by a second,
+				// independently-sampled SDF test ***
+				//
+				// The two disagreed, and a grid-aligned obstacle is where they
+				// disagree worst. An axis-aligned box at integer coordinates
+				// puts its whole upstream and downstream faces exactly on a row
+				// of velocity faces; sdf_collider3.js's own computeFaceWeights
+				// evaluates the collider analytically there and calls them
+				// closed, while this kernel straddles the face with two samples
+				// of an INTERPOLATED SDF grid and gets a half-open fraction --
+				// so the pressure system saw a wall and the velocity constraint
+				// saw open fluid, on 576 faces at once in
+				// examples/35-karman-vortex-street-3d/. Flow went into the
+				// solid with nothing to stop it and nothing able to correct it,
+				// since grid_pressure_solver3.js gates its own velocity
+				// correction on exactly the weight that said "wall".
+				//
+				// Reading the same stored value both halves read is the same
+				// device multigrid.js already uses to keep its operator
+				// symmetric by construction: agreement is not something two
+				// separate estimates can be relied on to reach.
+				const open = colliderFaceWeights
+					? weightField( i, j, k )
+					: float( 1 ).sub( ls.fractionInsideSdf( collider.sample( pt.sub( offset ) ), collider.sample( pt.add( offset ) ) ).clamp( 0, 1 ) );
 
-				const frac = float( 1 ).sub( ls.fractionInsideSdf( phi0, phi1 ).clamp( 0, 1 ) );
-
-				tsl_array_n.If( frac.greaterThan( 0 ), () => {
+				tsl_array_n.If( open.greaterThan( 0 ), () => {
 
 					markerField( i, j, k ).assign( K_FLUID );
 
@@ -244,17 +273,25 @@ export function createGridBlockedBoundaryConditionSolver3(
 
 		}
 
-		markAndProjectU = makeMarkAndProject( uSize, velocity.uPosition, ( h ) => vec3( h.x.mul( 0.5 ), 0, 0 ), velocity.dataU, uMarker, 'x' );
-		markAndProjectV = makeMarkAndProject( vSize, velocity.vPosition, ( h ) => vec3( 0, h.y.mul( 0.5 ), 0 ), velocity.dataV, vMarker, 'y' );
-		markAndProjectW = makeMarkAndProject( wSize, velocity.wPosition, ( h ) => vec3( 0, 0, h.z.mul( 0.5 ) ), velocity.dataW, wMarker, 'z' );
+		markAndProjectU = makeMarkAndProject( uSize, velocity.uPosition, ( h ) => vec3( h.x.mul( 0.5 ), 0, 0 ), velocity.dataU, uMarker, 'x', colliderFaceWeights && colliderFaceWeights.u );
+		markAndProjectV = makeMarkAndProject( vSize, velocity.vPosition, ( h ) => vec3( 0, h.y.mul( 0.5 ), 0 ), velocity.dataV, vMarker, 'y', colliderFaceWeights && colliderFaceWeights.v );
+		markAndProjectW = makeMarkAndProject( wSize, velocity.wPosition, ( h ) => vec3( 0, 0, h.z.mul( 0.5 ) ), velocity.dataW, wMarker, 'z', colliderFaceWeights && colliderFaceWeights.w );
 
-		function makeNoFluxProjection( size, positionFn, dataComponent, tempField, component ) {
+		function makeNoFluxProjection( size, positionFn, dataComponent, tempField, component, weightField ) {
 
 			return tsl_array_n.kernel( size, ( i, j, k ) => {
 
 				const pt = positionFn( i, j, k );
 
-				tsl_array_n.If( ls.isInsideSdf( collider.sample( pt ) ), () => {
+				// Same decision as makeMarkAndProject's, for the same reason --
+				// see its own comment. A face the pressure system has closed
+				// gets its velocity projected here, whatever a separately
+				// sampled SDF would have said about it.
+				const blocked = weightField
+					? weightField( i, j, k ).lessThanEqual( 0 )
+					: ls.isInsideSdf( collider.sample( pt ) );
+
+				tsl_array_n.If( blocked, () => {
 
 					const colliderVel = collider.velocityAt( pt );
 					const vel = velocity.sample( pt );
@@ -285,9 +322,9 @@ export function createGridBlockedBoundaryConditionSolver3(
 
 		}
 
-		noFluxProjectionU = makeNoFluxProjection( uSize, velocity.uPosition, velocity.dataU, uTemp, 'x' );
-		noFluxProjectionV = makeNoFluxProjection( vSize, velocity.vPosition, velocity.dataV, vTemp, 'y' );
-		noFluxProjectionW = makeNoFluxProjection( wSize, velocity.wPosition, velocity.dataW, wTemp, 'z' );
+		noFluxProjectionU = makeNoFluxProjection( uSize, velocity.uPosition, velocity.dataU, uTemp, 'x', colliderFaceWeights && colliderFaceWeights.u );
+		noFluxProjectionV = makeNoFluxProjection( vSize, velocity.vPosition, velocity.dataV, vTemp, 'y', colliderFaceWeights && colliderFaceWeights.v );
+		noFluxProjectionW = makeNoFluxProjection( wSize, velocity.wPosition, velocity.dataW, wTemp, 'z', colliderFaceWeights && colliderFaceWeights.w );
 
 		// blocked boundary condition: a collider cell with a fluid neighbour
 		// on any of its 6 faces gets that face's own velocity component set

@@ -169,6 +169,163 @@ try {
 
 	}
 
+	// ---- is the V-cycle itself a symmetric operator? ----
+	//
+	// PCG requires its preconditioner to be symmetric: `z = M r` has to
+	// behave like a quadratic form or alpha and beta stop meaning anything.
+	// A V-cycle is only symmetric if its transfer operators are adjoint and
+	// its smoother's post-sweep undoes the pre-sweep's colour order -- and
+	// once the mask and the face weights are coarsened per level, there are
+	// several more places for that to break. This measures it directly, on
+	// the configuration example 35 actually builds: a Dirichlet slab at the
+	// exit, and a solid block in the middle whose faces are closed.
+	{
+
+		const shape = [ 48, 24, 24 ];
+		const gridSpacing = [ 1, 1, 1 ];
+		const cells = shape[ 0 ] * shape[ 1 ] * shape[ 2 ];
+
+		const maskArray = new Float32Array( cells );
+		const ventArray = new Float32Array( cells );
+		for ( let n = 0; n < cells; n ++ ) {
+
+			const i = n % shape[ 0 ];
+			if ( i >= shape[ 0 ] - 2 ) { maskArray[ n ] = 1; ventArray[ n ] = 1; }
+
+		}
+
+		const maskField = tsl_array_n.arrayN( 'float', shape );
+		maskField.fromArray( maskArray );
+		const ventField = tsl_array_n.arrayN( 'float', shape );
+		ventField.fromArray( ventArray );
+
+		// A rod from x 7..13, y 6..12, spanning z -- example 35's own block.
+		function faceWeightField( axis ) {
+
+			const fieldShape = shape.map( ( n, a ) => ( a === axis ? n + 1 : n ) );
+			const count = fieldShape.reduce( ( a, b ) => a * b, 1 );
+			const data = new Float32Array( count );
+
+			for ( let n = 0; n < count; n ++ ) {
+
+				const i = n % fieldShape[ 0 ];
+				const j = Math.floor( n / fieldShape[ 0 ] ) % fieldShape[ 1 ];
+				const inSolid = i >= 7 && i <= 13 && j >= 6 && j <= 12;
+				data[ n ] = inSolid ? 0 : 1;
+
+			}
+
+			const field = tsl_array_n.arrayN( 'float', fieldShape );
+			field.fromArray( data );
+			return field;
+
+		}
+
+		const wu = faceWeightField( 0 ), wv = faceWeightField( 1 ), ww = faceWeightField( 2 );
+
+		// Exactly what grid_pressure_solver3.js builds: the caller's mask is
+		// the vent PLUS every cell the collider has enclosed (whose row
+		// would otherwise have no diagonal), while only the vent half of it
+		// is offered for coarsening.
+		{
+
+			// A face is closed when its own index falls in the solid block
+			// above, so a cell is enclosed when both of its faces on every
+			// axis are, which works out to i in 7..12 and j in 6..11 for any
+			// k. Computed rather than read back, because an arrayN that no
+			// kernel has written yet has nothing to read.
+			let enclosedCount = 0;
+			for ( let k = 0; k < 24; k ++ ) for ( let j = 6; j <= 11; j ++ ) for ( let i = 7; i <= 12; i ++ ) {
+
+				maskArray[ i + 48 * j + 48 * 24 * k ] = 1;
+				enclosedCount ++;
+
+			}
+
+			maskField.fromArray( maskArray );
+			log( 'enclosed cells folded into the caller mask', true, `${ enclosedCount } cells, as grid_pressure_solver3.js does` );
+
+		}
+
+		const cases = [
+			{ label: 'mask only', opts: { dirichletMask: ( ...I ) => maskField( ...I ).greaterThan( 0.5 ) } },
+			{ label: 'mask + weights', opts: {
+				dirichletMask: ( ...I ) => maskField( ...I ).greaterThan( 0.5 ),
+				coarseDirichletMask: ( ...I ) => ventField( ...I ).greaterThan( 0.5 ),
+				faceWeights: [ ( ...I ) => wu( ...I ), ( ...I ) => wv( ...I ), ( ...I ) => ww( ...I ) ]
+			} }
+		];
+
+		for ( const levels of [ 1, 2, 3, 4 ] ) {
+
+			for ( const { label, opts } of cases ) {
+
+				const M = linalg.createMultigridPreconditioner( shape, gridSpacing, { numberOfLevels: levels, ...opts } );
+				if ( M.refreshCoarseLevels ) M.refreshCoarseLevels();
+
+				const x = tsl_array_n.arrayN( 'float', shape );
+				const y = tsl_array_n.arrayN( 'float', shape );
+				const Mx = tsl_array_n.arrayN( 'float', shape );
+				const My = tsl_array_n.arrayN( 'float', shape );
+
+				x.fromArray( Float32Array.from( { length: cells }, rand ) );
+				y.fromArray( Float32Array.from( { length: cells }, rand ) );
+				// A V-cycle relaxes whatever its output already holds, so it
+				// is only the linear operator M when started from zero.
+				Mx.fromArray( new Float32Array( cells ) );
+				My.fromArray( new Float32Array( cells ) );
+
+				M( x, Mx )();
+				M( y, My )();
+
+				const [ xd, yd, mxd, myd ] = await Promise.all( [ x.toArray(), y.toArray(), Mx.toArray(), My.toArray() ] );
+				const left = dot( mxd, yd ), right = dot( xd, myd );
+				const rel = Math.abs( left - right ) / Math.max( Math.abs( left ), Math.abs( right ), 1e-30 );
+
+				log(
+					`V-cycle symmetric, ${ levels } level(s), ${ label }`,
+					rel < 1e-3,
+					`(Mx,y)=${ left.toFixed( 3 ) } (x,My)=${ right.toFixed( 3 ) } rel diff ${ rel.toExponential( 2 ) }`
+				);
+
+				// Symmetric is half of what PCG needs. (Mx, x) must also keep
+				// one sign -- negative here, since this file's own A is
+				// negative definite and M approximates its inverse. A sign
+				// that wanders means an indefinite preconditioner, which is
+				// enough on its own to stall PCG completely.
+				{
+
+					const quads = [];
+
+					for ( let draw = 0; draw < 5; draw ++ ) {
+
+						const r = tsl_array_n.arrayN( 'float', shape );
+						const Mr = tsl_array_n.arrayN( 'float', shape );
+						r.fromArray( Float32Array.from( { length: cells }, rand ) );
+						Mr.fromArray( new Float32Array( cells ) );
+						M( r, Mr )();
+						const [ rd, mrd ] = await Promise.all( [ r.toArray(), Mr.toArray() ] );
+						quads.push( dot( mrd, rd ) );
+
+					}
+
+					const negative = quads.every( ( q ) => q < 0 );
+					const positive = quads.every( ( q ) => q > 0 );
+
+					log(
+						`V-cycle definite, ${ levels } level(s), ${ label }`,
+						negative || positive,
+						`(Mr,r) over five draws: ${ quads.map( ( q ) => q.toExponential( 2 ) ).join( ', ' ) }`
+					);
+
+				}
+
+			}
+
+		}
+
+	}
+
 	log( 'done', true );
 
 } catch ( error ) {

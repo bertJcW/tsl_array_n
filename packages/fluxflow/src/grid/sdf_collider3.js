@@ -158,11 +158,44 @@ export function createSDFStaticCollider3( resolutionX, resolutionY, resolutionZ,
 
 						const x = ox + i * gridSpacingX;
 
-						const [ bl, br, tl, tr ] = cornerOffsets.map( ( [ dx, dy, dz ] ) => phi( x + dx, y + dy, z + dz ) );
+						const corners = cornerOffsets.map( ( [ dx, dy, dz ] ) => phi( x + dx, y + dy, z + dz ) );
+						const [ bl, br, tl, tr ] = corners;
 						const frac = fractionInsideCpu( bl, br, tl, tr );
 
 						let w = Math.min( 1, Math.max( 0, 1 - frac ) );
-						if ( w > 0 && w < MIN_FACE_WEIGHT ) w = MIN_FACE_WEIGHT;
+
+						// *** A face lying exactly ON the surface is closed, and
+						// nothing else in this file would say so ***
+						//
+						// fractionInsideCpu inherits the library's usual "inside
+						// means phi < 0" convention, so a face whose four corners
+						// all read exactly zero comes back as zero fraction
+						// inside, i.e. fully open. For any curved collider that
+						// is a measure-zero case nobody ever hits. For a
+						// grid-aligned box it is every face of the box: an
+						// obstacle at integer coordinates puts its whole front
+						// and back faces exactly on a row of velocity faces, and
+						// this function was handing back weight 1 for all of
+						// them -- 576 fully-open faces through the middle of a
+						// solid, in examples/35-karman-vortex-street-3d/.
+						//
+						// The pressure system then believed the obstacle's
+						// upstream face was open while
+						// grid_blocked_boundary_condition_solver3.js's own
+						// no-flux projection skipped it too (same convention, the
+						// other half of this fix), so flow went straight into the
+						// solid with nothing to stop it. Measured: the
+						// right-hand-side divergence piled up in the cells just
+						// upstream of that face, at up to 22 against 3.6 for the
+						// rest of the domain, and the scene blew up.
+						//
+						// A sphere has only the handful of faces its surface
+						// happens to pass exactly through, which is why the same
+						// scene merely drifted with one and detonated with the
+						// other -- and why that difference was previously put
+						// down to linear face fractions on sharp geometry.
+						if ( corners.every( ( value ) => value <= 0 ) ) w = 0;
+						else if ( w > 0 && w < MIN_FACE_WEIGHT ) w = MIN_FACE_WEIGHT;
 
 						out[ i + nx * j + nx * ny * k ] = w;
 

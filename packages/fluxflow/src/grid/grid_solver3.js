@@ -53,8 +53,19 @@ export function createGridSolver3( {
 	const [ gridSpacingX, gridSpacingY, gridSpacingZ ] = gridSpacing;
 	const [ originX, originY, originZ ] = origin;
 
+	// A static collider's own fractional face occupancy, computed once. It
+	// is what the pressure system bakes into its coefficients below, and the
+	// boundary solver now reads the same fields to decide which faces are
+	// solid -- see grid_blocked_boundary_condition_solver3.js's own
+	// makeMarkAndProject comment for why two independent estimates of that
+	// are not good enough.
+	const colliderWeights = collider && ! pressure.colliderWeights
+		? collider.computeFaceWeights( resolutionX, resolutionY, resolutionZ, gridSpacingX, gridSpacingY, gridSpacingZ, originX, originY, originZ )
+		: undefined;
+
 	const boundarySolver = createGridBlockedBoundaryConditionSolver3(
-		velocityGrid, resolutionX, resolutionY, resolutionZ, gridSpacingX, gridSpacingY, gridSpacingZ, originX, originY, originZ, collider, inflows
+		velocityGrid, resolutionX, resolutionY, resolutionZ, gridSpacingX, gridSpacingY, gridSpacingZ, originX, originY, originZ, collider, inflows,
+		colliderWeights ?? pressure.colliderWeights ?? null
 	);
 
 	if ( closedDomainBoundaryFlag !== undefined ) boundarySolver.closedDomainBoundaryFlag = closedDomainBoundaryFlag;
@@ -70,22 +81,6 @@ export function createGridSolver3( {
 	const outflowSolver = outflows ? createGridOutflowSolver3( { velocityGrid, velocityPrev, outflows, dt, applyVelocityBC: outflowVelocityBC } ) : null;
 
 	const combinedDirichlet = outflowSolver ? combineDirichlet3( outflowSolver.dirichlet, dirichlet ) : dirichlet;
-
-	// A static collider's own fractional face-occupancy, baked into the
-	// pressure system's own coefficients -- see grid_pressure_solver3.js's
-	// own colliderWeights header comment for why (this is the jet/
-	// fluid-engine-dev-derived fix for the collider-shape-sensitive
-	// instability the plain binary face marker alone couldn't avoid).
-	// Computed once here, not per frame: correct for a static collider, and
-	// the only kind createSDFRigidBodyCollider3 actually gets moved through
-	// today (nothing yet recomputes this on update()) -- a moving-collider
-	// version is real, separate scope, not attempted here.
-	// pressure.colliderWeights (if the caller already set one explicitly)
-	// wins over this default, matching how every other pressure.* option
-	// here overrides the solver's own default via the spread below.
-	const colliderWeights = collider && ! pressure.colliderWeights
-		? collider.computeFaceWeights( resolutionX, resolutionY, resolutionZ, gridSpacingX, gridSpacingY, gridSpacingZ, originX, originY, originZ )
-		: undefined;
 
 	const pressureSolver = createGridPressureSolver3( {
 		resolution: velocityGrid.resolution, gridSpacing, origin, dirichlet: combinedDirichlet, colliderWeights, ...pressure
