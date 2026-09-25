@@ -506,13 +506,37 @@ boundary carried eighteen thousand times what it carries now. Example 32's
 particle speed was four times too high and it passed its own checks both
 times, exactly as example 31 did.
 
-The probe read HEALTHY for 34 either way, and that is worth keeping in view
-rather than explaining away: with no inlet, the only criterion that applies
-is finiteness, and a scene can be badly wrong while remaining finite. It now
-says so in its own output. For 33 it says less still -- a free surface is a
-solved region that moves, which puts every flux criterion out of scope --
-so what stands behind 33 is its converged count and its own in-page checks,
-not this probe.
+The probe read HEALTHY for 34 either way, which was the real finding. With
+no inlet the only criterion that applied was finiteness, and a scene can be
+badly wrong while staying finite -- so the instrument had a hole exactly
+where the least-verified scenes were.
+
+### 6f. Closing that hole: a criterion that needs no control surface
+
+How much divergence the projection actually removed -- the residual CG
+reports, over the norm of what it was handed -- says nothing about
+geometry, needs no control volume, and so applies to every scene there is,
+free surface and vent-only included. The probe was already collecting half
+of it and throwing it away.
+
+Calibrated on both sides rather than chosen:
+
+| | healthy median | healthy worst sample | with the defect, median | with the defect, worst |
+| --- | --- | --- | --- | --- |
+| example 35 | 4.68e-6 | 1.61e-3 | -- | -- |
+| example 34 | 4.50e-7 | 1.20e-6 | 5.92e+0 | 7.35e+0 |
+| example 33 | 4.74e-7 | 9.64e-7 | 5.04e-3 | 1.28e+0 |
+
+A per-sample bar at 1e-2 sits six times above anything healthy and well
+inside the broken side's own upper half. Alongside it, CG breakdowns after
+the scene has established itself: the healthy runs have at most one, at
+frame 0, while the same scenes with the defect break down 48 and 225 times,
+as late as frame 997.
+
+Verified both ways. With the defect put back, 34 is caught at frame 60 and
+33 at frame 100 -- both of which previously read HEALTHY in either
+condition -- and 35 at frame 120. With it fixed, all three pass, as do
+examples 15, 16 and 17.
 
 ## 7. Re-running any of this
 

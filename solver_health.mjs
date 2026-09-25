@@ -95,6 +95,14 @@ const SAMPLE = Number( process.argv[ 4 ] ?? 5 );
 const FLUX_TOLERANCE = 0.05;    // of the inlet flux, across interior cross-sections
 const BALANCE_TOLERANCE = 0.05; // of the inlet flux, what enters against what leaves
 const SPEED_BOUND = 6;          // fluid speed, as a multiple of the inflow's own
+// What the projection may leave behind, as a fraction of what it was asked
+// to remove. Calibrated rather than picked: across the three 3D scenes the
+// healthy median runs 4.5e-7 to 4.7e-6 and the worst single sample seen is
+// 1.6e-3, while the same scenes with the dot product defect put back run a
+// median of 5.0e-3 and 5.9 with worst samples of 1.3 and 7.4. A per-sample
+// bar at 1e-2 sits six times above anything healthy and well below the
+// broken side's own upper half.
+const RESIDUAL_TOLERANCE = 1e-2;
 
 const browser = await chromium.launch( {
 	headless: true,
@@ -114,7 +122,7 @@ page.on( 'console', ( m ) => { const t = m.text(); if ( /error|Error/.test( t ) 
 await page.addInitScript( ( [ frames, sample ] ) => {
 
 	let stored, counter = 0;
-	window.__health = { samples: [], counters: { rejected: 0, breakdowns: 0, converged: 0, frames: 0 }, geometry: null };
+	window.__health = { samples: [], counters: { rejected: 0, breakdowns: 0, converged: 0, frames: 0, breakdownFrames: [] }, geometry: null };
 	window.__done = false;
 
 	Object.defineProperty( window, '__fluxflowProbe', {
@@ -142,7 +150,7 @@ await page.addInitScript( ( [ frames, sample ] ) => {
 				const c = window.__health.counters;
 				c.frames ++;
 				if ( d.rejected ) c.rejected ++;
-				if ( d.stoppedBy && d.stoppedBy !== 'none' ) c.breakdowns ++;
+				if ( d.stoppedBy && d.stoppedBy !== 'none' ) { c.breakdowns ++; c.breakdownFrames.push( n ); }
 				if ( d.converged === true ) c.converged ++;
 
 				if ( n >= frames ) { window.__done = true; probe.stop && probe.stop(); return; }
@@ -207,6 +215,23 @@ await page.addInitScript( ( [ frames, sample ] ) => {
 				const U = ( i, j, k ) => u[ i + NUx * j + NUx * NUy * k ];
 				const V = ( i, j, k ) => v[ i + NVx * j + NVx * NVy * k ];
 				const W = ( i, j, k ) => ( dims === 3 ? w[ i + NWx * j + NWx * NWy * k ] : 0 );
+
+				// How well the projection itself did, which needs no control
+				// surface and so is the one thing measurable on every scene
+				// -- including the ones where every flux criterion is out of
+				// scope. residual is what CG reports; ||b|| is what it was
+				// asked to remove.
+				let relativeResidual = null;
+
+				{
+
+					const bHost = await inner.pressureSolver.b.toArray();
+					let bSquared = 0;
+					for ( let i = 0; i < bHost.length; i ++ ) bSquared += bHost[ i ] * bHost[ i ];
+					const bNorm = Math.sqrt( bSquared );
+					if ( bNorm > 1e-12 && Number.isFinite( d.residual ) ) relativeResidual = Math.abs( d.residual ) / bNorm;
+
+				}
 
 				let nonFinite = 0;
 				for ( const a of [ u, v, w ] ) for ( const x of a ) if ( ! Number.isFinite( x ) ) nonFinite ++;
@@ -376,7 +401,7 @@ await page.addInitScript( ( [ frames, sample ] ) => {
 					// driven with a reference speed of 1e-12, so every
 					// velocity in it came out as hundreds of times "the
 					// inflow".
-					n, dims, regionMoved, hasWeights: Boolean( geo.wu ), driven: Math.abs( inletFlux ) > 0.01 * Math.max( gross, 1e-12 ),
+					n, dims, regionMoved, relativeResidual, stoppedBy: d.stoppedBy, hasWeights: Boolean( geo.wu ), driven: Math.abs( inletFlux ) > 0.01 * Math.max( gross, 1e-12 ),
 					nonFinite, inletFlux, speedScale, worstFlux, worstFluxPlane,
 					worstDiv, worstDivCell, solidLeak, solidLeakFace, fluidSpeed, fluidCells, lastFluidPlane,
 					outletFlux: flux[ NUx - 1 ], arrivalFlux: flux[ lastFluidPlane ], net, gross, perFace: window.__lastFaces
@@ -419,6 +444,18 @@ const U = first.speedScale;
 function verdictFor( s ) {
 
 	if ( s.nonFinite > 0 ) return `${ s.nonFinite } non-finite values`;
+
+	// How much divergence the projection actually removed. This needs no
+	// control surface, so unlike everything below it applies to every scene
+	// -- including the free-surface and no-inlet ones where the flux
+	// criteria are out of scope and finiteness was previously all that was
+	// left. Example 34 spent its entire life not converging a single frame
+	// and read HEALTHY for it; this is the criterion that catches that.
+	if ( s.relativeResidual !== null && s.relativeResidual > RESIDUAL_TOLERANCE ) {
+
+		return `the projection left ${ s.relativeResidual.toExponential( 2 ) } of the divergence it was asked to remove`;
+
+	}
 
 	// A moving solved region puts every other criterion out of scope.
 	if ( s.regionMoved ) return null;
@@ -499,6 +536,15 @@ if ( arrivedAt >= 0 ) {
 
 const establishedAt = samples.findIndex( ( s ) => verdictFor( s ) === null );
 
+// A CG breakdown while the scene is starting from rest is one thing -- the
+// healthy runs of every scene here have at most one, at frame 0 -- and one
+// after it has settled is another: the same scenes with the dot product
+// defect put back break down 48 and 225 times, from frame 83 and frame 0 on
+// to frame 997. Counted over the whole run rather than per sample, because
+// a breakdown can land on a frame this probe does not sample.
+const establishedFrame = establishedAt >= 0 ? samples[ establishedAt ].n : 0;
+const lateBreakdowns = counters.breakdownFrames.filter( ( f ) => f > establishedFrame );
+
 let firstBad = null;
 if ( establishedAt >= 0 ) {
 
@@ -509,10 +555,19 @@ if ( establishedAt >= 0 ) {
 console.log( `\n${ counters.frames } frames, sampled every ${ SAMPLE }; ${ first.dims }D; inflow ${ U.toFixed( 3 ) } per open face, inlet flux ${ first.inletFlux.toFixed( 1 ) }` );
 if ( ! first.hasWeights ) console.log( 'no collider face weights from this solver, so cross-sections are reported and the mass balance decides' );
 if ( ! first.driven ) console.log( 'no inlet: nothing in this formulation forces a vent-only domain to balance, so the verdict here rests on finiteness alone and everything else is reported' );
-console.log( `solver counters (reported, not part of the verdict): ${ counters.converged } converged, ${ counters.rejected } rejected, ${ counters.breakdowns } CG breakdowns` );
+console.log( `solver counters: ${ counters.converged } converged, ${ counters.rejected } rejected, ${ counters.breakdowns } CG breakdowns` +
+	( counters.breakdownFrames.length ? ` (first at frame ${ counters.breakdownFrames[ 0 ] }, last ${ counters.breakdownFrames[ counters.breakdownFrames.length - 1 ] })` : '' ) );
+{
+	const withResidual = samples.filter( ( s ) => s.relativeResidual !== null );
+	if ( withResidual.length ) {
+		const sorted = withResidual.map( ( s ) => s.relativeResidual ).sort( ( a, b ) => a - b );
+		const q = ( f ) => sorted[ Math.floor( f * ( sorted.length - 1 ) ) ];
+		console.log( `residual the projection left, relative to what it was asked to remove: median ${ q( 0.5 ).toExponential( 2 ) }, 90th ${ q( 0.9 ).toExponential( 2 ) }, worst ${ q( 1 ).toExponential( 2 ) }` );
+	}
+}
 
 console.log( '\n                 VERDICT CRITERIA                 |      reported only' );
-console.log( 'frame    interior flux   out/in    fluid speed  |   max div   solid faces   net imbalance' );
+console.log( 'frame    interior flux   out/in    fluid speed  |   max div   solid faces   net imbalance   residual/|b|' );
 
 const step = Math.max( 1, Math.floor( samples.length / 40 ) );
 for ( let i = 0; i < samples.length; i += step ) {
@@ -523,7 +578,8 @@ for ( let i = 0; i < samples.length; i += step ) {
 		`${ String( s.n ).padStart( 6 ) }  ${ ( s.driven ? ( s.worstFlux * 100 ).toFixed( 2 ) + '%' : '-' ).padStart( 13 ) }  ` +
 		`${ ( Number.isFinite( ratio ) ? ratio.toFixed( 2 ) : '-' ).padStart( 7 ) }  ${ s.fluidSpeed.toFixed( 2 ).padStart( 11 ) }  |  ` +
 		`${ s.worstDiv.toExponential( 2 ).padStart( 8 ) }  ${ s.solidLeak.toExponential( 2 ).padStart( 11 ) }  ` +
-		`${ s.meanBalance === null ? '          -' : ( s.meanBalance * 100 ).toFixed( 2 ).padStart( 10 ) + '%' }`
+		`${ s.meanBalance === null ? '          -' : ( s.meanBalance * 100 ).toFixed( 2 ).padStart( 10 ) + '%' }  ` +
+		`${ s.relativeResidual === null ? '           -' : s.relativeResidual.toExponential( 2 ).padStart( 12 ) }`
 	);
 
 }
@@ -545,6 +601,14 @@ the flow reaches the outlet at ${ arrivedAt >= 0 ? 'frame ' + samples[ arrivedAt
 {
 	const last = samples[ samples.length - 1 ];
 	if ( last.perFace ) console.log( 'outward flux across the fluid region, per side, at the end: ' + Object.entries( last.perFace ).map( ( [ k, v ] ) => `${ k } ${ v.toFixed( 2 ) }` ).join( ', ' ) );
+}
+
+if ( ! firstBad && lateBreakdowns.length > 0 ) {
+
+	console.log( `
+VERDICT: BROKEN -- ${ lateBreakdowns.length } CG breakdowns after the scene established itself at frame ${ establishedFrame }, the first at frame ${ lateBreakdowns[ 0 ] }` );
+	process.exit( 2 );
+
 }
 
 if ( firstBad ) {
