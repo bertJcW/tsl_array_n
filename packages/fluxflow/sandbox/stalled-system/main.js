@@ -46,6 +46,20 @@ async function loadFloats( url ) {
 
 }
 
+// The captures made before export_system.mjs learned to record the cycle's
+// shape carry only its runtime switches, which silently rebuilds a
+// one-level preconditioner. Fall back to the settings
+// examples/35-karman-vortex-street-3d/ is written with, which is what those
+// captures were taken from.
+function cycleOptions( capture ) {
+
+	return capture.meta.multigridOptions ?? {
+		numberOfLevels: 4, numberOfSmoothingIterationsDown: 3,
+		numberOfSmoothingIterationsUp: 3, numberOfCoarsestIterations: 30
+	};
+
+}
+
 async function loadCapture( name ) {
 
 	const base = `./data/${ name }`;
@@ -145,11 +159,24 @@ try {
 			faceWeights: system.faceWeights
 		} );
 
+		// ?coarsen=mask,weights sweeps what the coarse levels are told, so
+		// that what each is worth on a real captured system is a number
+		// rather than an argument. Re-taken after the dot product fix,
+		// because the first set was measured through it.
+		const sweeps = ( query.get( 'coarsen' ) ?? 'both' ).split( ',' );
+		const coarsenArms = {
+			both: { coarsenDirichletMask: true, coarsenFaceWeights: true },
+			mask: { coarsenDirichletMask: true, coarsenFaceWeights: false },
+			weights: { coarsenDirichletMask: false, coarsenFaceWeights: true },
+			neither: { coarsenDirichletMask: false, coarsenFaceWeights: false }
+		};
+
 		const arms = [
-			[ 'multigrid x4', () => linalg.createMultigridPreconditioner( system.shape, system.gridSpacing, {
-				...capture.meta.multigrid, dirichletMask: system.dirichletMask,
-				coarseDirichletMask: system.coarseDirichletMask, faceWeights: system.faceWeights
-			} ) ],
+			...sweeps.map( ( sweep ) => [ `multigrid (${ sweep })`, () => linalg.createMultigridPreconditioner( system.shape, system.gridSpacing, {
+				...cycleOptions( capture ), dirichletMask: system.dirichletMask,
+				coarseDirichletMask: system.coarseDirichletMask, faceWeights: system.faceWeights,
+				...coarsenArms[ sweep ]
+			} ) ] ),
 			[ 'jacobi', () => linalg.createJacobiPreconditioner( system.shape, system.gridSpacing, {
 				dirichletMask: system.dirichletMask, faceWeights: system.faceWeights
 			} ) ],
@@ -164,6 +191,9 @@ try {
 			x.fromArray( new Float32Array( system.cells ) );
 
 			const M = build();
+			// Evidence that a sweep arm actually changed something: with no
+			// coarsening there are no coarsening kernels to dispatch.
+			const coarsening = M.refreshCoarseLevels ? 'coarsens' : 'no coarsen kernels';
 			if ( M.refreshCoarseLevels ) M.refreshCoarseLevels();
 
 			const solver = linalg.createPreconditionedConjugateGradientSolver( applyLaplacian, M, system.b, x );
@@ -174,7 +204,7 @@ try {
 
 			log(
 				`&nbsp;&nbsp;${ label.padEnd( 14 ) } converged=${ ok } iters=${ String( state.iterations ).padStart( 5 ) } ` +
-				`residual/||b|| = ${ ( residual / bNorm ).toExponential( 2 ) } stoppedBy=${ state.stoppedBy }`,
+				`residual/||b|| = ${ ( residual / bNorm ).toExponential( 2 ) } stoppedBy=${ state.stoppedBy } [${ coarsening }]`,
 				ok === true
 			);
 
@@ -299,7 +329,7 @@ try {
 			// so both should cancel nothing and both should be accurate.
 			const builders = [
 				[ 'multigrid', () => { const M = linalg.createMultigridPreconditioner( system.shape, system.gridSpacing, {
-					...capture.meta.multigrid, dirichletMask: system.dirichletMask,
+					...cycleOptions( capture ), dirichletMask: system.dirichletMask,
 					coarseDirichletMask: system.coarseDirichletMask, faceWeights: system.faceWeights } );
 					if ( M.refreshCoarseLevels ) M.refreshCoarseLevels(); return M; } ],
 				[ 'jacobi', () => linalg.createJacobiPreconditioner( system.shape, system.gridSpacing, {
@@ -472,7 +502,7 @@ try {
 			} );
 
 			const M = linalg.createMultigridPreconditioner( system.shape, system.gridSpacing, {
-				...capture.meta.multigrid, dirichletMask: system.dirichletMask,
+				...cycleOptions( capture ), dirichletMask: system.dirichletMask,
 				coarseDirichletMask: system.coarseDirichletMask, faceWeights: system.faceWeights
 			} );
 			if ( M.refreshCoarseLevels ) M.refreshCoarseLevels();

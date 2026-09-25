@@ -1318,7 +1318,17 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 	// caller passed no mask at all: coarsened weights can leave a coarse
 	// cell fully enclosed, and that cell's row has no diagonal to relax
 	// against. See buildMaskCoarsenKernel's own coarseWeights comment.
-	const coarseningMasks = dirichletMask || faceWeights;
+	// Whether each of those actually reaches the coarse levels, as build
+	// options rather than a thing to comment out. Both default to on, which
+	// is what every caller wants; they exist so that what the coarsening is
+	// worth stays a measurement anyone can repeat rather than a claim in a
+	// commit message. The first numbers behind them were taken while the 3D
+	// dot product was broken (see linalg.js's createDotReducer), so they had
+	// to be taken again, and re-taking them needed exactly this switch.
+	const coarsenDirichletMask = options.coarsenDirichletMask !== false;
+	const coarsenFaceWeights = options.coarsenFaceWeights !== false;
+
+	const coarseningMasks = ( dirichletMask && coarsenDirichletMask ) || ( faceWeights && coarsenFaceWeights );
 	const levelMaskFields = [];
 	const levelFaceWeightFields = [];
 	const coarsenKernels = [];
@@ -1335,7 +1345,7 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 
 	}
 
-	if ( faceWeights ) {
+	if ( faceWeights && coarsenFaceWeights ) {
 
 		levelFaceWeightFields.push( null ); // level 0 reads the caller's own weights
 
@@ -1359,8 +1369,8 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 
 	function levelMask( level ) {
 
-		if ( ! coarseningMasks ) return undefined;
 		if ( level === 0 ) return dirichletMask;
+		if ( ! coarseningMasks ) return undefined;
 		if ( level >= numberOfLevels ) return undefined;
 
 		const field = levelMaskFields[ level ];
@@ -1372,6 +1382,7 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 
 		if ( ! faceWeights ) return undefined;
 		if ( level === 0 ) return faceWeights;
+		if ( ! coarsenFaceWeights ) return undefined;
 		if ( level >= numberOfLevels ) return undefined;
 
 		return levelFaceWeightFields[ level ].map( ( field ) => ( ...I ) => field( ...I ) );
@@ -1383,7 +1394,7 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 	// both must be done before the next level down reads either.
 	for ( let level = 1; level < numberOfLevels; level ++ ) {
 
-		if ( faceWeights ) {
+		if ( faceWeights && coarsenFaceWeights ) {
 
 			for ( let axis = 0; axis < shape.length; axis ++ ) {
 
@@ -1397,12 +1408,21 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 
 		if ( ! coarseningMasks ) continue;
 
-		const maskSource = ! dirichletMask ? undefined : level === 1 ? coarseDirichletMask : levelMask( level - 1 );
+		const maskSource = ( ! dirichletMask || ! coarsenDirichletMask ) ? undefined : level === 1 ? coarseDirichletMask : levelMask( level - 1 );
 		coarsenKernels.push( buildMaskCoarsenKernel( maskSource, levelMaskFields[ level ], levelShapes[ level ], levelFaceWeights( level ) ) );
 
 	}
 
 	applyMultigridPreconditioner.settings = settings;
+	// The options this preconditioner was actually built with, exposed for
+	// measurement: `settings` above holds the runtime switches, not the
+	// shape of the cycle, and a harness that captures one without the other
+	// rebuilds a different preconditioner than the one it meant to.
+	applyMultigridPreconditioner.options = {
+		numberOfLevels, numberOfSmoothingIterationsDown, numberOfSmoothingIterationsUp,
+		numberOfCoarsestIterations, numberOfFinalIterations, sorFactor,
+		coarsenDirichletMask, coarsenFaceWeights
+	};
 	applyMultigridPreconditioner.refreshCoarseLevels = coarsenKernels.length > 0
 		? tsl_array_n.createBatch( coarsenKernels )
 		: null;

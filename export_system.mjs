@@ -79,6 +79,11 @@ const captured = await page.evaluate( async () => {
 		dataSizeU: g.dataSizeU, dataSizeV: g.dataSizeV, dataSizeW: g.dataSizeW,
 		diagnostics: { ...ps.diagnostics },
 		settings: { ...ps.settings, multigrid: { ...ps.settings.multigrid } },
+		// The cycle's own shape. ps.settings.multigrid does NOT carry it --
+		// that object holds runtime switches -- and capturing only those is
+		// how the first version of this fixture came to rebuild a one-level
+		// preconditioner while calling it four-level.
+		multigridOptions: { ...ps.settings.multigridOptions },
 		arrays: {
 			b: await read( ps.b ),
 			pressure: await read( solver.pressure.data ),

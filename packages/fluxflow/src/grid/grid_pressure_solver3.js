@@ -477,6 +477,9 @@ export function createGridPressureSolver3( {
 	}
 
 	settings.multigrid = preconditionerBuilders.multigrid.settings;
+	// The cycle's shape, beside its runtime switches -- see multigrid.js's
+	// own options comment for why the two have to travel together.
+	settings.multigridOptions = preconditionerBuilders.multigrid.options;
 
 	// dirichletMask/ventMask are exposed for measurement only, the way
 	// multigrid.js exports its own transfer kernels: a health check on this
