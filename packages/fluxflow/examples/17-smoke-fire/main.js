@@ -347,6 +347,13 @@ try {
 
 	}
 
+		// Measurement handle only, the same one examples 15, 16 and 35 expose:
+	// a conservation check (solver_health.mjs at the repo root) needs the
+	// stepping object and the velocity grid, and this scene had neither
+	// reachable, which is why it had never been measured for conservation
+	// at all. Nothing here changes what the scene does.
+	window.__fluxflowProbe = { solver: smoke, velocityGrid, renderer };
+
 	async function animate() {
 
 		updatePerf();

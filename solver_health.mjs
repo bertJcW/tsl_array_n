@@ -115,6 +115,10 @@ await page.addInitScript( ( [ frames, sample ] ) => {
 
 			stored = probe;
 			const solver = probe.solver;
+			// A scene may step a wrapper -- the smoke and fire solvers own a
+			// grid solver rather than being one -- so the pressure solver
+			// and the collider weights are looked for one level down too.
+			const inner = solver.pressureSolver ? solver : ( solver.solver ?? solver );
 			const original = solver.onAdvanceTimeStep;
 
 			solver.onAdvanceTimeStep = async ( dt ) => {
@@ -125,7 +129,7 @@ await page.addInitScript( ( [ frames, sample ] ) => {
 				try {
 
 				const n = counter ++;
-				const d = solver.pressureSolver.diagnostics;
+				const d = inner.pressureSolver.diagnostics;
 				const c = window.__health.counters;
 				c.frames ++;
 				if ( d.rejected ) c.rejected ++;
@@ -150,8 +154,8 @@ await page.addInitScript( ( [ frames, sample ] ) => {
 				// The solver's own view of its geometry, read once.
 				if ( window.__health.geometry === null ) {
 
-					const fw = solver.colliderFaceWeights && solver.colliderFaceWeights.fields;
-					const masks = solver.pressureSolver;
+					const fw = inner.colliderFaceWeights && inner.colliderFaceWeights.fields;
+					const masks = inner.pressureSolver;
 					window.__health.geometry = {
 						dims,
 						wu: fw ? Array.from( await fw.u.toArray() ) : null,
@@ -198,7 +202,67 @@ await page.addInitScript( ( [ frames, sample ] ) => {
 				}
 
 				const inletFlux = flux[ 0 ];
-				const speedScale = inletOpenArea > 0 ? Math.abs( inletFlux ) / inletOpenArea : 1;
+
+				// Net flux across the WHOLE boundary, and the gross traffic
+				// across it. An incompressible domain neither gains nor
+				// loses mass, so the net is zero however the scene is
+				// driven: for a channel that reduces to what enters leaving
+				// again, and for a buoyancy-driven scene with a vent -- a
+				// smoke or fire scene, which has no inlet at all and whose
+				// inlet flux is exactly 0 -- it is the only form of the
+				// statement that says anything. An earlier version of this
+				// probe compared the outlet against the inlet and so divided
+				// by zero on every such scene, reporting Infinity and
+				// calling them broken, which was the probe misapplying
+				// itself rather than a finding.
+				let net = 0, gross = 0;
+
+				{
+
+					const perFace = {};
+					const face = ( value, label ) => { net += value; gross += Math.abs( value ); perFace[ label ] = value; };
+
+					// x: out of the domain is -u at i=0 and +u at i=NX
+					let left = 0, right = 0;
+					for ( let k = 0; k < NUz; k ++ ) for ( let j = 0; j < NUy; j ++ ) {
+
+						left += WU( 0, j, k ) * U( 0, j, k );
+						right += WU( NX, j, k ) * U( NX, j, k );
+
+					}
+					face( - left, 'x-' ); face( right, 'x+' );
+
+					let bottom = 0, top = 0;
+					for ( let k = 0; k < NVz; k ++ ) for ( let i = 0; i < NVx; i ++ ) {
+
+						bottom += WV( i, 0, k ) * V( i, 0, k );
+						top += WV( i, NY, k ) * V( i, NY, k );
+
+					}
+					face( - bottom, 'y-' ); face( top, 'y+' );
+
+					if ( dims === 3 ) {
+
+						let back = 0, front = 0;
+						for ( let j = 0; j < NWy; j ++ ) for ( let i = 0; i < NWx; i ++ ) {
+
+							back += WW( i, j, 0 ) * W( i, j, 0 );
+							front += WW( i, j, NZ ) * W( i, j, NZ );
+
+						}
+						face( - back, 'z-' ); face( front, 'z+' );
+
+					}
+
+					window.__lastFaces = perFace;
+
+				}
+
+				// The scene's own velocity scale: from its inlet when it has
+				// one, and otherwise from the traffic across its boundary.
+				const speedScale = inletOpenArea > 0 && Math.abs( inletFlux ) > 0
+					? Math.abs( inletFlux ) / inletOpenArea
+					: ( gross > 0 ? gross / ( 2 * inletOpenArea ) : 1 );
 
 				// A vent cell does not conserve -- it is where mass is
 				// allowed to leave -- so the comparison stops at the first
@@ -266,10 +330,10 @@ await page.addInitScript( ( [ frames, sample ] ) => {
 				}
 
 				window.__health.samples.push( {
-					n, dims, hasWeights: Boolean( geo.wu ),
+					n, dims, hasWeights: Boolean( geo.wu ), driven: Math.abs( inletFlux ) > 1e-9,
 					nonFinite, inletFlux, speedScale, worstFlux, worstFluxPlane,
 					worstDiv, worstDivCell, solidLeak, solidLeakFace, fluidSpeed, fluidCells, lastFluidPlane,
-					outletFlux: flux[ NUx - 1 ], arrivalFlux: flux[ lastFluidPlane ]
+					outletFlux: flux[ NUx - 1 ], arrivalFlux: flux[ lastFluidPlane ], net, gross, perFace: window.__lastFaces
 				} );
 
 				} catch ( error ) {
@@ -311,21 +375,27 @@ function verdictFor( s ) {
 	if ( s.nonFinite > 0 ) return `${ s.nonFinite } non-finite values`;
 
 	// Cross-sections are only meaningful where solid faces can be excluded.
-	if ( s.hasWeights && s.worstFlux > FLUX_TOLERANCE ) return `flux through plane x=${ s.worstFluxPlane } is off the inlet's by ${ ( s.worstFlux * 100 ).toFixed( 1 ) }%`;
+	if ( s.driven && s.hasWeights && s.worstFlux > FLUX_TOLERANCE ) return `flux through plane x=${ s.worstFluxPlane } is off the inlet's by ${ ( s.worstFlux * 100 ).toFixed( 1 ) }%`;
 
-	// Averaged, not instantaneous. An unsteady wake makes the outlet's own
+	// Averaged, not instantaneous. An unsteady wake makes the boundary's own
 	// flux oscillate as vortices pass through it -- measured at up to 7% on
 	// a scene that conserves mass perfectly well -- so the conservation
 	// statement is about the mean, and judging the instantaneous value calls
-	// a healthy scene broken. The mean is taken from establishment to here,
-	// and only once there are enough samples for one to mean anything.
+	// a healthy scene broken.
 	if ( s.meanBalance !== null && s.meanBalance > BALANCE_TOLERANCE ) {
 
-		return `${ s.meanOutlet.toFixed( 1 ) } leaving on average against ${ s.inletFlux.toFixed( 1 ) } entering, ${ ( s.meanBalance * 100 ).toFixed( 1 ) }% apart`;
+		return `net flux across the boundary averages ${ s.meanNet.toFixed( 1 ) } against ${ s.meanGross.toFixed( 1 ) } crossing it, ${ ( s.meanBalance * 100 ).toFixed( 1 ) }% out of balance`;
 
 	}
 
-	if ( s.fluidSpeed > SPEED_BOUND * U ) return `fluid speed ${ s.fluidSpeed.toFixed( 2 ) }, ${ ( s.fluidSpeed / U ).toFixed( 1 ) }x the inflow`;
+	// Only where the scene defines a speed to be a multiple OF. A
+	// buoyancy-driven scene -- smoke, fire, an explosion -- has no inlet,
+	// so there is no such number, and an earlier draft invented one and
+	// duly called a plume broken for reaching 20 when it had decided the
+	// scale was 1. For those scenes the verdict rests on the two criteria
+	// that need no scale: nothing non-finite, and a boundary that neither
+	// gains nor loses mass.
+	if ( s.driven && s.fluidSpeed > SPEED_BOUND * U ) return `fluid speed ${ s.fluidSpeed.toFixed( 2 ) }, ${ ( s.fluidSpeed / U ).toFixed( 1 ) }x the inflow`;
 	return null;
 
 }
@@ -341,22 +411,31 @@ function verdictFor( s ) {
 // the running mean from there on.
 const WINDOW = 20;   // samples averaged over, so one vortex's worth of swing cannot decide anything
 const ARRIVED = 0.9; // of the inlet flux at the outlet: the flow has crossed the domain
-for ( const s of samples ) { s.meanBalance = null; s.meanOutlet = 0; }
+for ( const s of samples ) { s.meanBalance = null; s.meanNet = 0; s.meanGross = 0; }
 
 // The balance says nothing while the domain is still filling -- the outlet
 // carries almost nothing then, by construction -- so it is judged only
 // after the flow has reached it, which the run itself says rather than a
 // frame number.
-const arrivedAt = samples.findIndex( ( s ) => Math.abs( s.outletFlux ) >= ARRIVED * Math.abs( s.inletFlux ) );
+// A driven channel has to fill before its boundary can balance, and the run
+// says when that happened rather than a frame number. A scene with no inlet
+// has nothing to fill and starts balanced.
+const driven = Math.abs( samples[ 0 ].inletFlux ) > 0;
+const arrivedAt = driven
+	? samples.findIndex( ( s ) => Math.abs( s.outletFlux ) >= ARRIVED * Math.abs( s.inletFlux ) )
+	: 0;
 
 if ( arrivedAt >= 0 ) {
 
 	for ( let i = arrivedAt + WINDOW - 1; i < samples.length; i ++ ) {
 
-		let sum = 0;
-		for ( let w = i - WINDOW + 1; w <= i; w ++ ) sum += samples[ w ].outletFlux;
-		samples[ i ].meanOutlet = sum / WINDOW;
-		samples[ i ].meanBalance = Math.abs( samples[ i ].meanOutlet - samples[ i ].inletFlux ) / Math.max( Math.abs( samples[ i ].inletFlux ), 1e-9 );
+		let net = 0, gross = 0;
+		for ( let w = i - WINDOW + 1; w <= i; w ++ ) { net += samples[ w ].net; gross += samples[ w ].gross; }
+		samples[ i ].meanNet = net / WINDOW;
+		samples[ i ].meanGross = gross / WINDOW;
+		samples[ i ].meanBalance = samples[ i ].meanGross > 1e-9
+			? Math.abs( samples[ i ].meanNet ) / samples[ i ].meanGross
+			: 0;
 
 	}
 
@@ -373,21 +452,22 @@ if ( establishedAt >= 0 ) {
 
 console.log( `\n${ counters.frames } frames, sampled every ${ SAMPLE }; ${ first.dims }D; inflow ${ U.toFixed( 3 ) } per open face, inlet flux ${ first.inletFlux.toFixed( 1 ) }` );
 if ( ! first.hasWeights ) console.log( 'no collider face weights from this solver, so cross-sections are reported and the mass balance decides' );
+if ( ! first.driven ) console.log( 'no inlet: this scene is driven from inside, so the verdict rests on finiteness and on the boundary neither gaining nor losing mass' );
 console.log( `solver counters (reported, not part of the verdict): ${ counters.converged } converged, ${ counters.rejected } rejected, ${ counters.breakdowns } CG breakdowns` );
 
 console.log( '\n                 VERDICT CRITERIA                 |      reported only' );
-console.log( 'frame    interior flux   out/in    fluid speed  |   max div   solid faces   mean out/in' );
+console.log( 'frame    interior flux   out/in    fluid speed  |   max div   solid faces   net imbalance' );
 
 const step = Math.max( 1, Math.floor( samples.length / 40 ) );
 for ( let i = 0; i < samples.length; i += step ) {
 
 	const s = samples[ i ];
-	const ratio = s.outletFlux / ( s.inletFlux || 1 );
+	const ratio = s.driven ? s.outletFlux / s.inletFlux : NaN;
 	console.log(
-		`${ String( s.n ).padStart( 6 ) }  ${ ( s.worstFlux * 100 ).toFixed( 2 ).padStart( 12 ) }%  ` +
-		`${ ratio.toFixed( 2 ).padStart( 7 ) }  ${ s.fluidSpeed.toFixed( 2 ).padStart( 11 ) }  |  ` +
+		`${ String( s.n ).padStart( 6 ) }  ${ ( s.driven ? ( s.worstFlux * 100 ).toFixed( 2 ) + '%' : '-' ).padStart( 13 ) }  ` +
+		`${ ( Number.isFinite( ratio ) ? ratio.toFixed( 2 ) : '-' ).padStart( 7 ) }  ${ s.fluidSpeed.toFixed( 2 ).padStart( 11 ) }  |  ` +
 		`${ s.worstDiv.toExponential( 2 ).padStart( 8 ) }  ${ s.solidLeak.toExponential( 2 ).padStart( 11 ) }  ` +
-		`${ s.meanBalance === null ? '          -' : ( s.meanOutlet / ( s.inletFlux || 1 ) ).toFixed( 3 ).padStart( 11 ) }`
+		`${ s.meanBalance === null ? '          -' : ( s.meanBalance * 100 ).toFixed( 2 ).padStart( 10 ) + '%' }`
 	);
 
 }
@@ -405,6 +485,11 @@ VERDICT: NEVER ESTABLISHED -- no sample in ${ counters.frames } frames met every
 console.log( `
 the flow reaches the outlet at ${ arrivedAt >= 0 ? 'frame ' + samples[ arrivedAt ].n : 'no point in this run' }; ` +
 	`established at frame ${ samples[ establishedAt ].n } (the startup transient, judged from the data rather than skipped by count)` );
+
+{
+	const last = samples[ samples.length - 1 ];
+	if ( last.perFace ) console.log( 'outward flux per boundary face at the end: ' + Object.entries( last.perFace ).map( ( [ k, v ] ) => `${ k } ${ v.toFixed( 2 ) }` ).join( ', ' ) );
+}
 
 if ( firstBad ) {
 
