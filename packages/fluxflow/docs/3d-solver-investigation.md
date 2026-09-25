@@ -435,12 +435,44 @@ peak speed 27.79 against an inflow of 2, interior flux 1289% off -- while
 converging on every frame, which is why none of its long runs ever showed
 it. On the ported formula it reads HEALTHY over 4001 frames at 1.013x.
 
-### Still open
+### F1 and F2: one mechanism, and it is structural
+
+Measured per boundary face, which is what made it legible:
+
+| scene | in | out | closed walls | out of balance |
+| --- | --- | --- | --- | --- |
+| example 16 | 256.00 | 259.28 | 0.00 | 1.3% |
+| example 15 | 128.00 | 156.56 | 0.00 | 22% |
+| example 17 | none | 532.23 | 0.00 exactly, all three | 100% |
+
+The closed walls carry exactly zero, so the boundary conditions there are
+doing their job. Everything else leaves through the vent and nothing
+replaces it.
+
+The mechanism is the same in all of them and it is not the defect the
+convective outflow fixed -- every number above is with that already in
+place. A vent is a region of pinned pressure, a pinned row is an identity
+row, and nothing in the pressure solve constrains the flux into one. The
+convective boundary condition then writes the LOCAL interior velocity onto
+the exit faces, and that velocity is under no obligation to conserve mass.
+Example 15's cylinder blocks more of its channel than example 16's does, so
+its flow is still accelerated where it reaches the exit and carries 22% more
+out than comes in; example 16's is nearly recovered by then and carries
+1.3% more. Examples 17, 18 and 19 have no inlet at all, so anything leaving
+is unbalanced by construction: a domain whose only opening is a vent can
+pump indefinitely.
+
+The standard remedy is a global mass-flux correction: after the convective
+update, scale the outflow faces so that net flux across the boundary is
+zero. It is one reduction and one scaling pass per frame, it is textbook for
+convective outlets, and in the no-inlet case it reduces to exactly "make the
+net zero", so it addresses all five scenes at once. Not implemented -- it
+changes a boundary condition under every outflow scene in the package, which
+wants deciding rather than assuming.
 
 | | item |
 | --- | --- |
-| F1 | `examples/15-flow-past-cylinder/` is ten times better after the port -- 13.90x to 1.22x, peak speed 27.98 to 3.88 -- and still does not pass: its mean outlet flux sits 7% above its inlet and drifts to 22%. Undiagnosed, and much smaller than what it replaced |
-| F2 | Examples 17, 18 and 19 build outflows and have never been measured for conservation |
+| F1/F2 | The global mass-flux correction above, or a decision not to have one |
 | E1 | Closed: the 2D outflow is ported |
 | E2, E3, E4 | Unchanged |
 
