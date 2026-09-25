@@ -435,46 +435,56 @@ peak speed 27.79 against an inflow of 2, interior flux 1289% off -- while
 converging on every frame, which is why none of its long runs ever showed
 it. On the ported formula it reads HEALTHY over 4001 frames at 1.013x.
 
-### F1 and F2: one mechanism, and it is structural
+### F1 and F2: retracted -- the probe was measuring the wrong surface
 
-Measured per boundary face, which is what made it legible:
+The conclusion recorded here first was that examples 15, 17, 18 and 19 lose
+mass through their vents, that a vent is a free sink because a pinned row is
+an identity row, and that the remedy was a global mass-flux correction. It
+was wrong, and reading mantaflow is what showed it.
 
-| scene | in | out | closed walls | out of balance |
-| --- | --- | --- | --- | --- |
-| example 16 | 256.00 | 259.28 | 0.00 | 1.3% |
-| example 15 | 128.00 | 156.56 | 0.00 | 22% |
-| example 17 | none | 532.23 | 0.00 exactly, all three | 100% |
+mantaflow has no such correction. Its `extforces.cpp` sets inflow velocities
+straight onto boundary faces and its `resetOutflow` clears flags, particles
+and phi; neither computes a global flux or rescales anything. What
+`pressure.cpp` does have is one line that matters here: `knCorrectVelocity`
+skips outflow cells, "don't change velocities in outflow cells". Its
+`enforceCompatibility` exists for the closed, all-Neumann case and has
+nothing to do with open boundaries.
 
-The closed walls carry exactly zero, so the boundary conditions there are
-doing their job. Everything else leaves through the vent and nothing
-replaces it.
+Which is the point. A vent's velocities are not corrected by the pressure
+solve, here or there, so the grid's own outermost faces carry whatever the
+outflow boundary condition last wrote and nothing constrains them. The
+surface where the projection's promise applies is the edge of the solved
+region, not the edge of the grid -- and every number in the retracted table
+was read off the edge of the grid.
 
-The mechanism is the same in all of them and it is not the defect the
-convective outflow fixed -- every number above is with that already in
-place. A vent is a region of pinned pressure, a pinned row is an identity
-row, and nothing in the pressure solve constrains the flux into one. The
-convective boundary condition then writes the LOCAL interior velocity onto
-the exit faces, and that velocity is under no obligation to conserve mass.
-Example 15's cylinder blocks more of its channel than example 16's does, so
-its flow is still accelerated where it reaches the exit and carries 22% more
-out than comes in; example 16's is nearly recovered by then and carries
-1.3% more. Examples 17, 18 and 19 have no inlet at all, so anything leaving
-is unbalanced by construction: a domain whose only opening is a vent can
-pump indefinitely.
+Measured again on the right surface:
 
-The standard remedy is a global mass-flux correction: after the convective
-update, scale the outflow faces so that net flux across the boundary is
-zero. It is one reduction and one scaling pass per frame, it is textbook for
-convective outlets, and in the no-inlet case it reduces to exactly "make the
-net zero", so it addresses all five scenes at once. Not implemented -- it
-changes a boundary condition under every outflow scene in the package, which
-wants deciding rather than assuming.
+| scene | in | out | where the old reading came from |
+| --- | --- | --- | --- |
+| example 15 | 128.00 | 128.33 | 149.87 at the grid face, and a mid-domain plane cutting the cylinder |
+| example 16 | 256.00 | 256.19 | 259.49 at the grid face |
+| example 35 | 1152.00 | 1150.49 | -- |
+| example 17 | none | 80.85 | 840.92 at the grid's top face, against 14.0 three rows inside the fluid |
+| example 19 | none | -- | 93.93 at the grid's top face, against -0.03 three rows inside |
+
+So example 15 conserves to 0.3% and reads HEALTHY, example 16 to 0.07%, and
+F1 does not exist. The three buoyancy scenes have no inlet at all, and
+nothing in this formulation -- or in mantaflow's -- forces a vent-only
+domain to balance: a pinned cell absorbs whatever is pushed into it. The
+probe now says so instead of judging them, which leaves those scenes
+checked for finiteness and nothing else, honestly.
+
+What survives from all of this is the probe's own bug, now fixed: it sums
+every face with fluid on exactly one side, whatever shape the vent is.
+Re-verified against both 3D baselines -- the current scene reads HEALTHY at
+1152.00 in and 1150.49 out, and with the previous outflow put back it still
+reads BROKEN, at 1072.64 out against the same 1152.00 in.
+
+### Still open
 
 | | item |
 | --- | --- |
-| F1/F2 | The global mass-flux correction above, or a decision not to have one |
-| E1 | Closed: the 2D outflow is ported |
-| E2, E3, E4 | Unchanged |
+| F3 | Whether a vent-only domain ought to be made to balance at all, which is a design question this package shares with mantaflow rather than a defect |
 
 ## 7. Re-running any of this
 

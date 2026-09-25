@@ -879,6 +879,13 @@ export function createGridPressureSolver2( {
 	// measurement has one place to reach for. See multigrid.js.
 	settings.multigrid = preconditionerBuilders.multigrid.settings;
 
-	return { project, pressure: pressureGrid, b, diagnostics, settings };
+	// dirichletMask is exposed for measurement only, as in
+	// grid_pressure_solver3.js: a conservation check has to know which
+	// cells this solver deliberately does not make divergence-free, because
+	// the surface it must measure across is the edge of the region that IS
+	// solved, not the edge of the grid. Measuring the grid's own outermost
+	// faces instead reads velocities nothing constrains -- see
+	// solver_health.mjs's own control-surface comment.
+	return { project, pressure: pressureGrid, b, diagnostics, settings, dirichletMask: dirichletMaskField ?? null };
 
 }
