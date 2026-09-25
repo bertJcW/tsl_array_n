@@ -113,8 +113,7 @@
 // dt-based factor; switching to the mantaflow-literal
 // `max(1, dt*4)` here resolved it completely, matching mantaflow's own
 // safety margin exactly rather than reinventing a different one.
-const OUTFLOW_TIMESTEP_FLOOR = 1;
-const OUTFLOW_TIMESTEP_SCALE = 4;
+
 //
 // Writes into a scratch destination array before copying back (uDst/vDst
 // + a per-outflow copy step) -- the exact same read/write-race
@@ -122,6 +121,31 @@ const OUTFLOW_TIMESTEP_SCALE = 4;
 // field at arbitrary positions while also writing it in the same
 // dispatch has no cross-thread ordering guarantee on a GPU), not a new
 // pattern here, reusing an already-proven one.
+//
+// *** Part 2 is now the standard convective form, and the upstream
+// direction was backwards here too ***
+//
+// Everything above about mantaflow's `(vel - velPrev)/factor +
+// vel(upstream)` and about `factor`'s own timeStep is the history of what
+// used to be here, and is kept because two of its findings are still
+// load-bearing (the SDF-gradient degeneracy fix, and the multigrid
+// asymmetry that the outflow strip was merely the first place to expose).
+// The formula itself is gone. grid_outflow_solver3.js's own header carries
+// the derivation; the short version is that sandbox/outflow-gradient/
+// measures this package's outflow SDFs as having a gradient that points
+// TOWARD the fluid -- in 2D exactly as in 3D -- so `pt - n * h` sampled
+// downstream of the face, and at a domain-edge outflow two cells deep the
+// two exit faces sampled each other while neither tracked the interior.
+//
+// This file kept the old formula for a while after 3D changed, on the
+// grounds that examples 15 and 16 were long-run stable and a boundary
+// condition should not be changed under them without its own verification.
+// That verification is what changed the answer. Measured with
+// solver_health.mjs, which judges conservation rather than convergence,
+// example 16 on the old formula reads BROKEN from frame 1720 and settles
+// at 13.89x the inflow leaving the outlet with a peak speed of 27.79
+// against an inflow of 2 -- while converging on every frame throughout,
+// which is why every earlier long run of it looked fine.
 //
 // *** Part 3: scalar-field cleanup ***
 //
@@ -204,13 +228,6 @@ export function createGridOutflowSolver2( { velocityGrid, velocityPrev, outflows
 	// importantly, matching this port's existing test convention of
 	// constructing a solver without a real `dt` (dt is only otherwise
 	// needed once a kernel is actually dispatched, never at construction).
-	function computeOutflowFactor( bulkVelComponent ) {
-
-		const factorTimeStep = max( float( OUTFLOW_TIMESTEP_FLOOR ), dtNode.mul( OUTFLOW_TIMESTEP_SCALE ) );
-		return factorTimeStep.mul( max( float( 1 ), bulkVelComponent ) );
-
-	}
-
 	const uDst = tsl_array_n.arrayN( 'float', velocityGrid.dataSizeU );
 	const vDst = tsl_array_n.arrayN( 'float', velocityGrid.dataSizeV );
 
@@ -235,17 +252,21 @@ export function createGridOutflowSolver2( { velocityGrid, velocityPrev, outflows
 				tsl_array_n.If( g.length().greaterThan( 0 ), () => {
 
 					const n = g.normalize();
-					const upstreamPt = pt.sub( n.mul( velocityGrid.gridSpacing.x ) );
+					// `pt + n * h`, not `pt - n * h` -- see this file's own
+					// header comment. The gradient points toward the fluid, so
+					// the upstream neighbour is the other way round from what
+					// was here.
+					const upstreamPt = pt.add( n.mul( velocityGrid.gridSpacing.x ) );
 
 					const bulkVel = velocityGrid.sample( pt );
-					const factor = computeOutflowFactor( bulkVel.x );
+					const outwardSpeed = max( float( 0 ), bulkVel.dot( n.negate() ) );
+					const courant = clamp( outwardSpeed.mul( dtNode ).div( velocityGrid.gridSpacing.x ), float( 0 ), float( 1 ) );
 
 					const upstreamVel = velocityGrid.sample( upstreamPt );
-					const prevVel = velocityPrev.sample( pt );
 					const current = velocityGrid.dataU( i, j );
 
-					const extrapolated = current.sub( prevVel.x ).div( factor ).add( upstreamVel.x );
-					uDst( i, j ).assign( clamp( extrapolated, - EXTRAPOLATED_VELOCITY_CLAMP, EXTRAPOLATED_VELOCITY_CLAMP ) );
+					const relaxed = current.add( upstreamVel.x.sub( current ).mul( courant ) );
+					uDst( i, j ).assign( clamp( relaxed, - EXTRAPOLATED_VELOCITY_CLAMP, EXTRAPOLATED_VELOCITY_CLAMP ) );
 
 				} ).Else( () => {
 
@@ -282,17 +303,21 @@ export function createGridOutflowSolver2( { velocityGrid, velocityPrev, outflows
 				tsl_array_n.If( g.length().greaterThan( 0 ), () => {
 
 					const n = g.normalize();
-					const upstreamPt = pt.sub( n.mul( velocityGrid.gridSpacing.y ) );
+					// `pt + n * h`, not `pt - n * h` -- see this file's own
+					// header comment. The gradient points toward the fluid, so
+					// the upstream neighbour is the other way round from what
+					// was here.
+					const upstreamPt = pt.add( n.mul( velocityGrid.gridSpacing.y ) );
 
 					const bulkVel = velocityGrid.sample( pt );
-					const factor = computeOutflowFactor( bulkVel.y );
+					const outwardSpeed = max( float( 0 ), bulkVel.dot( n.negate() ) );
+					const courant = clamp( outwardSpeed.mul( dtNode ).div( velocityGrid.gridSpacing.y ), float( 0 ), float( 1 ) );
 
 					const upstreamVel = velocityGrid.sample( upstreamPt );
-					const prevVel = velocityPrev.sample( pt );
 					const current = velocityGrid.dataV( i, j );
 
-					const extrapolated = current.sub( prevVel.y ).div( factor ).add( upstreamVel.y );
-					vDst( i, j ).assign( clamp( extrapolated, - EXTRAPOLATED_VELOCITY_CLAMP, EXTRAPOLATED_VELOCITY_CLAMP ) );
+					const relaxed = current.add( upstreamVel.y.sub( current ).mul( courant ) );
+					vDst( i, j ).assign( clamp( relaxed, - EXTRAPOLATED_VELOCITY_CLAMP, EXTRAPOLATED_VELOCITY_CLAMP ) );
 
 				} ).Else( () => {
 
