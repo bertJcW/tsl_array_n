@@ -276,6 +276,86 @@ Claims made and since withdrawn, each with what replaced it:
   unharmed."** True of the recovered state and false as a description of the
   scene: the same defect is what fills the domain in the first place, 5.2.
 
+## 6a. The register: every root cause, and where each one stands
+
+Kept as a checklist rather than prose, because the point of it is to be
+worked through. "Confirmed" means a measurement, named in the row, that
+distinguishes this cause from the alternatives; "suspected" means a
+hypothesis with a test but no result yet.
+
+### Fixed, on main
+
+| | cause | state | evidence |
+| --- | --- | --- | --- |
+| A1 | The Dirichlet mask stopped at the finest multigrid level, so every coarse level solved a zero-flux problem and could not represent an error field vanishing at the vent | fixed | Same grid, same operator: no mask converges in 6 iterations, mask never converges at 300, mask after the fix converges in 8. In 2D the same mask costs 6 against 16, which is why it survived |
+| A2 | `faceWeights` stopped there too, so the preconditioner could not see the collider at all -- and with the mask coarsened and the weights not, coarse levels knew where the boundaries were while still solving an open box | fixed | Fixing A1 alone left the scene saturating within a few hundred frames; with both, 18,414 frames with mid-domain flux 1153.9 against an inflow of 1152.0 |
+
+### Fixed, on `claude/collider-face-consistency`, deliberately not merged
+
+| | cause | state | evidence |
+| --- | --- | --- | --- |
+| B1 | The pressure system and the velocity constraint each decided which faces were solid, by different means -- analytic distance per face versus a second sampling of an interpolated SDF grid | fixed | At the rod's own upstream face, x=7: weight 1.000 (fully open), no-flux projection skipped, marker "fluid". 576 faces, with divergence piling up just upstream at 22 against 3.6 for the rest of the domain |
+| B2 | A face lying exactly on the surface counted as fully open, since "inside" means `phi < 0` | fixed | Same measurement. Curved colliders hit it on a handful of faces; an axis-aligned box hits it on every face it has |
+| B3 | The convective outflow sampled its upstream neighbour downstream, so the two exit faces sampled each other and neither tracked the interior; and its formula added an unbounded increment | fixed | The outflow SDF's gradient measured at (-1,0,0) throughout, in 2D and 3D alike. Exit carried 1.15 against an inflow of 2.00. Replacing it with the convective form took a bare channel from 28 converged frames in 900 to 1778 in 2000 |
+
+### Confirmed, not fixed -- the remaining blocker
+
+| | cause | state | evidence |
+| --- | --- | --- | --- |
+| C1 | MGPCG stalls completely on systems that Jacobi-PCG and unpreconditioned CG both solve | confirmed, cause unknown | Frozen frame: multigrid returns the identical residual 1.63e+2 at 100, 600 and 3000 iterations, 84% of the right-hand side's norm; Jacobi reaches 2.8e-4 and plain CG 1.2e-3. One arm reported `degenerate-oldRZ`, i.e. `r . z` had gone to zero |
+| C2 | A small, sharply localised right-hand side near the obstacle's corner is not solved | confirmed, cause unknown | At frame 440 the right-hand side is clean -- 3.9 in norm, all of it in one ring of cells at the rod's lower-leading corner, 0.50 against ~0 elsewhere -- and MGPCG still only reaches 2.1e-3 in 3000 iterations |
+
+C1 carries an anomaly that has to be explained before anything else: `A` and
+`M` are both static across frames, and a fixed symmetric positive definite
+pair cannot converge in 15 iterations on one frame and make no progress at
+all fifteen frames later. The V-cycle measured symmetric (2.5e-4 relative)
+and definite (five random draws, same sign) -- but on RANDOM vectors, and a
+real residual is smooth and localised. That gap is the first place to look.
+
+### Known, lower priority
+
+| | item |
+| --- | --- |
+| E1 | `grid_outflow_solver2.js` has B3's upstream-direction error unfixed. Examples 15 and 16 are long-run stable as they stand, which may be luck |
+| E2 | Restriction and prolongation are unweighted transfer operators while the operator is now weighted per level. Whether that costs anything is untested |
+| E3 | `refreshCoarseLevels` must be dispatched or the coarse weight fields stay zero and the coarse operators are degenerate. The claim that not dispatching it reproduces the old behaviour is true of the mask and false of the weights |
+| E4 | This scene has no CFL-based adaptive time step while its 2D counterpart does. A safety net, not a cause |
+
+### Ruled out, with the measurement that ruled it out
+
+| ruled out | by |
+| --- | --- |
+| The CG fast-path switches (GPU-resident scalars and setup, batched iterations, the GPU stop test, the fused V-cycle) | All off: same failure, same frames |
+| The iteration cap | 600 and 3000 do not help, and the misses are by three to four orders of magnitude |
+| The multigrid level count | `numberOfLevels: 1`, which makes the preconditioner plain SOR and unquestionably valid, fails on the same frame |
+| Face-weight conditioning | Zero faces sit at the 0.01 floor; the weakest non-enclosed row is a factor of 6 off an interior one |
+| The scene's whole-domain push force | `pushStrength: 0` fails the same way |
+| Flipping the outflow's upstream sign on its own | Measured twice, frame-resolved the second time: worse, and it never recovers |
+| Sharp geometry breaking linear face fractions, as the cause of divergence | The weights are fine (above). It was a disagreement between two tests, B1, not a discretisation error |
+
+## 6b. The plan, in the order that settles the most
+
+1. **Make the failure a seconds-long offline test.** Reproducing C1 currently
+   costs a few hundred frames of simulation. Export the failing frame's
+   system -- the masks, the face weights, the right-hand side and the
+   initial pressure -- and rebuild it in a sandbox page. Everything after
+   this step is cheap; without it, everything after this step costs minutes
+   per attempt.
+2. **Probe the V-cycle with the real residual, not random vectors.** Record
+   `r . z` and `||z|| / ||r||` per iteration on that fixed system. A sign
+   that wanders, or a `z` that collapses, localises the defect; bisecting
+   over `numberOfLevels` then says which level introduces it.
+3. **Test the three specific suspects on the same fixed system**, each
+   switchable on its own: the coarse enclosed-cell guard pinning cells whose
+   fine children are fluid; unweighted transfer against a weighted operator
+   (E2); and the coarsest level's 30 SOR sweeps on a weighted operator.
+4. **Verify against the scene**, with `solver_health.mjs` and several fresh
+   runs, reading from frame zero.
+5. **Merge, then 2D.** Bring the branch to main, then port B3 to
+   `grid_outflow_solver2.js` with its own verification of examples 15 and 16
+   rather than riding along with this.
+6. **The rest**: E3, E4, and the documents.
+
 ## 7. Re-running any of this
 
 ```bash
