@@ -1,0 +1,43 @@
+{
+	"source": "http://localhost:5200/examples/35-karman-vortex-street-3d/",
+	"frame": 112,
+	"resolution": [
+		48,
+		24,
+		24
+	],
+	"gridSpacing": [
+		1,
+		1,
+		1
+	],
+	"dataSizeU": [
+		49,
+		24,
+		24
+	],
+	"dataSizeV": [
+		48,
+		25,
+		24
+	],
+	"dataSizeW": [
+		48,
+		24,
+		25
+	],
+	"diagnostics": {
+		"converged": false,
+		"rejected": false,
+		"iterations": 38,
+		"stoppedBy": "pAp-growth",
+		"residual": 256.5074164376149
+	},
+	"multigrid": {
+		"batchDispatches": true,
+		"coarseSingleGroup": true,
+		"foldClearIntoRestrict": false
+	},
+	"tolerance": 0.00001,
+	"maxIterations": 100
+}
