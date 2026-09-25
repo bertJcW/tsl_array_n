@@ -111,6 +111,8 @@ const query = new URLSearchParams( location.search );
 const FRAMES = ( query.get( 'frames' ) ?? 'frame-110,frame-112' ).split( ',' );
 const CAP = Number( query.get( 'cap' ) ?? 3000 );
 const ONLY = query.get( 'only' );
+const TRACE = Number( query.get( 'trace' ) ?? 0 );
+const DOT = query.get( 'dot' ) === '1';
 
 try {
 
@@ -125,6 +127,8 @@ try {
 	}
 
 	for ( const name of FRAMES ) {
+
+		if ( TRACE > 0 || DOT ) break; // ?trace and ?dot run their own sections below
 
 		const capture = await loadCapture( name );
 		const system = buildSystem( capture );
@@ -172,6 +176,245 @@ try {
 				`residual/||b|| = ${ ( residual / bNorm ).toExponential( 2 ) } stoppedBy=${ state.stoppedBy }`,
 				ok === true
 			);
+
+		}
+
+	}
+
+	// ---- ?dot=1 : is the solver's own dot product accurate here? ----
+	//
+	// Its lanes accumulate in float32 -- on this grid, 576 products each --
+	// and alpha and beta are quotients of two of them, so an error here is
+	// an error in every step CG takes. This repo has had one root cause in
+	// exactly this place before (project-history.md, Debugging #5).
+	//
+	// Both vectors are on the device without passing through this page's
+	// own uploads, which would otherwise be what the test measured: `b` was
+	// uploaded when the capture loaded and has been read by many dispatches
+	// since, and `z` is written by the V-cycle itself. The host-side value
+	// is computed from a read-back of those same two fields, in double
+	// precision.
+	if ( DOT ) {
+
+		// The simplest possible question first, with no capture, no
+		// preconditioner and no floating point subtlety in it: a field
+		// written to exactly 1.0 by a kernel, dotted with itself. The
+		// answer is the cell count, exactly, in any arithmetic.
+		{
+
+			const shape = [ 48, 24, 24 ];
+			const cells = shape[ 0 ] * shape[ 1 ] * shape[ 2 ];
+			const ones = tsl_array_n.arrayN( 'float', shape );
+			tsl_array_n.kernel( shape, ( i, j, k ) => { ones( i, j, k ).assign( 1 ); } )();
+
+			const reducer = linalg.createDotReducer( shape, ones, ones );
+			const value = await reducer.read();
+			const partials = await reducer.partial.toArray();
+			const perLane = cells / shape[ 0 ];
+			let wrongLanes = 0;
+			for ( const x of partials ) if ( x !== perLane ) wrongLanes ++;
+
+			log( '' );
+			log( `a field of ones, dotted with itself: ${ value } against ${ cells }`, value === cells );
+			log( `&nbsp;&nbsp;lanes not equal to ${ perLane }: ${ wrongLanes } of ${ partials.length }`, wrongLanes === 0 );
+
+		}
+
+		for ( const name of FRAMES ) {
+
+			const capture = await loadCapture( name );
+			const system = buildSystem( capture );
+
+			// The prediction this is really testing: cancellation inside a
+			// lane is what costs the accuracy, and only a V-cycle produces a
+			// z whose products against r change sign. r.r is a sum of
+			// squares and Jacobi's z is r scaled by a diagonal of one sign,
+			// so both should cancel nothing and both should be accurate.
+			const builders = [
+				[ 'multigrid', () => { const M = linalg.createMultigridPreconditioner( system.shape, system.gridSpacing, {
+					...capture.meta.multigrid, dirichletMask: system.dirichletMask,
+					coarseDirichletMask: system.coarseDirichletMask, faceWeights: system.faceWeights } );
+					if ( M.refreshCoarseLevels ) M.refreshCoarseLevels(); return M; } ],
+				[ 'jacobi', () => linalg.createJacobiPreconditioner( system.shape, system.gridSpacing, {
+					dirichletMask: system.dirichletMask, faceWeights: system.faceWeights } ) ],
+				[ 'none (r.r)', () => linalg.createIdentityPreconditioner( system.shape ) ]
+			];
+
+			log( '' );
+			log( `<b>${ name }</b> — the solver's own dot product against double precision` );
+
+			for ( const [ label, build ] of builders ) {
+
+			const M = build();
+
+			const zField = tsl_array_n.arrayN( 'float', system.shape );
+			zField.fromArray( new Float32Array( system.cells ) );
+			M( system.b, zField )();
+
+			const reducer = linalg.createDotReducer( system.shape, system.b, zField );
+			const first = await reducer.read();
+			const second = await reducer.read();
+
+			const bHost = await system.b.toArray();
+			const zHost = await zField.toArray();
+
+			// Before trusting either side: does reading `b` back give what
+			// was uploaded into it? If not, the disagreement is in the
+			// read-back path and says nothing about the reducer.
+			let readbackMismatch = 0, worstReadback = 0;
+			for ( let i = 0; i < capture.b.length; i ++ ) {
+
+				const delta = Math.abs( bHost[ i ] - capture.b[ i ] );
+				if ( delta !== 0 ) readbackMismatch ++;
+				if ( delta > worstReadback ) worstReadback = delta;
+
+			}
+
+			let exact = 0;
+			for ( let i = 0; i < bHost.length; i ++ ) exact += bHost[ i ] * zHost[ i ];
+
+			// what one lane is asked to do, and what it is asked to cancel
+			const lanes = system.shape[ 0 ];
+			const perLane = new Array( lanes ).fill( 0 );
+			const perLaneMagnitude = new Array( lanes ).fill( 0 );
+			for ( let i = 0; i < bHost.length; i ++ ) {
+
+				const lane = i % lanes;
+				const product = bHost[ i ] * zHost[ i ];
+				perLane[ lane ] += product;
+				perLaneMagnitude[ lane ] += Math.abs( product );
+
+			}
+
+			let worstCancellation = 0;
+			for ( let lane = 0; lane < lanes; lane ++ ) {
+
+				const ratio = perLaneMagnitude[ lane ] / Math.max( Math.abs( perLane[ lane ] ), 1e-30 );
+				if ( ratio > worstCancellation ) worstCancellation = ratio;
+
+			}
+
+			const relative = Math.abs( first - exact ) / Math.max( Math.abs( exact ), 1e-30 );
+
+			// Per lane, device against host. A reducer that is merely
+			// imprecise is wrong everywhere by a little; one that is
+			// counting the wrong elements is wrong in particular lanes.
+			const devicePartials = await reducer.partial.toArray();
+			const laneDiffs = [];
+			for ( let lane = 0; lane < lanes; lane ++ ) laneDiffs.push( { lane, diff: devicePartials[ lane ] - perLane[ lane ], device: devicePartials[ lane ], host: perLane[ lane ] } );
+			laneDiffs.sort( ( a, c ) => Math.abs( c.diff ) - Math.abs( a.diff ) );
+			const totalDiff = laneDiffs.reduce( ( a, x ) => a + x.diff, 0 );
+
+			log(
+				`&nbsp;&nbsp;${ label.padEnd( 12 ) } rel err ${ relative.toExponential( 2 ) }, ` +
+				`worst per-lane cancellation ${ worstCancellation.toExponential( 2 ) }, ` +
+				`device ${ first.toExponential( 6 ) } host ${ exact.toExponential( 6 ) }; ` +
+				`total lane difference ${ totalDiff.toExponential( 3 ) }; biggest: ` +
+				laneDiffs.slice( 0, 3 ).map( ( d ) => `lane ${ d.lane } device ${ d.device.toExponential( 4 ) } host ${ d.host.toExponential( 4 ) } (diff ${ d.diff.toExponential( 2 ) })` ).join( ' | ' ),
+				relative < 1e-4
+			);
+
+			}
+
+		}
+
+	}
+
+	// ---- ?trace=N : PCG by hand, so every scalar it depends on is visible
+	//
+	// The arms above say that multigrid cannot solve frame 112 while Jacobi
+	// and plain CG can. PCG needs its preconditioner to be symmetric AND
+	// positive definite; `M` here measured as both, but on RANDOM vectors,
+	// and the residual a real scene produces is smooth and concentrated.
+	// This runs the iteration in JavaScript, applying the library's own
+	// operators on the GPU, and records the scalars PCG actually turns on:
+	//
+	//   r . z   must keep one sign. This file's A is negative definite, so
+	//           M approximates a negative definite inverse and r . z should
+	//           stay negative. A sign that wanders is an indefinite
+	//           preconditioner, which is enough on its own to stall PCG.
+	//   p . Ap  the same, for the operator.
+	//   beta    above 1 iteration after iteration is the textbook runaway:
+	//           p = z + beta p compounds geometrically.
+	//   |z|/|r| how far the preconditioner moves the residual at all.
+	if ( TRACE > 0 ) {
+
+		for ( const name of FRAMES ) {
+
+			const capture = await loadCapture( name );
+			const system = buildSystem( capture );
+			const cells = system.cells;
+
+			const applyLaplacian = linalg.createLaplacianOperator( system.shape, system.gridSpacing, {
+				dirichletMask: system.dirichletMask, faceWeights: system.faceWeights
+			} );
+
+			const M = linalg.createMultigridPreconditioner( system.shape, system.gridSpacing, {
+				...capture.meta.multigrid, dirichletMask: system.dirichletMask,
+				coarseDirichletMask: system.coarseDirichletMask, faceWeights: system.faceWeights
+			} );
+			if ( M.refreshCoarseLevels ) M.refreshCoarseLevels();
+
+			// scratch on the device; the iteration itself is in JS so that
+			// every scalar is inspectable rather than inferred
+			const inField = tsl_array_n.arrayN( 'float', system.shape );
+			const outField = tsl_array_n.arrayN( 'float', system.shape );
+			const applyA = applyLaplacian( inField, outField );
+			const applyM = M( inField, outField );
+
+			const zero = new Float32Array( cells );
+			const apply = async ( dispatch, vector ) => {
+
+				inField.fromArray( vector );
+				outField.fromArray( zero ); // a V-cycle relaxes what its output holds
+				dispatch();
+				return new Float32Array( await outField.toArray() );
+
+			};
+
+			const dot = ( a, c ) => { let t = 0; for ( let i = 0; i < a.length; i ++ ) t += a[ i ] * c[ i ]; return t; };
+			const axpy = ( a, x, y ) => { const o = new Float32Array( y.length ); for ( let i = 0; i < y.length; i ++ ) o[ i ] = a * x[ i ] + y[ i ]; return o; };
+
+			let x = new Float32Array( cells );
+			let r = Float32Array.from( capture.b );          // x starts at zero, so r = b
+			let z = await apply( applyM, r );
+			let pdir = Float32Array.from( z );
+			let rz = dot( r, z );
+
+			const r0 = Math.sqrt( dot( r, r ) );
+
+			log( '' );
+			log( `<b>${ name }</b> — PCG traced by hand, ||r0|| = ${ r0.toExponential( 3 ) }` );
+			log( '&nbsp;&nbsp;iter      |r|/|r0|         r.z        p.Ap       alpha        beta    |z|/|r|' );
+
+			for ( let iteration = 0; iteration < TRACE; iteration ++ ) {
+
+				const Ap = await apply( applyA, pdir );
+				const pAp = dot( pdir, Ap );
+				const alpha = rz / pAp;
+
+				x = axpy( alpha, pdir, x );
+				r = axpy( - alpha, Ap, r );
+
+				z = await apply( applyM, r );
+				const newRZ = dot( r, z );
+				const beta = newRZ / rz;
+
+				const rNorm = Math.sqrt( dot( r, r ) );
+				const zNorm = Math.sqrt( dot( z, z ) );
+
+
+				log(
+					`&nbsp;&nbsp;${ String( iteration ).padStart( 4 ) }  ${ ( rNorm / r0 ).toExponential( 3 ).padStart( 12 ) }  ` +
+					`${ rz.toExponential( 2 ).padStart( 10 ) }  ${ pAp.toExponential( 2 ).padStart( 10 ) }  ` +
+					`${ alpha.toExponential( 2 ).padStart( 10 ) }  ${ beta.toExponential( 2 ).padStart( 10 ) }  ` +
+					`${ ( zNorm / Math.max( rNorm, 1e-30 ) ).toExponential( 2 ).padStart( 9 ) }`
+				);
+
+				pdir = axpy( beta, pdir, z );
+				rz = newRZ;
+
+			}
 
 		}
 
