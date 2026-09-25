@@ -485,7 +485,34 @@ reads BROKEN, at 1072.64 out against the same 1152.00 in.
 | | item |
 | --- | --- |
 | F3 | Whether a vent-only domain ought to be made to balance at all, which is a design question this package shares with mantaflow rather than a defect |
-| F4 | `examples/32-grid-solver-3d/`, `33-flip-dam-break-3d/` and `34-smoke-plume-3d/` have never been health-checked. Every 3D solve they ever ran was steered by the broken dot product, so whatever was concluded about them was concluded through it |
+| F4 | Closed. See 6e |
+
+## 6e. F4: the other three 3D examples, before and after
+
+None of them had ever been health-checked, and every 3D solve they ever ran
+was steered by the broken dot product. Measured both ways, by putting the
+defect back:
+
+| | with the defect | fixed |
+| --- | --- | --- |
+| 32, the FLIP check's own particle speed | 16.614 | 4.210 |
+| 32, both of its own verdicts | passed | passed |
+| 33, frames converged of 1201 | 157, with 20 CG breakdowns | 1201, with none |
+| 34, frames converged of 1201 | **0**, with 260 CG breakdowns | 1200, with one |
+| 34, net flux across the fluid region | -9493.81 | -0.51 |
+
+Example 34 did not converge a single frame for its entire life and its
+boundary carried eighteen thousand times what it carries now. Example 32's
+particle speed was four times too high and it passed its own checks both
+times, exactly as example 31 did.
+
+The probe read HEALTHY for 34 either way, and that is worth keeping in view
+rather than explaining away: with no inlet, the only criterion that applies
+is finiteness, and a scene can be badly wrong while remaining finite. It now
+says so in its own output. For 33 it says less still -- a free surface is a
+solved region that moves, which puts every flux criterion out of scope --
+so what stands behind 33 is its converged count and its own in-page checks,
+not this probe.
 
 ## 7. Re-running any of this
 

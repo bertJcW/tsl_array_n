@@ -250,6 +250,9 @@ try {
 	// the sustained average, not momentary jitter.
 	window.__fluxflowProbe = {
 		renderer, flip, get frame() { return frame; }, stop: () => { running = false; },
+		// The shape solver_health.mjs reads, alongside this scene's own
+		// names: the stepping object and the velocity field it projects.
+		solver: flip, velocityGrid: flip.velocityGrid,
 		stats: () => ( { ...stats, elapsedSeconds: ( performance.now() - stats.startTime ) / 1000, fps: stats.frames / ( ( performance.now() - stats.startTime ) / 1000 ) } )
 	};
 

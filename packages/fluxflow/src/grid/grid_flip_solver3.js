@@ -1085,6 +1085,10 @@ export function createGridFlipSolver3( {
 		positions, velocities, fluidMask,
 		concentration, cellConcentration, cellDensity,
 		pressure: pressureSolver.pressure,
+		// Exposed for measurement, as in grid_solver3.js: a conservation
+		// check has to read the velocity field this solver projects, and
+		// rebuilding it outside would measure something else.
+		velocityGrid,
 		boundarySolver, pressureSolver
 	};
 

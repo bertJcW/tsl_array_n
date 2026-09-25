@@ -62,6 +62,15 @@
 // that from the data rather than a frame count -- see the establishment
 // rule below.
 //
+// *** What this cannot check ***
+//
+// A free-surface scene -- anything built on the FLIP solvers -- is outside
+// all of this. Its solved region is the liquid, whose shape changes every
+// frame, so net flux across that region's boundary is not zero: it is
+// exactly what moves the surface. The plane machinery does not fit it
+// either, since the liquid is not a prefix of planes. Such a scene reports
+// finiteness and nothing else, and says so rather than dressing it up.
+//
 // Every threshold is a multiple of something the scene itself defines --
 // the flux admitted at the inlet plane, and the mean speed that implies --
 // so the same probe works on any scene built from grid_solver3 without
@@ -170,6 +179,25 @@ await page.addInitScript( ( [ frames, sample ] ) => {
 				}
 
 				const geo = window.__health.geometry;
+
+				// Does the solved region hold still? A vent is static; a free
+				// surface is not, and a region that moves is exactly the
+				// thing every criterion here assumes away -- net flux across
+				// its boundary is then not zero, it is what moves it. Read
+				// again each sample rather than assumed, because the scenes
+				// that need this are the ones nobody remembers to declare.
+				let regionMoved = false;
+
+				if ( geo.pinned ) {
+
+					const now = await inner.pressureSolver.dirichletMask.toArray();
+					for ( let i = 0; i < now.length; i ++ ) {
+
+						if ( ( now[ i ] > 0.5 ) !== ( geo.pinned[ i ] > 0.5 ) ) { regionMoved = true; break; }
+
+					}
+
+				}
 				const WU = geo.wu ? ( i, j, k ) => geo.wu[ i + NUx * j + NUx * NUy * k ] : () => 1;
 				const WV = geo.wv ? ( i, j, k ) => geo.wv[ i + NVx * j + NVx * NVy * k ] : () => 1;
 				const WW = geo.ww ? ( i, j, k ) => geo.ww[ i + NWx * j + NWx * NWy * k ] : () => 1;
@@ -341,7 +369,14 @@ await page.addInitScript( ( [ frames, sample ] ) => {
 				}
 
 				window.__health.samples.push( {
-					n, dims, hasWeights: Boolean( geo.wu ), driven: Math.abs( inletFlux ) > 1e-9,
+					// "Driven" has to be relative to the scene's own traffic, not
+					// an absolute floor. A closed scene's inlet plane reads
+					// -0.0 or some rounding dust, and against an absolute
+					// threshold that once made a free-surface scene look
+					// driven with a reference speed of 1e-12, so every
+					// velocity in it came out as hundreds of times "the
+					// inflow".
+					n, dims, regionMoved, hasWeights: Boolean( geo.wu ), driven: Math.abs( inletFlux ) > 0.01 * Math.max( gross, 1e-12 ),
 					nonFinite, inletFlux, speedScale, worstFlux, worstFluxPlane,
 					worstDiv, worstDivCell, solidLeak, solidLeakFace, fluidSpeed, fluidCells, lastFluidPlane,
 					outletFlux: flux[ NUx - 1 ], arrivalFlux: flux[ lastFluidPlane ], net, gross, perFace: window.__lastFaces
@@ -384,6 +419,9 @@ const U = first.speedScale;
 function verdictFor( s ) {
 
 	if ( s.nonFinite > 0 ) return `${ s.nonFinite } non-finite values`;
+
+	// A moving solved region puts every other criterion out of scope.
+	if ( s.regionMoved ) return null;
 
 	// Cross-sections are only meaningful where solid faces can be excluded.
 	if ( s.driven && s.hasWeights && s.worstFlux > FLUX_TOLERANCE ) return `flux through plane x=${ s.worstFluxPlane } is off the inlet's by ${ ( s.worstFlux * 100 ).toFixed( 1 ) }%`;
@@ -523,5 +561,7 @@ if ( firstBad ) {
 	const last = samples[ samples.length - 1 ];
 	console.log( `\nVERDICT: HEALTHY over ${ counters.frames } frames` );
 	console.log( `   worst interior flux deviation ${ ( worst.worstFlux * 100 ).toFixed( 2 ) }% at frame ${ worst.n }; ${ ( last.outletFlux / ( last.inletFlux || 1 ) ).toFixed( 3 ) }x leaving at the end; every sample inside every bound` );
+	if ( last.regionMoved ) console.log( '   note: the solved region moves between samples -- a free surface -- so every criterion but finiteness is out of scope here. This is a weak pass, not a certificate' );
+	else if ( ! last.driven ) console.log( '   note: with no inlet, the only criterion that applied was finiteness. This is a weak pass, not a certificate' );
 
 }

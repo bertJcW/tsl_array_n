@@ -267,6 +267,9 @@ try {
 
 	window.__fluxflowProbe = {
 		renderer, smoke, get frame() { return frame; }, stop: () => { running = false; },
+		// The shape solver_health.mjs reads, alongside this scene's own
+		// names: the stepping object and the velocity field it projects.
+		solver: smoke, velocityGrid: smoke.velocityGrid,
 		stats: () => ( { ...stats, elapsedSeconds: ( performance.now() - stats.startTime ) / 1000, fps: stats.frames / ( ( performance.now() - stats.startTime ) / 1000 ) } )
 	};
 
