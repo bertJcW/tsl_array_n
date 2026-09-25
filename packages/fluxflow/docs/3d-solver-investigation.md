@@ -406,6 +406,44 @@ plan listed. Steps 5 and 6 are what remains, with re-measurement added.
    rather than riding along with this.
 7. **The rest**: E3, E4, and the documents.
 
+## 6d. The re-measurements, and what they changed
+
+Everything the dot product defect touched, re-taken against the fixed code.
+
+| | re-measured | result |
+| --- | --- | --- |
+| A1, mask coarsening | Both captures in `sandbox/stalled-system/`, four-level cycle | Worth about 40%: 17 iterations without it, 11 with. It earns its place |
+| A2, face-weight coarsening | Same sweep, plus the scene with it off | Worth roughly one iteration in eleven on top of A1, and nothing at all on its own. The scene reads HEALTHY without it, so it is not load-bearing. Kept on -- one dispatch per solve for a tenth of the iterations -- but the claim attached to it is now this one |
+| B3, the convective outflow | The previous formula put back, judged by `solver_health.mjs` | Load-bearing. The old formula converges on every one of 2000 frames with no rejections and is BROKEN from frame 1540 all the same: 8.67x the inflow leaving the outlet. The 8.67 this investigation started from belonged to the boundary condition |
+| The Strouhal number | 11,997 frames on a scene with no blow-up in it | Survives: period 267 frames at three stations, St 0.225, pattern travelling downstream at 0.69 to 0.90 of the free stream, and the aliasing in the old lag measurement is gone |
+
+Two things came out of it that were not on the list.
+
+**The fixture had been rebuilding a one-level preconditioner while calling
+it four-level.** `export_system.mjs` captured `settings.multigrid`, which
+holds the cycle's runtime switches and not its shape. The options are now
+exposed and captured beside them. Nothing about the dot product conclusion
+depended on it -- that was measured on the reducer directly -- but the first
+coarsening sweep it produced was meaningless and said so by returning four
+identical numbers.
+
+**2D was broken too, and had been all along.** Porting the outflow to
+`grid_outflow_solver2.js` needed a 2D verdict, which needed the probe to
+read 2D scenes, which is when example 16 turned out to read BROKEN from
+frame 1720 on the formula it had shipped with: 13.89x the inflow leaving,
+peak speed 27.79 against an inflow of 2, interior flux 1289% off -- while
+converging on every frame, which is why none of its long runs ever showed
+it. On the ported formula it reads HEALTHY over 4001 frames at 1.013x.
+
+### Still open
+
+| | item |
+| --- | --- |
+| F1 | `examples/15-flow-past-cylinder/` is ten times better after the port -- 13.90x to 1.22x, peak speed 27.98 to 3.88 -- and still does not pass: its mean outlet flux sits 7% above its inlet and drifts to 22%. Undiagnosed, and much smaller than what it replaced |
+| F2 | Examples 17, 18 and 19 build outflows and have never been measured for conservation |
+| E1 | Closed: the 2D outflow is ported |
+| E2, E3, E4 | Unchanged |
+
 ## 7. Re-running any of this
 
 ```bash
