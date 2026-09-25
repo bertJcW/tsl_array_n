@@ -298,19 +298,62 @@ hypothesis with a test but no result yet.
 | B2 | A face lying exactly on the surface counted as fully open, since "inside" means `phi < 0` | fixed | Same measurement. Curved colliders hit it on a handful of faces; an axis-aligned box hits it on every face it has |
 | B3 | The convective outflow sampled its upstream neighbour downstream, so the two exit faces sampled each other and neither tracked the interior; and its formula added an unbounded increment | fixed | The outflow SDF's gradient measured at (-1,0,0) throughout, in 2D and 3D alike. Exit carried 1.15 against an inflow of 2.00. Replacing it with the convective form took a bare channel from 28 converged frames in 900 to 1778 in 2000 |
 
-### Confirmed, not fixed -- the remaining blocker
+### Fixed: C1 and C2 were one defect, and it was the dot product
 
 | | cause | state | evidence |
 | --- | --- | --- | --- |
-| C1 | MGPCG stalls completely on systems that Jacobi-PCG and unpreconditioned CG both solve | confirmed, cause unknown | Frozen frame: multigrid returns the identical residual 1.63e+2 at 100, 600 and 3000 iterations, 84% of the right-hand side's norm; Jacobi reaches 2.8e-4 and plain CG 1.2e-3. One arm reported `degenerate-oldRZ`, i.e. `r . z` had gone to zero |
-| C2 | A small, sharply localised right-hand side near the obstacle's corner is not solved | confirmed, cause unknown | At frame 440 the right-hand side is clean -- 3.9 in norm, all of it in one ring of cells at the rod's lower-leading corner, 0.50 against ~0 elsewhere -- and MGPCG still only reaches 2.1e-3 in 3000 iterations |
+| C1/C2 | `createDotReducer`'s 3D branch nested two `Loop` nodes. TSL names a loop's index by position, so both called their variable `i` and the inner shadowed the outer: the reducer summed cells `(i, t, t)`, i.e. 24 times the diagonal | fixed | A marker written instead of summed over a [48,24,24] grid: 26,496 cells never visited, 1,152 visited more than once, every visited cell with `j === k`. A single cell set to one at (5,0,0) reduced to 24; one at (0,0,1) to 0 |
 
-C1 carries an anomaly that has to be explained before anything else: `A` and
-`M` are both static across frames, and a fixed symmetric positive definite
-pair cannot converge in 15 iterations on one frame and make no progress at
-all fifteen frames later. The V-cycle measured symmetric (2.5e-4 relative)
-and definite (five random draws, same sign) -- but on RANDOM vectors, and a
-real residual is smooth and localised. That gap is the first place to look.
+The anomaly recorded here before -- that a fixed symmetric positive definite
+pair cannot converge in 15 iterations on one frame and make no progress
+fifteen frames later -- was the right thing to hold on to. The pair was
+fixed and was symmetric and positive definite. What was not fixed were the
+scalars the iteration is steered by: alpha and beta are quotients of two dot
+products, and the reducer was off by 1.4% on the total and 31% on one lane
+against the same sum in double precision.
+
+That also explains why nothing caught it. CG with a wrong step size is still
+a descent method, so easy problems converge anyway and look fine, and the
+one direct test anyone writes -- a field of ones -- reduces to exactly the
+right answer however wrongly its cells are chosen, because any 576 ones sum
+to 576. `examples/31-conjugate-gradient-3d/` passed throughout the whole
+period the defect existed. It now carries the check that does see it: single
+cells, and a ramp whose total only the correct traversal produces, verified
+to fail when the defect is put back.
+
+After the fix, measured on the same three things in turn:
+
+| | before | after |
+| --- | --- | --- |
+| the reducer against double precision | 1.4e-2 | 7.8e-7 |
+| `sandbox/stalled-system/` frame 112 | 3000 iterations, 8.0e-4, never converged | 23 iterations, 7.9e-7 |
+| `examples/35-karman-vortex-street-3d/` | BROKEN at frame 115 | HEALTHY over 6001 frames |
+
+The scene now converges on 6000 of 6001 frames with zero circuit-breaker
+rejections and zero CG breakdowns, its worst interior flux deviation is
+2.2%, and 0.994 of what enters leaves at the outlet. Three fresh runs give
+identical numbers. 1D and 2D were never affected -- single `Loop` each --
+and that is confirmed rather than assumed: example 16 runs 1368 frames with
+every frame converged at maxU 2.89, unchanged, and every 2D row of
+`sandbox/poisson-3d-dirichlet/` matches to the iteration.
+
+### What this defect invalidates
+
+Every 3D measurement in this document older than the fix was taken through
+it. Some conclusions survive because they rest on geometry or on code
+reading rather than on convergence; others do not and are listed here rather
+than left standing:
+
+| finding | standing |
+| --- | --- |
+| A1, the Dirichlet mask not reaching coarse levels | Holds. Measured against a synthetic system built as `A @ xStar`, and the comparison was between preconditioners on the same broken reducer, which the defect scales but does not reorder |
+| A2, the face weights not reaching coarse levels | The fix is sound on its own terms, since jet rebuilds its system per level, but its measured justification -- "fixing A1 alone left the scene saturating" -- is a scene measurement through the defect. Worth re-measuring whether it is needed |
+| B1 and B2, the two halves of the collider disagreeing | Holds. The evidence is a direct reading of what each half computes for a given face, not a convergence result |
+| B3, the outflow's upstream direction | The gradient measurement holds. The convergence figures quoted for it (28 frames in 900 against 1778 in 2000) were taken through the defect and mean less than they appeared to |
+| "The vent is a mass sink by construction, so in need not equal out" | **Wrong.** With the reducer fixed, 0.994 of the inflow leaves at the outlet. That reasoning was built to explain a symptom of this defect |
+| "Each correctness fix made the scene fail sooner" | Accounted for. Every one of those runs was steered by wrong step sizes; the ordering between them says nothing |
+| The Strouhal number of 0.22, and the shedding measurement behind it | Taken after the frame-532 blow-up and through the defect. Needs re-measuring before it is quoted |
+| The ruled-out list below | Still ruled out, but for a reason now visible: those experiments all ran through the defect, which is why none of them helped |
 
 ### Known, lower priority
 
@@ -335,7 +378,11 @@ real residual is smooth and localised. That gap is the first place to look.
 
 ## 6b. The plan, in the order that settles the most
 
-1. **Make the failure a seconds-long offline test.** Reproducing C1 currently
+Steps 1 to 4 are done: the fixture exists, the trace was run, and what it
+found was the dot product above rather than any of the three suspects the
+plan listed. Steps 5 and 6 are what remains, with re-measurement added.
+
+1. ~~**Make the failure a seconds-long offline test.**~~ Reproducing C1 currently
    costs a few hundred frames of simulation. Export the failing frame's
    system -- the masks, the face weights, the right-hand side and the
    initial pressure -- and rebuild it in a sandbox page. Everything after
@@ -351,10 +398,13 @@ real residual is smooth and localised. That gap is the first place to look.
    (E2); and the coarsest level's 30 SOR sweeps on a weighted operator.
 4. **Verify against the scene**, with `solver_health.mjs` and several fresh
    runs, reading from frame zero.
-5. **Merge, then 2D.** Bring the branch to main, then port B3 to
+5. **Re-measure what the defect touched**, in the order the table above
+   puts it: whether A2 is needed at all, what B3 is actually worth, and the
+   shedding figures.
+6. **Merge, then 2D.** Bring the branch to main, then port B3 to
    `grid_outflow_solver2.js` with its own verification of examples 15 and 16
    rather than riding along with this.
-6. **The rest**: E3, E4, and the documents.
+7. **The rest**: E3, E4, and the documents.
 
 ## 7. Re-running any of this
 

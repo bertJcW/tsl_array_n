@@ -165,6 +165,79 @@ try {
 
 	}
 
+	// *** The check this example should have had, and did not ***
+	//
+	// Everything above passed for as long as createDotReducer's 3D branch
+	// was summing a diagonal twenty-four times over instead of the whole
+	// field -- see linalg.js's own comment there for the mechanism and what
+	// it cost. A multigrid-preconditioned solve reaches a smooth answer to
+	// 1e-2 even when every alpha and beta is scaled wrongly, so the test
+	// above cannot see it, and neither can the obvious direct test: a field
+	// of ones reduces to exactly the right total however wrongly its cells
+	// are chosen, because any 576 ones sum to 576.
+	//
+	// What does see it is a single cell. Set one cell to one, reduce
+	// against a field of ones, and the answer must be 1, in the lane
+	// matching that cell's first index and nowhere else. Under the bug a
+	// delta at (5,0,0) reduced to 24 and one at (0,0,1) to 0.
+	{
+
+		const probeShape = [ 6, 4, 5 ]; // deliberately not a cube, so an axis swap shows up too
+		const ones = tsl_array_n.arrayN( 'float', probeShape );
+		const delta = tsl_array_n.arrayN( 'float', probeShape );
+
+		tsl_array_n.kernel( probeShape, ( i, j, k ) => { ones( i, j, k ).assign( 1 ); } )();
+
+		const reducer = linalg.createDotReducer( probeShape, delta, ones );
+
+		const probes = [ [ 0, 0, 0 ], [ 0, 0, 1 ], [ 0, 1, 0 ], [ 5, 3, 4 ], [ 2, 3, 1 ] ];
+		const failures = [];
+
+		for ( const [ pi, pj, pk ] of probes ) {
+
+			tsl_array_n.kernel( probeShape, ( i, j, k ) => {
+
+				delta( i, j, k ).assign( i.equal( pi ).and( j.equal( pj ) ).and( k.equal( pk ) ).select( 1, 0 ) );
+
+			} )();
+
+			const total = await reducer.read();
+			const lanes = Array.from( await reducer.partial.toArray() );
+			const lit = lanes.map( ( value, lane ) => ( value !== 0 ? `${ lane }:${ value }` : null ) ).filter( Boolean );
+
+			if ( total !== 1 || lit.length !== 1 || lit[ 0 ] !== `${ pi }:1` ) {
+
+				failures.push( `(${ pi },${ pj },${ pk }) gave ${ total } with lanes [${ lit.join( ' ' ) }]` );
+
+			}
+
+		}
+
+		// And the whole field, which a wrong index mapping gets right and a
+		// wrong sum does not: every cell holding its own flat index, so the
+		// total is a number only the correct traversal produces.
+		const ramp = tsl_array_n.arrayN( 'float', probeShape );
+		const [ px, py ] = probeShape;
+		tsl_array_n.kernel( probeShape, ( i, j, k ) => {
+
+			ramp( i, j, k ).assign( i.add( j.mul( px ) ).add( k.mul( px * py ) ).toFloat() );
+
+		} )();
+
+		const cells = probeShape.reduce( ( a, n ) => a * n, 1 );
+		const expected = ( cells - 1 ) * cells / 2; // the sum of 0..cells-1
+		const rampTotal = await linalg.createDotReducer( probeShape, ramp, ones ).read();
+
+		log(
+			'the dot reducer visits every cell exactly once — single-cell probes, and a ramp',
+			failures.length === 0 && rampTotal === expected,
+			failures.length === 0 && rampTotal === expected
+				? `five single-cell probes each reduced to 1 in their own lane, and a ${ probeShape.join( 'x' ) } ramp summed to ${ rampTotal }`
+				: `${ failures.join( '; ' ) }${ failures.length ? '; ' : '' }ramp summed to ${ rampTotal }, expected ${ expected }`
+		);
+
+	}
+
 } catch ( error ) {
 
 	log( 'failed', false, error.message );
