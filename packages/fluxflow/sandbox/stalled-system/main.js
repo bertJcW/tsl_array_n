@@ -25,6 +25,7 @@
 // See docs/3d-solver-investigation.md section 6a, cause C1.
 
 import * as tsl_array_n from 'tsl_array_n';
+import { Loop } from 'three/tsl';
 import { linalg } from 'fluxflow';
 
 const pre = document.querySelector( '#out' );
@@ -218,6 +219,72 @@ try {
 			log( `a field of ones, dotted with itself: ${ value } against ${ cells }`, value === cells );
 			log( `&nbsp;&nbsp;lanes not equal to ${ perLane }: ${ wrongLanes } of ${ partials.length }`, wrongLanes === 0 );
 
+			// Which cells does a pair of nested Loops actually visit? The
+			// reducer's own structure, writing a marker instead of summing.
+			{
+
+				const visited = tsl_array_n.arrayN( 'float', shape );
+				tsl_array_n.kernel( shape, ( i, j, k ) => { visited( i, j, k ).assign( 0 ); } )();
+
+				tsl_array_n.kernel( [ shape[ 0 ] ], ( i ) => {
+
+					Loop( shape[ 1 ], shape[ 2 ], ( { i: j, j: k } ) => {
+
+						visited( i, j, k ).addAssign( 1 );
+
+					} );
+
+				} )();
+
+				const marks = await visited.toArray();
+				let touchedOnce = 0, touchedMore = 0, untouched = 0, diagonalOnly = true;
+				for ( let k = 0; k < shape[ 2 ]; k ++ ) for ( let j = 0; j < shape[ 1 ]; j ++ ) for ( let i = 0; i < shape[ 0 ]; i ++ ) {
+
+					const count = marks[ i + shape[ 0 ] * j + shape[ 0 ] * shape[ 1 ] * k ];
+					if ( count === 0 ) untouched ++;
+					else if ( count === 1 ) touchedOnce ++;
+					else touchedMore ++;
+					if ( count !== 0 && j !== k ) diagonalOnly = false;
+
+				}
+
+				log( '' );
+				log( `Loop( ny, nz ) over a [${ shape }] field: ` +
+					`${ untouched } cells never written, ${ touchedOnce } written once, ${ touchedMore } written more than once` +
+					`${ diagonalOnly ? ', and every cell written has j === k' : '' }`,
+					untouched === 0 && touchedMore === 0 );
+
+			}
+
+			// A uniform field cannot detect a wrong index mapping: any 576
+			// ones sum to 576 whichever cells they are. A single cell set to
+			// one can. Each probe below should light up exactly one lane --
+			// the one matching its own first index -- with exactly 1.0.
+			const delta = tsl_array_n.arrayN( 'float', shape );
+			const probes = [ [ 5, 0, 0 ], [ 5, 12, 12 ], [ 5, 23, 23 ], [ 7, 12, 12 ], [ 0, 0, 1 ], [ 0, 1, 0 ], [ 1, 0, 0 ] ];
+			const deltaReducer = linalg.createDotReducer( shape, delta, ones );
+
+			for ( const [ pi, pj, pk ] of probes ) {
+
+				tsl_array_n.kernel( shape, ( i, j, k ) => {
+
+					const hit = i.equal( pi ).and( j.equal( pj ) ).and( k.equal( pk ) );
+					delta( i, j, k ).assign( hit.select( 1, 0 ) );
+
+				} )();
+
+				const total = await deltaReducer.read();
+				const lanes2 = await deltaReducer.partial.toArray();
+				const lit = [];
+				for ( let lane = 0; lane < lanes2.length; lane ++ ) if ( lanes2[ lane ] !== 0 ) lit.push( `${ lane }:${ lanes2[ lane ] }` );
+
+				log(
+					`&nbsp;&nbsp;one cell at (${ pi },${ pj },${ pk }) — total ${ total }, lanes lit ${ lit.join( ' ' ) || 'none' }`,
+					total === 1 && lit.length === 1 && lit[ 0 ] === `${ pi }:1`
+				);
+
+			}
+
 		}
 
 		for ( const name of FRAMES ) {
@@ -296,6 +363,60 @@ try {
 
 			const relative = Math.abs( first - exact ) / Math.max( Math.abs( exact ), 1e-30 );
 
+			// *** Which of the two is lying ***
+			//
+			// The reducer and a read-back disagree about a sum of positive
+			// squares, which float32 accumulation cannot explain and which
+			// a field of ones does not reproduce. Either the reducer reads
+			// something other than what the buffers hold, or toArray
+			// returns something other than what the buffers hold. Splitting
+			// the multiplication from the accumulation settles it:
+			//
+			//   productsThenHost   a kernel writes a*b per cell; the host
+			//                      reads that field back and sums it in
+			//                      double precision. Device multiplication,
+			//                      host accumulation.
+			//   productsThenDevice the same product field, reduced by the
+			//                      reducer against a field of ones. Device
+			//                      multiplication, device accumulation.
+			//
+			// If productsThenHost matches the host's own `exact`, the two
+			// sides agree about the DATA and the reducer's accumulation is
+			// what differs. If it matches the reducer instead, toArray is
+			// the one not telling the truth.
+			const products = tsl_array_n.arrayN( 'float', system.shape );
+			tsl_array_n.kernel( system.shape, ( i, j, k ) => {
+
+				products( i, j, k ).assign( system.b( i, j, k ).mul( zField( i, j, k ) ) );
+
+			} )();
+
+			const productsHost = await products.toArray();
+			let productsThenHost = 0;
+			for ( let i = 0; i < productsHost.length; i ++ ) productsThenHost += productsHost[ i ];
+
+			const onesField = tsl_array_n.arrayN( 'float', system.shape );
+			tsl_array_n.kernel( system.shape, ( i, j, k ) => { onesField( i, j, k ).assign( 1 ); } )();
+			const productsThenDevice = await linalg.createDotReducer( system.shape, products, onesField ).read();
+
+			// And the same question about a and b themselves: does a kernel
+			// see the value that comes back from toArray?
+			const disagreements = tsl_array_n.arrayN( 'float', system.shape );
+			tsl_array_n.kernel( system.shape, ( i, j, k ) => {
+
+				disagreements( i, j, k ).assign( system.b( i, j, k ) );
+
+			} )();
+			const echoed = await disagreements.toArray();
+			let echoMismatch = 0, worstEcho = 0;
+			for ( let i = 0; i < echoed.length; i ++ ) {
+
+				const delta = Math.abs( echoed[ i ] - bHost[ i ] );
+				if ( delta !== 0 ) echoMismatch ++;
+				if ( delta > worstEcho ) worstEcho = delta;
+
+			}
+
 			// Per lane, device against host. A reducer that is merely
 			// imprecise is wrong everywhere by a little; one that is
 			// counting the wrong elements is wrong in particular lanes.
@@ -308,9 +429,10 @@ try {
 			log(
 				`&nbsp;&nbsp;${ label.padEnd( 12 ) } rel err ${ relative.toExponential( 2 ) }, ` +
 				`worst per-lane cancellation ${ worstCancellation.toExponential( 2 ) }, ` +
-				`device ${ first.toExponential( 6 ) } host ${ exact.toExponential( 6 ) }; ` +
-				`total lane difference ${ totalDiff.toExponential( 3 ) }; biggest: ` +
-				laneDiffs.slice( 0, 3 ).map( ( d ) => `lane ${ d.lane } device ${ d.device.toExponential( 4 ) } host ${ d.host.toExponential( 4 ) } (diff ${ d.diff.toExponential( 2 ) })` ).join( ' | ' ),
+				`reducer ${ first.toExponential( 6 ) } | host products, host sum ${ exact.toExponential( 6 ) } | ` +
+				`device products, host sum ${ productsThenHost.toExponential( 6 ) } | ` +
+				`device products, device sum ${ productsThenDevice.toExponential( 6 ) } | ` +
+				`kernel echo of b differs in ${ echoMismatch } cells (worst ${ worstEcho.toExponential( 1 ) })`,
 				relative < 1e-4
 			);
 

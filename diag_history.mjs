@@ -5,7 +5,7 @@
 // the time a poll lands it is already thousands of frames in.
 import { chromium } from 'playwright-core';
 
-const URL = process.argv[ 2 ] ?? 'http://localhost:5190/examples/35-karman-vortex-street-3d/';
+const URL = process.argv[ 2 ] ?? 'http://localhost:5200/examples/35-karman-vortex-street-3d/';
 const SECONDS = Number( process.argv[ 3 ] ?? 20 );
 const SAFE = process.argv[ 4 ] === 'safe';
 

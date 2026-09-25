@@ -407,13 +407,47 @@ export function createDotReducer( shape, fieldA, fieldB ) {
 
 			const acc = float( 0 ).toVar();
 
-			Loop( ny, ( { i: j } ) => {
+			// *** One Loop with two ranges, not two Loops -- and this was a
+			// real bug that made every 3D dot product in this package wrong
+			// ***
+			//
+			// TSL names a loop's index by its position: LoopNode's own
+			// getVarName returns 'i' for the first range, 'j' for the
+			// second, 'k' for the third. Two SEPARATELY created Loop nodes
+			// therefore both name their variable 'i', and the inner one
+			// shadows the outer in the generated shader. The callbacks here
+			// used to destructure `{ i: j }` from the outer and `{ i: k }`
+			// from the inner, and both of those are the same expression --
+			// the string 'i' -- so inside the inner loop they both resolved
+			// to the inner index.
+			//
+			// What that computed was the DIAGONAL, 24 times over. Measured
+			// directly on a [48,24,24] grid by writing a marker instead of
+			// summing: 26,496 cells never visited, 1,152 visited more than
+			// once, and every cell visited had j === k.
+			//
+			// It hid for as long as it did because the obvious test cannot
+			// see it. A field of ones reduces to exactly the right answer --
+			// any 576 ones sum to 576 whichever cells they are -- and that
+			// is the test anyone writes. It takes a field that varies, or a
+			// single cell set to one, to notice: a delta at (5,0,0) reduced
+			// to 24 instead of 1, and a delta at (0,0,1) to 0.
+			//
+			// What it cost: alpha and beta are quotients of two dot
+			// products, so every step of every 3D CG solve was scaled
+			// wrongly -- measured at 1.4% on the total and 31% on one lane
+			// against the same sum in double precision. CG stays a descent
+			// method with a wrong step size, so easy problems still
+			// converged and nothing looked broken; a hard one took 3000
+			// iterations to reach what sixteen iterations reach with an
+			// accurate dot product. See docs/3d-solver-investigation.md.
+			//
+			// 1D and 2D were never affected: their branches above have a
+			// single Loop each, and this is the only nested Loop in the
+			// package.
+			Loop( ny, nz, ( { i: j, j: k } ) => {
 
-				Loop( nz, ( { i: k } ) => {
-
-					acc.addAssign( fieldA( i, j, k ).mul( fieldB( i, j, k ) ) );
-
-				} );
+				acc.addAssign( fieldA( i, j, k ).mul( fieldB( i, j, k ) ) );
 
 			} );
 
