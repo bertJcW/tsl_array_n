@@ -359,7 +359,7 @@ than left standing:
 
 | | item |
 | --- | --- |
-| E1 | `grid_outflow_solver2.js` has B3's upstream-direction error unfixed. Examples 15 and 16 are long-run stable as they stand, which may be luck |
+| E1 | Closed. `grid_outflow_solver2.js` is ported, and "examples 15 and 16 are long-run stable" turned out to be luck measured with the wrong instrument: example 16 on the old formula reads BROKEN from frame 1720 at 13.89x its inflow leaving, while converging on every frame |
 | E2 | Restriction and prolongation are unweighted transfer operators while the operator is now weighted per level. Whether that costs anything is untested |
 | E3 | `refreshCoarseLevels` must be dispatched or the coarse weight fields stay zero and the coarse operators are degenerate. The claim that not dispatching it reproduces the old behaviour is true of the mask and false of the weights |
 | E4 | This scene has no CFL-based adaptive time step while its 2D counterpart does. A safety net, not a cause |
@@ -485,6 +485,7 @@ reads BROKEN, at 1072.64 out against the same 1152.00 in.
 | | item |
 | --- | --- |
 | F3 | Whether a vent-only domain ought to be made to balance at all, which is a design question this package shares with mantaflow rather than a defect |
+| F4 | `examples/32-grid-solver-3d/`, `33-flip-dam-break-3d/` and `34-smoke-plume-3d/` have never been health-checked. Every 3D solve they ever ran was steered by the broken dot product, so whatever was concluded about them was concluded through it |
 
 ## 7. Re-running any of this
 
