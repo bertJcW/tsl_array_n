@@ -244,7 +244,11 @@ export function createSDFStaticCollider3( resolutionX, resolutionY, resolutionZ,
 		return {
 			u: ( i, j, k ) => u( i, j, k ),
 			v: ( i, j, k ) => v( i, j, k ),
-			w: ( i, j, k ) => w( i, j, k )
+			w: ( i, j, k ) => w( i, j, k ),
+			// The fields behind those accessors, for measurement only -- a
+			// health check on the solver has to read the same weights the
+			// solver used, and an accessor closure cannot be read back.
+			fields: { u, v, w }
 		};
 
 	}

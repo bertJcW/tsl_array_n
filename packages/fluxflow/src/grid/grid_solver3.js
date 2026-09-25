@@ -136,6 +136,13 @@ export function createGridSolver3( {
 		onAdvanceTimeStep,
 		velocityGrid, velocityPrev,
 		pressure: pressureSolver.pressure,
+		// Exposed for measurement, the way multigrid.js exports its own
+		// transfer kernels: a health check on this solver has to weight each
+		// face by how open it is before it can compare flux through one
+		// cross-section against another, and reconstructing these outside
+		// the solver means measuring a second opinion about the geometry
+		// rather than what the solver itself used.
+		colliderFaceWeights: colliderWeights ?? pressure.colliderWeights ?? null,
 		forceSolver, pressureSolver, advectionSolver, boundarySolver, outflowSolver
 	};
 

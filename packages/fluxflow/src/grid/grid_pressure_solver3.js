@@ -478,6 +478,13 @@ export function createGridPressureSolver3( {
 
 	settings.multigrid = preconditionerBuilders.multigrid.settings;
 
-	return { project, pressure: pressureGrid, b, diagnostics, settings };
+	// dirichletMask/ventMask are exposed for measurement only, the way
+	// multigrid.js exports its own transfer kernels: a health check on this
+	// solver has to know which cells it deliberately does NOT make
+	// divergence-free before it can tell a pinned cell apart from a broken
+	// one. Reading them from the solver is the point -- rebuilding them
+	// outside it would measure a second opinion, which is exactly the class
+	// of bug this file's own collider handling already paid for.
+	return { project, pressure: pressureGrid, b, diagnostics, settings, dirichletMask: dirichletMaskField ?? null, ventMask: ventMaskField ?? null };
 
 }
