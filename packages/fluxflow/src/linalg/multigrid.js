@@ -1313,7 +1313,10 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 	// these dispatches into the cycle would pay for them hundreds of times
 	// over. A caller whose mask can change MUST dispatch it after updating
 	// the mask and before solving; a caller that never dispatches it gets
-	// all-zero coarse masks, which is exactly the old behaviour.
+	// coarse levels that know of no pinned cells and treat every face as
+	// fully open, which is exactly the constant-coefficient behaviour this
+	// file had before any of this -- see the field initialisers below for
+	// why that takes one value per field rather than zeroing both.
 	// A coarse level needs a mask as soon as it has weights, even when the
 	// caller passed no mask at all: coarsened weights can leave a coarse
 	// cell fully enclosed, and that cell's row has no diagonal to relax
@@ -1339,7 +1342,9 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 
 		for ( let level = 1; level < numberOfLevels; level ++ ) {
 
-			levelMaskFields.push( zeroedField( levelShapes[ level ] ) );
+			// Zero means "nothing is pinned here", which is what a coarse
+			// level knew before any of this existed.
+			levelMaskFields.push( filledField( levelShapes[ level ], 0 ) );
 
 		}
 
@@ -1351,18 +1356,36 @@ export function createMultigridPreconditioner( shape, gridSpacing, options = {} 
 
 		for ( let level = 1; level < numberOfLevels; level ++ ) {
 
+			// *** One, not zero, and this is the whole of E3 ***
+			//
+			// A weight is a face's conductance. Zero means the face is shut,
+			// so a coarse level whose weights have never been refreshed
+			// would have every face shut: an all-zero operator, a zero
+			// diagonal for relax to divide by, and NaN through the whole
+			// V-cycle on the first use. One means fully open, which is
+			// exactly the constant-coefficient coarse level this file had
+			// before weights were carried down at all -- a worse
+			// preconditioner than the refreshed one, and a valid one.
+			//
+			// This matters because the comment above used to promise that a
+			// caller who never dispatches refreshCoarseLevels() gets the old
+			// behaviour. That was true of the mask, whose zero means
+			// "nothing pinned", and false of the weights, whose zero means
+			// the opposite of their own default. The promise is now true of
+			// both, which is the cheaper fix than asking every caller to
+			// remember something.
 			levelFaceWeightFields.push( levelShapes[ level ].map(
-				( n, axis ) => zeroedField( levelShapes[ level ].map( ( m, a ) => ( a === axis ? m + 1 : m ) ) )
+				( n, axis ) => filledField( levelShapes[ level ].map( ( m, a ) => ( a === axis ? m + 1 : m ) ), 1 )
 			) );
 
 		}
 
 	}
 
-	function zeroedField( fieldShape ) {
+	function filledField( fieldShape, value ) {
 
 		const field = tsl_array_n.arrayN( 'float', fieldShape );
-		field.fromArray( new Float32Array( fieldShape.reduce( ( total, dim ) => total * dim, 1 ) ) );
+		field.fromArray( new Float32Array( fieldShape.reduce( ( total, dim ) => total * dim, 1 ) ).fill( value ) );
 		return field;
 
 	}

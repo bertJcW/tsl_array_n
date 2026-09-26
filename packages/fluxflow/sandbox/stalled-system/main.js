@@ -128,6 +128,7 @@ const CAP = Number( query.get( 'cap' ) ?? 3000 );
 const ONLY = query.get( 'only' );
 const TRACE = Number( query.get( 'trace' ) ?? 0 );
 const DOT = query.get( 'dot' ) === '1';
+const NOREFRESH = query.get( 'norefresh' ) === '1';
 
 try {
 
@@ -194,7 +195,11 @@ try {
 			// Evidence that a sweep arm actually changed something: with no
 			// coarsening there are no coarsening kernels to dispatch.
 			const coarsening = M.refreshCoarseLevels ? 'coarsens' : 'no coarsen kernels';
-			if ( M.refreshCoarseLevels ) M.refreshCoarseLevels();
+			// ?norefresh=1 skips the dispatch a caller is told they may skip,
+			// which must leave a usable preconditioner rather than an
+			// all-zero coarse operator full of NaN. See multigrid.js's own
+			// field initialisers.
+			if ( M.refreshCoarseLevels && ! NOREFRESH ) M.refreshCoarseLevels();
 
 			const solver = linalg.createPreconditionedConjugateGradientSolver( applyLaplacian, M, system.b, x );
 			const ok = await solver.solve( capture.meta.tolerance, maxIterations, 1, false, true, false, true );

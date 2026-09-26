@@ -360,8 +360,8 @@ than left standing:
 | | item |
 | --- | --- |
 | E1 | Closed. `grid_outflow_solver2.js` is ported, and "examples 15 and 16 are long-run stable" turned out to be luck measured with the wrong instrument: example 16 on the old formula reads BROKEN from frame 1720 at 13.89x its inflow leaving, while converging on every frame |
-| E2 | Restriction and prolongation are unweighted transfer operators while the operator is now weighted per level. Whether that costs anything is untested |
-| E3 | `refreshCoarseLevels` must be dispatched or the coarse weight fields stay zero and the coarse operators are degenerate. The claim that not dispatching it reproduces the old behaviour is true of the mask and false of the weights |
+| E2 | Restriction and prolongation are unweighted transfer operators while the operator is now weighted per level. Whether that costs anything is untested, and deliberately not being tested for now |
+| E3 | Closed. The weight fields now start at one rather than zero, so a preconditioner whose refresh is never dispatched falls back to the constant-coefficient coarse levels this file had before -- 17 iterations on the captured system against 10 refreshed -- instead of an all-zero operator that died at iteration 1 with degenerate-pAp. The promise in the comment is now true of both fields. `sandbox/stalled-system/?norefresh=1` is the switch that shows it |
 | E4 | This scene has no CFL-based adaptive time step while its 2D counterpart does. A safety net, not a cause |
 
 ### Ruled out, with the measurement that ruled it out
@@ -484,7 +484,7 @@ reads BROKEN, at 1072.64 out against the same 1152.00 in.
 
 | | item |
 | --- | --- |
-| F3 | Whether a vent-only domain ought to be made to balance at all, which is a design question this package shares with mantaflow rather than a defect |
+| F3 | Whether a vent-only domain ought to be made to balance at all. Deferred by decision, not by oversight: it is a design question this package shares with mantaflow, forcing it would change every smoke and fire scene, and not forcing it means accepting that such a domain drains. Left as it is until someone chooses |
 | F4 | Closed. See 6e |
 
 ## 6e. F4: the other three 3D examples, before and after
