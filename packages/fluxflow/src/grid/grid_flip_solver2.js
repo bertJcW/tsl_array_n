@@ -232,19 +232,29 @@
 // (1) countPerCellKernel: one thread per particle, atomicAdd into
 // cellParticleCount -- same cell-index arithmetic markFluidCellsKernel
 // already uses (factored out as cellIndexOf() below, shared by both).
-// (2) buildDonorPoolKernel: one thread per particle -- if its own cell's
-// count exceeds maxParticlesPerCell, it pushes its own particle index into
-// donorPool via atomicAdd on donorPushCursor, using the atomic op's own
-// *return value* as the claimed slot (the classic GPU "claim a unique slot"
-// pattern) -- every over-threshold particle volunteers as a candidate;
-// nothing moves yet, so volunteering costs nothing if never claimed.
-// **This is the one genuinely new primitive in this file**: every existing
-// atomic use elsewhere (P2G, CG dot products, bad-pressure-cell counting)
-// only uses the side effect, never the returned pre-increment value --
-// confirmed safe first via an isolated real-hardware scratch test (N
-// threads each claim a slot, verified afterward that every slot 0..N-1 was
-// written exactly once, no collisions, at both N=256 and N=4000) before
-// being relied on here, the same discipline the original P2G scatter got.
+// (2) markDonorsKernel + a prefix sum + scatterDonorsKernel: one thread per
+// particle marks itself a donor if its own cell's count exceeds
+// maxParticlesPerCell, an inclusive prefix sum over those flags gives each
+// donor its rank among the donors before it, and the scatter writes each
+// donor into donorPool at that rank. Every over-threshold particle
+// volunteers; nothing moves yet, so volunteering costs nothing if never
+// claimed.
+//
+// **This used to be an atomic cursor, and that is the one thing in this file
+// that had to be undone.** It pushed with atomicAdd on donorPushCursor and
+// took the returned pre-increment value as the claimed slot -- the classic
+// GPU "claim a unique slot" pattern -- and it was verified on real hardware
+// before being relied on: N threads each claim a slot, every slot 0..N-1
+// written exactly once, no collisions, at N=256 and N=4000.
+//
+// That test checked uniqueness, which was the right property for the data
+// structure and the wrong one for the simulation. Which particle got slot 0
+// depended on which thread reached the atomic first, so every run relocated
+// a different set of particles, and this scene could not be run twice. A
+// rank from a prefix sum is defined by index instead of by arrival, so it is
+// reproducible; see linalg/prefix_sum.js for the measurements. The lesson is
+// worth more than the code: a GPU primitive can be correct and still be
+// unrepeatable, and only a test that runs it twice can tell.
 // (3) claimDonorsKernel: one thread per *cell* -- if its own count is below
 // minParticlesPerCell, it claims up to (minParticlesPerCell - count) donors
 // via Loop(minParticlesPerCell, ...) (this file's own first use of the
@@ -376,6 +386,8 @@ import { createGridBlockedBoundaryConditionSolver2 } from './grid_blocked_bounda
 import { createGridPressureSolver2 } from './grid_pressure_solver2.js';
 import { createSemiLagrangianAdvectionSolver2 } from './advection_solver2.js';
 import { createCopyKernel2, createExtrapolateToRegion2 } from './array_utils.js';
+import { createInclusivePrefixSum } from '../linalg/prefix_sum.js';
+import { createJitterRandom, DEFAULT_JITTER_SEED } from './jitter_random.js';
 import { bilinearCoordsAndWeights2, collocatedValueAtPosition2, faceCenteredValueAtPosition2 } from './grid_math.js';
 import { DEFAULT_ATOMIC_DOT_SCALE } from '../linalg/linalg.js';
 import { isNonFinite, isNonFinite2 } from '../float_guards.js';
@@ -428,7 +440,7 @@ function numberOrNode( value ) {
 // artificial and dynamically atypical -- see grid_fire_solver2.js's own
 // symmetry-breaking precedent for why a perfectly regular initial
 // condition is worth avoiding on its own) starting lattice.
-export function computeFlipBoxSeed( { boxMin, boxMax, gridSpacingX, gridSpacingY, particlesPerCellAxis = 2, jitter = 0.2 } ) {
+export function computeFlipBoxSeed( { boxMin, boxMax, gridSpacingX, gridSpacingY, particlesPerCellAxis = 2, jitter = 0.2, randomSeed = DEFAULT_JITTER_SEED } ) {
 
 	const [ minX, minY ] = boxMin;
 	const [ maxX, maxY ] = boxMax;
@@ -437,6 +449,10 @@ export function computeFlipBoxSeed( { boxMin, boxMax, gridSpacingX, gridSpacingY
 	const cellsY = Math.max( 1, Math.round( ( maxY - minY ) / gridSpacingY ) );
 	const subSpacingX = gridSpacingX / particlesPerCellAxis;
 	const subSpacingY = gridSpacingY / particlesPerCellAxis;
+
+	// Deterministic by default -- see jitter_random.js for what this
+	// replaced and the measurements that found it.
+	const random = createJitterRandom( randomSeed );
 
 	const positionsList = [];
 
@@ -448,8 +464,8 @@ export function computeFlipBoxSeed( { boxMin, boxMax, gridSpacingX, gridSpacingY
 
 				for ( let subI = 0; subI < particlesPerCellAxis; subI ++ ) {
 
-					const jx = ( Math.random() * 2 - 1 ) * jitter * subSpacingX;
-					const jy = ( Math.random() * 2 - 1 ) * jitter * subSpacingY;
+					const jx = ( random() * 2 - 1 ) * jitter * subSpacingX;
+					const jy = ( random() * 2 - 1 ) * jitter * subSpacingY;
 
 					const x = minX + cellI * gridSpacingX + ( subI + 0.5 ) * subSpacingX + jx;
 					const y = minY + cellJ * gridSpacingY + ( subJ + 0.5 ) * subSpacingY + jy;
@@ -1149,22 +1165,49 @@ export function createGridFlipSolver2( {
 		const cellParticleCount = tsl_array_n.arrayN( 'int', [ resolutionX, resolutionY ] );
 		cellParticleCount.node.toAtomic();
 
+		// *** Ranks from a prefix sum, not slots from an atomic cursor ***
+		//
+		// The two cursors this replaces did exactly what they were verified to
+		// do -- hand every claimant a unique slot, checked on real hardware at
+		// N = 256 and N = 4000 with no collisions. Uniqueness was the right
+		// property for the data structure and the wrong one for the
+		// simulation: WHICH particle got slot 0 depended on which thread
+		// reached the atomic first, so each run relocated a different set of
+		// particles.
+		//
+		// This is measured, not assumed. With the seeding made deterministic
+		// (see jitter_random.js) and this file still on cursors,
+		// examples/20-flip-dam-break/ was the one FLIP scene that still gave
+		// different results run to run, while examples/28-drop-into-pool/ --
+		// the same solver, but a scene calm enough that the resampler rarely
+		// has both an over-dense and an under-filled cell at once -- was
+		// already reproducible. That difference is what pinned it here.
+		//
+		// A rank defined by index is reproducible: donorRank is the prefix sum
+		// of a 0/1 donor flag, so a donor's slot is the number of donors before
+		// it in particle order, and claimBase is the prefix sum of each cell's
+		// need, so a cell's slice of the pool is fixed by cell order. The donor
+		// set, the receiving cells and what happens to a relocated particle are
+		// all unchanged; only the assignment between them becomes canonical.
 		const donorPool = tsl_array_n.arrayN( 'int', maxParticles );
-		const donorPushCursor = tsl_array_n.array0( 'int' );
-		donorPushCursor.node.toAtomic();
-		const donorPopCursor = tsl_array_n.array0( 'int' );
-		donorPopCursor.node.toAtomic();
+		const donorFlag = tsl_array_n.arrayN( 'int', maxParticles );
+		const cellNeed = tsl_array_n.arrayN( 'int', resolutionX * resolutionY );
+
+		const donorScan = createInclusivePrefixSum( maxParticles, donorFlag );
+		const needScan = createInclusivePrefixSum( resolutionX * resolutionY, cellNeed );
 
 		const zeroCells = new Int32Array( resolutionX * resolutionY );
-		const zeroOne = new Int32Array( [ 0 ] );
 
+		// donorFlag and cellNeed are written in full by their own kernels every
+		// frame, so only the atomic accumulator needs clearing.
 		function resetResampleBuffers() {
 
 			cellParticleCount.fromArray( zeroCells );
-			donorPushCursor.fromArray( zeroOne );
-			donorPopCursor.fromArray( zeroOne );
 
 		}
+
+		// Cell arrays are 2-D but a prefix sum is 1-D.
+		const cellFlatIndex = ( i, j ) => i.add( j.mul( resolutionX ) );
 
 		const countPerCellKernel = tsl_array_n.kernel( maxParticles, ( p ) => {
 
@@ -1175,23 +1218,24 @@ export function createGridFlipSolver2( {
 
 		const maxParticlesPerCellNode = int( maxParticlesPerCell );
 
-		const buildDonorPoolKernel = tsl_array_n.kernel( maxParticles, ( p ) => {
+		// Who volunteers -- unchanged, and already order-independent, since it
+		// only reads counts that integer atomics accumulated exactly.
+		const markDonorsKernel = tsl_array_n.kernel( maxParticles, ( p ) => {
 
 			const { i, j } = cellIndexOf( positions( p ) );
 			const count = atomicLoad( cellParticleCount( i, j ) );
 
-			If( count.greaterThan( maxParticlesPerCellNode ), () => {
+			donorFlag( p ).assign( count.greaterThan( maxParticlesPerCellNode ).select( int( 1 ), int( 0 ) ) );
 
-				const slot = atomicAdd( donorPushCursor(), 1 );
+		} );
 
-				// Sized maxParticles, an upper bound that can never be
-				// exceeded (at most every particle could volunteer) -- this
-				// guard is defensive, not expected to ever trip.
-				If( slot.lessThan( maxParticles ), () => {
+		// Where each volunteer goes: its rank among the volunteers before it.
+		// The inclusive scan is 1-based, hence the subtraction.
+		const scatterDonorsKernel = tsl_array_n.kernel( maxParticles, ( p ) => {
 
-					donorPool( slot ).assign( p );
+			If( donorFlag( p ).equal( int( 1 ) ), () => {
 
-				} );
+				donorPool( donorScan.result( p ).sub( 1 ) ).assign( p );
 
 			} );
 
@@ -1235,17 +1279,35 @@ export function createGridFlipSolver2( {
 		// One thread per cell -- claims up to (minParticlesPerCell - count)
 		// donors via a bounded Loop with early Break, same idiom
 		// advection_solver2.js's own backTrace already established.
-		// donorPushCursor's own live value is read directly via atomicLoad
-		// inside this kernel -- no CPU readback needed, it's a live atomic
-		// buffer, not a value this function needs to branch on in JS.
-		const claimDonorsKernel = tsl_array_n.kernel( [ resolutionX, resolutionY ], ( i, j ) => {
+		// The donor total comes from the last element of the donor scan -- no
+		// CPU readback, same as the cursor it replaced, and now also the same
+		// answer every run.
+		// How many each under-filled cell wants. Split out of the claim so the
+		// scan has something to sum; the condition is unchanged.
+		const markNeedKernel = tsl_array_n.kernel( [ resolutionX, resolutionY ], ( i, j ) => {
 
 			const count = atomicLoad( cellParticleCount( i, j ) );
+			const wants = count.lessThan( minParticlesPerCellNode )
+				.and( neighborFluidCount( i, j ).greaterThanEqual( MIN_FLUID_NEIGHBORS ) );
 
-			If( count.lessThan( minParticlesPerCellNode ).and( neighborFluidCount( i, j ).greaterThanEqual( MIN_FLUID_NEIGHBORS ) ), () => {
+			cellNeed( cellFlatIndex( i, j ) ).assign( wants.select( minParticlesPerCellNode.sub( count ), int( 0 ) ) );
 
-				const donorCount = atomicLoad( donorPushCursor() );
-				const needed = minParticlesPerCellNode.sub( count );
+		} );
+
+		const claimDonorsKernel = tsl_array_n.kernel( [ resolutionX, resolutionY ], ( i, j ) => {
+
+			const flat = cellFlatIndex( i, j );
+			const needed = cellNeed( flat );
+
+			If( needed.greaterThan( int( 0 ) ), () => {
+
+				// This cell's own slice of the pool: everything earlier cells
+				// asked for comes first. No cursor, no contention, and the same
+				// answer every run -- when donors are scarce the lower cell
+				// index wins, deterministically, where before it was whichever
+				// thread arrived first.
+				const base = needScan.result( flat ).sub( needed );
+				const donorCount = donorScan.result( maxParticles - 1 );
 				const claimed = int( 0 ).toVar();
 
 				Loop( minParticlesPerCell, () => {
@@ -1256,7 +1318,7 @@ export function createGridFlipSolver2( {
 
 					} );
 
-					const claimSlot = atomicAdd( donorPopCursor(), 1 );
+					const claimSlot = base.add( claimed );
 
 					If( claimSlot.lessThan( donorCount ), () => {
 
@@ -1300,7 +1362,11 @@ export function createGridFlipSolver2( {
 		// after them.
 		const resampleBatch = tsl_array_n.createBatch( [
 			countPerCellKernel,
-			buildDonorPoolKernel,
+			markDonorsKernel,
+			...donorScan.kernels,
+			scatterDonorsKernel,
+			markNeedKernel,
+			...needScan.kernels,
 			claimDonorsKernel,
 
 			// Relocation changed particle positions -- the fluidMask/

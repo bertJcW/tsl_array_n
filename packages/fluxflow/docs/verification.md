@@ -17,6 +17,13 @@ are worth nothing without.
 
 ## The three rules
 
+**0. A check that compares two runs must be able to tell a pair of failures
+from a pair of successes.** Added last, after the determinism sweep in
+`long-run-stability.md` reported nine scenes reproducible including one that
+had never started: it had no probe, the probe timed out twice, and two
+identically-failed logs diff clean. Any comparison-based check needs to
+confirm both sides produced something before it compares them.
+
 **1. A criterion nobody has seen fail is not a criterion.** Every check
 described here has been run against a build with a known defect deliberately
 put back, and kept only if it fired. `examples/31-conjugate-gradient-3d/` is
@@ -85,6 +92,7 @@ a tick or a cross per claim. The pre-existing ones are tabulated in
 | `examples/32-grid-solver-3d/` | `createGridSolver3` leaves the field divergence-free; `createGridFlipSolver3`'s particles stay finite and in bounds |
 | `sandbox/poisson-3d-dirichlet/` | operator symmetry with and without a Dirichlet mask; V-cycle symmetry and positive-definiteness; convergence on a system built as `A @ xStar`, so no scene's right-hand side can be blamed for a failure |
 | `sandbox/outflow-gradient/` | which way an outflow SDF's gradient actually points, measured, in 2D and in 3D |
+| `sandbox/prefix-sum/` | the GPU prefix sum the resamplers rank donors with: correct against a JS reference on the lengths that break scans, bit-identical across eight runs, and ranks that increase in the index rather than merely being distinct |
 
 The dot-reducer check is the one whose shape is worth copying. A field of
 ones reduces to the right total however wrongly its cells are chosen -- any
@@ -197,7 +205,7 @@ Reached for after a verdict, not before one. Each answers one question.
 | tool | question |
 | --- | --- |
 | `diag_history.mjs` | what did **every** frame's solve do, from frame zero? |
-| `diag_repeat.mjs` | does a fresh run do the same thing -- deterministic, or lucky? (`33-flip-dam-break-3d` does not: four runs of one build gave BROKEN, HEALTHY, BROKEN, HEALTHY) |
+| `diag_repeat.mjs` | does a fresh run do the same thing -- deterministic, or lucky? Every FLIP scene once answered no, because the particle seeding came from `Math.random()`; they are reproducible now and a fresh run is a real check again |
 | `diag_event.mjs` | what did the field look like at exactly these frames? |
 | `diag_freeze.mjs` | stop at one frame and re-solve that system every way available |
 | `diag_where.mjs` | which part of the domain is the large one? |

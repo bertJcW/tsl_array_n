@@ -461,6 +461,18 @@ try {
 
 	} );
 
+	// Measurement handle only -- nothing here changes what the scene does.
+	// This was the last drivable solver in the package with no probe, so the
+	// two-phase solver had never had a long run or a determinism check, and
+	// both of those gaps were invisible rather than merely open: a
+	// determinism sweep across every FLIP scene reported this one as
+	// reproducible when in fact it had timed out waiting for this object, and
+	// two identically-failed runs diff clean. The names are the ones
+	// solver_health.mjs reads -- the object whose onAdvanceTimeStep is one
+	// step, the velocity field it projects, and the renderer, without which
+	// the probe refuses to believe any number from this page.
+	window.__fluxflowProbe = { solver, velocityGrid, renderer };
+
 	requestAnimationFrame( animate );
 
 } catch ( error ) {

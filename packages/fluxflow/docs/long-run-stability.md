@@ -103,20 +103,15 @@ The sampled fields diverge early -- maximum divergence at frame 300 reads
 1.45 in one run and 2.51 in another -- so this is not a threshold being
 grazed, it is two different trajectories.
 
-The mechanism is in the particle resampler, not the pressure solve.
-`grid_flip_solver3.js` assigns donor slots with
-`atomicAdd( donorPushCursor(), 1 )`: which over-dense particle lands in
-which slot depends on the order threads win the atomic, and that order is
-not fixed between runs. The resampler then moves those particles into
-under-filled cells, so a different set of particles is teleported each run,
-and 12,000 frames is ample for the two to part company.
-
-The contrast inside the same file is the instructive part. Its P2G
-accumulation (around line 522) scatters through atomics too, but in **fixed
-point** -- `round( value * w * scale ).toInt()` -- because integer addition
-is associative and exact, so atomic order cannot change the answer. That was
-a deliberate choice made for exactly this reason. The donor queue does not
-have that property.
+> **Retracted (2026-09-26).** This section said the mechanism was the
+> resampler's atomic donor cursor. That was wrong, and it was wrong in the
+> way this document keeps warning about: it named the first plausible
+> mechanism found by reading code, and did not test it. Replacing the cursor
+> with a deterministic rank did not make the scene reproducible. The real
+> cause and the measurements that found it are in
+> [T2](#t2-the-scenes-are-reproducible-now-and-the-cause-was-not-what-i-said-it-was)
+> below. The cursor was a genuine order-dependence and is fixed; it was not
+> what made these runs differ.
 
 **But the stops were never a failure, and the probe should not have said
 they were.** Instrumenting the stop reason settles it: all 7,557 stops in
@@ -195,12 +190,8 @@ frames at rest reports **0 CG breakdowns**, and the probe's own exclusion
 never fires, because there is no longer anything to exclude. Before this
 change that run would have reported 5,672 breakdowns.
 
-One thing remains undone, and it is not cosmetic:
-
-- **The donor queue's slot assignment should not depend on atomic order.**
-  A scene that cannot be run twice cannot be bisected, and that makes every
-  future measurement of it weaker. The fixed-point P2G accumulation in the
-  same file is the pattern to copy.
+What remained undone after T1 -- making these scenes reproducible -- is T2,
+below.
 
 One caveat on the fix itself, recorded because it is the obvious way for
 this to go wrong later: excluding a zero-residual stop trusts `d.residual`
@@ -292,6 +283,122 @@ Full per-scene logs, including every sampled row, are written to
 node long_run.mjs                          # all of it, 12,000 steps each
 node long_run.mjs 2000 50 35-karman        # one scene, shorter
 ```
+
+---
+
+# T2: the scenes are reproducible now, and the cause was not what I said it was
+
+Every FLIP scene in this package gave different results on every run. The
+write-up above blamed the resampler's atomic donor cursor, on the strength of
+reading the code. Replacing that cursor with a deterministic rank changed
+nothing, which is the only reason the actual cause was ever found.
+
+## What it actually was
+
+`computeFlipBoxSeed2`, `computeFlipBoxSeed3` and `computeTwoPhaseBoxSeed`
+jittered every particle's starting position with `Math.random()`. **Every run
+of every FLIP scene began from a different initial condition.** Not a race,
+not an atomic, not the solver -- the seeding.
+
+The jitter itself is wanted: particles left on an exact lattice produce
+visible artefacts, and every FLIP implementation breaks the lattice up. What
+was missing was a jitter that repeats. `jitter_random.js` supplies one
+(mulberry32, four lines, one uint32 of state) and all three seeding functions
+take a `randomSeed` that defaults to a constant, so a scene is reproducible
+unless its author asks otherwise.
+
+## How it was found, after guessing failed
+
+By dropping to a scene cheap enough to run repeatedly. The 12,000-step runs
+cost five minutes each, which is long enough that hypotheses get tested one
+per coffee; `examples/32-grid-solver-3d/`'s own FLIP self-check -- 864
+particles, a closed 8x8x8 domain, 60 steps -- runs in seconds and reported a
+peak particle speed of **3.532, 5.020 and 5.396 on three consecutive runs**.
+After the fix, 3.885 three times.
+
+The other half was localising it before hunting. Two runs of
+`examples/35-karman-vortex-street-3d/` are identical line for line, which
+clears the whole shared core -- CG, multigrid, advection, the boundary
+conditions, the fixed-point atomic dot products -- and left the search inside
+the particle code. That took one measurement and saved reading several
+thousand lines.
+
+## Two real races found on the way, and kept
+
+Neither turned out to explain the divergence. Both are defects anyway, and
+one of them is worse than the thing that was being looked for.
+
+**The velocity extrapolation read and wrote the same buffer in one dispatch.**
+`createExtrapolateStepKernel2`/`3` averaged a cell's valid neighbours out of
+`output` and wrote the result back into `output`, in the same kernel. The
+valid mask beside it is carefully double-buffered and ping-ponged -- the sweep
+is meant to be Jacobi -- but the values were not, so whether a cell saw a
+neighbour's old value or its just-written new one depended on how the device
+scheduled that dispatch. **Every caller passes the same array as input and
+output**: both blocked-boundary solvers, both FLIP solvers and the two-phase
+solver, which is to say nearly every scene in the package. It is a true Jacobi
+sweep now, with the value field double-buffered and a copy back when an odd
+iteration count leaves the answer in the scratch buffer.
+
+**The donor cursors were order-dependent, in all three resamplers.** This one
+has a clean attribution, which arrived by accident: with the seeding fixed and
+the cursors still in place, `examples/20-flip-dam-break/` was the one FLIP
+scene still giving different answers, while `examples/28-drop-into-pool/` --
+the same solver, but calm enough that the resampler rarely has both an
+over-dense and an under-filled cell at once -- was already reproducible. That
+difference is what pinned it. All three resamplers now take ranks from a
+prefix sum: a donor's slot is the number of donors before it in particle
+order, and a cell's slice of the pool is fixed by cell order. The donor set,
+the receiving cells and what happens to a relocated particle are unchanged;
+only the arbitrary choice between them is now made the same way every time.
+
+The cursors were verified on real hardware before being relied on -- N threads
+each claim a slot, every slot 0..N-1 written exactly once, no collisions, at
+N = 256 and N = 4000. **That test checked uniqueness, which is the right
+property for the data structure and the wrong one for the simulation.** A GPU
+primitive can be correct and still be unrepeatable, and only a test that runs
+it twice can tell. `sandbox/prefix-sum/` is the replacement's test and it
+checks both: 13 checks on real WebGPU, including eight scans of one input
+coming back bit-identical, and ranks increasing in the index rather than
+merely being distinct.
+
+## Verified
+
+Nine scenes, two 1,000-step runs each, logs diffed line for line -- every
+sampled row, not just the verdict.
+
+| scene | two runs identical | verdict |
+| --- | --- | --- |
+| 20 FLIP dam break | yes | HEALTHY |
+| 21 irregular container | yes | HEALTHY |
+| 22 multiple colliders | yes | HEALTHY |
+| 23 moving collider | yes | HEALTHY |
+| 24 two-phase bubble rise | yes (three runs) | HEALTHY |
+| 26 dye in free surface | yes | HEALTHY |
+| 28 drop into pool | yes | HEALTHY |
+| 29 static droplet | yes | HEALTHY |
+| 33 FLIP dam break 3D | yes | HEALTHY |
+
+## The sweep's own false pass, and what it exposed
+
+The first run of that sweep reported all nine identical, including
+`24-two-phase-bubble-rise`. It had not run at all: that scene had no probe, so
+`solver_health.mjs` timed out waiting for one, and **two identically-failed
+runs diff clean.** A determinism check built on comparing outputs will call a
+pair of failures a pass, every time.
+
+Fixing it turned up something worse than the false pass. With a probe added,
+example 24 ran -- and on two runs under the old code gave **HEALTHY once and
+BROKEN once**, the broken one leaving 1.46e-2 of the divergence the projection
+was asked to remove, against a bar of 1e-2. The two-phase solver had never had
+a long run or a determinism check, and it was reachable that both would fail.
+It is deterministic and HEALTHY over three runs now.
+
+**Recorded rather than claimed:** the trajectory that read 1.46e-2 is no
+longer the one this scene takes, which is not the same as showing the solver
+cannot produce it. Whether that excursion recurs under other seeds is
+untested, and is now testable precisely because the seed is a parameter --
+which is the practical argument for determinism, over and above tidiness.
 
 ---
 

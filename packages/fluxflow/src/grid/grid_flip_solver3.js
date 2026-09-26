@@ -39,7 +39,9 @@ import { createSemiLagrangianAdvectionSolver3 } from './advection_solver3.js';
 import { createCopyKernel3, createExtrapolateToRegion3 } from './array_utils3.js';
 import { trilinearCoordsAndWeights3, collocatedValueAtPosition3, faceCenteredValueAtPosition3 } from './grid_math3.js';
 import { DEFAULT_ATOMIC_DOT_SCALE } from '../linalg/linalg.js';
+import { createInclusivePrefixSum } from '../linalg/prefix_sum.js';
 import { isNonFinite, isNonFinite3 } from '../float_guards.js';
+import { createJitterRandom, DEFAULT_JITTER_SEED } from './jitter_random.js';
 
 // See grid_flip_solver2.js's own header comment for the meaning of both
 // constants -- unchanged.
@@ -65,7 +67,7 @@ function numberOrNode( value ) {
 // cell (was ^2), jittered in 3 axes.
 // options.boxMin/boxMax: [x,y,z] world-space corners. gridSpacingX/Y/Z:
 // this solver's own gridSpacing.
-export function computeFlipBoxSeed3( { boxMin, boxMax, gridSpacingX, gridSpacingY, gridSpacingZ, particlesPerCellAxis = 2, jitter = 0.2 } ) {
+export function computeFlipBoxSeed3( { boxMin, boxMax, gridSpacingX, gridSpacingY, gridSpacingZ, particlesPerCellAxis = 2, jitter = 0.2, randomSeed = DEFAULT_JITTER_SEED } ) {
 
 	const [ minX, minY, minZ ] = boxMin;
 	const [ maxX, maxY, maxZ ] = boxMax;
@@ -76,6 +78,10 @@ export function computeFlipBoxSeed3( { boxMin, boxMax, gridSpacingX, gridSpacing
 	const subSpacingX = gridSpacingX / particlesPerCellAxis;
 	const subSpacingY = gridSpacingY / particlesPerCellAxis;
 	const subSpacingZ = gridSpacingZ / particlesPerCellAxis;
+
+	// Deterministic by default -- see jitter_random.js for what this
+	// replaced and the measurements that found it.
+	const random = createJitterRandom( randomSeed );
 
 	const positionsList = [];
 
@@ -91,9 +97,9 @@ export function computeFlipBoxSeed3( { boxMin, boxMax, gridSpacingX, gridSpacing
 
 						for ( let subI = 0; subI < particlesPerCellAxis; subI ++ ) {
 
-							const jx = ( Math.random() * 2 - 1 ) * jitter * subSpacingX;
-							const jy = ( Math.random() * 2 - 1 ) * jitter * subSpacingY;
-							const jz = ( Math.random() * 2 - 1 ) * jitter * subSpacingZ;
+							const jx = ( random() * 2 - 1 ) * jitter * subSpacingX;
+							const jy = ( random() * 2 - 1 ) * jitter * subSpacingY;
+							const jz = ( random() * 2 - 1 ) * jitter * subSpacingZ;
 
 							const x = minX + cellI * gridSpacingX + ( subI + 0.5 ) * subSpacingX + jx;
 							const y = minY + cellJ * gridSpacingY + ( subJ + 0.5 ) * subSpacingY + jy;
@@ -619,22 +625,52 @@ export function createGridFlipSolver3( {
 		const cellParticleCount = tsl_array_n.arrayN( 'int', cellShape );
 		cellParticleCount.node.toAtomic();
 
+		// *** Ranks from a prefix sum, not slots from an atomic cursor ***
+		//
+		// Both cursors this replaces did exactly what they were verified to
+		// do -- hand every claimant a unique slot -- and uniqueness is not
+		// reproducibility. Which particle got slot 0 depended on which thread
+		// reached the atomic first, so each run teleported a different set of
+		// particles and the trajectories parted. Measured on
+		// examples/33-flip-dam-break-3d/: four 12,000-step runs of one build
+		// gave two different verdicts, with sampled fields already differing
+		// by frame 300. A scene that cannot be run twice cannot be bisected,
+		// which makes every future measurement of it weaker.
+		//
+		// A rank defined by index is reproducible. donorRank is the prefix sum
+		// of a 0/1 donor flag, so a donor's slot is the number of donors
+		// before it in particle order; claimBase is the prefix sum of each
+		// cell's need, so a cell's slice of the pool is fixed by cell order.
+		// Nothing in either depends on execution order.
+		//
+		// What this changes and what it does not: the donor SET, the receiving
+		// cells, and what happens to a relocated particle are all exactly as
+		// before. Only the assignment between them becomes canonical -- lower
+		// particle index donates first, lower cell index claims first. The
+		// trajectory therefore differs from the old code's, necessarily; it is
+		// the same algorithm with its one arbitrary choice made the same way
+		// every time.
 		const donorPool = tsl_array_n.arrayN( 'int', maxParticles );
-		const donorPushCursor = tsl_array_n.array0( 'int' );
-		donorPushCursor.node.toAtomic();
-		const donorPopCursor = tsl_array_n.array0( 'int' );
-		donorPopCursor.node.toAtomic();
+		const donorFlag = tsl_array_n.arrayN( 'int', maxParticles );
+		const cellNeed = tsl_array_n.arrayN( 'int', cellCount );
+
+		const donorScan = createInclusivePrefixSum( maxParticles, donorFlag );
+		const needScan = createInclusivePrefixSum( cellCount, cellNeed );
 
 		const zeroCells = new Int32Array( cellCount );
-		const zeroOne = new Int32Array( [ 0 ] );
 
+		// donorFlag and cellNeed are written in full by their own kernels
+		// every frame, so only the atomic accumulator needs clearing.
 		function resetResampleBuffers() {
 
 			cellParticleCount.fromArray( zeroCells );
-			donorPushCursor.fromArray( zeroOne );
-			donorPopCursor.fromArray( zeroOne );
 
 		}
+
+		// Cell arrays here are 3-D but a prefix sum is 1-D, so cellNeed and
+		// its scan are flat and indexed the same way every other flattening
+		// in this package is.
+		const cellFlatIndex = ( i, j, k ) => i.add( j.mul( resolutionX ) ).add( k.mul( resolutionX * resolutionY ) );
 
 		const countPerCellKernel = tsl_array_n.kernel( maxParticles, ( p ) => {
 
@@ -645,20 +681,24 @@ export function createGridFlipSolver3( {
 
 		const maxParticlesPerCellNode = int( maxParticlesPerCell );
 
-		const buildDonorPoolKernel = tsl_array_n.kernel( maxParticles, ( p ) => {
+		// Who volunteers -- unchanged, and order-independent already, since
+		// it only reads counts that integer atomics accumulated exactly.
+		const markDonorsKernel = tsl_array_n.kernel( maxParticles, ( p ) => {
 
 			const { i, j, k } = cellIndexOf( positions( p ) );
 			const count = atomicLoad( cellParticleCount( i, j, k ) );
 
-			If( count.greaterThan( maxParticlesPerCellNode ), () => {
+			donorFlag( p ).assign( count.greaterThan( maxParticlesPerCellNode ).select( int( 1 ), int( 0 ) ) );
 
-				const slot = atomicAdd( donorPushCursor(), 1 );
+		} );
 
-				If( slot.lessThan( maxParticles ), () => {
+		// Where each volunteer goes: its rank among the volunteers before it.
+		// The inclusive scan is 1-based, hence the subtraction.
+		const scatterDonorsKernel = tsl_array_n.kernel( maxParticles, ( p ) => {
 
-					donorPool( slot ).assign( p );
+			If( donorFlag( p ).equal( int( 1 ) ), () => {
 
-				} );
+				donorPool( donorScan.result( p ).sub( 1 ) ).assign( p );
 
 			} );
 
@@ -689,14 +729,32 @@ export function createGridFlipSolver3( {
 
 		const MIN_FLUID_NEIGHBORS = 3;
 
-		const claimDonorsKernel = tsl_array_n.kernel( cellShape, ( i, j, k ) => {
+		// How many each under-filled cell wants. Split out of the claim so the
+		// scan below has something to sum; the condition is unchanged.
+		const markNeedKernel = tsl_array_n.kernel( cellShape, ( i, j, k ) => {
 
 			const count = atomicLoad( cellParticleCount( i, j, k ) );
+			const wants = count.lessThan( minParticlesPerCellNode )
+				.and( neighborFluidCount( i, j, k ).greaterThanEqual( MIN_FLUID_NEIGHBORS ) );
 
-			If( count.lessThan( minParticlesPerCellNode ).and( neighborFluidCount( i, j, k ).greaterThanEqual( MIN_FLUID_NEIGHBORS ) ), () => {
+			cellNeed( cellFlatIndex( i, j, k ) ).assign( wants.select( minParticlesPerCellNode.sub( count ), int( 0 ) ) );
 
-				const donorCount = atomicLoad( donorPushCursor() );
-				const needed = minParticlesPerCellNode.sub( count );
+		} );
+
+		const claimDonorsKernel = tsl_array_n.kernel( cellShape, ( i, j, k ) => {
+
+			const flat = cellFlatIndex( i, j, k );
+			const needed = cellNeed( flat );
+
+			If( needed.greaterThan( int( 0 ) ), () => {
+
+				// This cell's own slice of the pool: everything earlier cells
+				// asked for comes first. No cursor, no contention, and the
+				// same answer on every run -- when donors are scarce the lower
+				// cell index wins, deterministically, where before it was
+				// whichever thread arrived first.
+				const base = needScan.result( flat ).sub( needed );
+				const totalDonors = donorScan.result( maxParticles - 1 );
 				const claimed = int( 0 ).toVar();
 
 				Loop( minParticlesPerCell, () => {
@@ -707,9 +765,9 @@ export function createGridFlipSolver3( {
 
 					} );
 
-					const claimSlot = atomicAdd( donorPopCursor(), 1 );
+					const claimSlot = base.add( claimed );
 
-					If( claimSlot.lessThan( donorCount ), () => {
+					If( claimSlot.lessThan( totalDonors ), () => {
 
 						const donorIdx = donorPool( claimSlot );
 						const newPos = cellCenterOrigin.add( vec3( i, j, k ).mul( gridSpacingNode ) );
@@ -738,7 +796,11 @@ export function createGridFlipSolver3( {
 		// is one submission rather than seven.
 		const resampleBatch = tsl_array_n.createBatch( [
 			countPerCellKernel,
-			buildDonorPoolKernel,
+			markDonorsKernel,
+			...donorScan.kernels,
+			scatterDonorsKernel,
+			markNeedKernel,
+			...needScan.kernels,
 			claimDonorsKernel,
 
 			clearFluidMask,

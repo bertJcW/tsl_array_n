@@ -320,6 +320,8 @@ import { createGridBlockedBoundaryConditionSolver2 } from './grid_blocked_bounda
 import { createGridPressureSolver2 } from './grid_pressure_solver2.js';
 import { createSemiLagrangianAdvectionSolver2 } from './advection_solver2.js';
 import { createCopyKernel2, createExtrapolateToRegion2 } from './array_utils.js';
+import { createJitterRandom, DEFAULT_JITTER_SEED } from './jitter_random.js';
+import { createInclusivePrefixSum } from '../linalg/prefix_sum.js';
 import { bilinearCoordsAndWeights2, collocatedValueAtPosition2, faceCenteredValueAtPosition2 } from './grid_math.js';
 import { DEFAULT_ATOMIC_DOT_SCALE } from '../linalg/linalg.js';
 import { isNonFinite, isNonFinite2 } from '../float_guards.js';
@@ -397,6 +399,7 @@ export function computeTwoPhaseBoxSeed( {
 	gridSpacingX, gridSpacingY,
 	particlesPerCellAxis = 2,
 	jitter = 0.2,
+	randomSeed = DEFAULT_JITTER_SEED,
 	isLiquid = () => true,
 	// Continuous form of `isLiquid`, and the one to use for a dye scene: return
 	// a concentration in [0,1] rather than a boolean. Takes precedence when
@@ -414,6 +417,10 @@ export function computeTwoPhaseBoxSeed( {
 	const subSpacingX = gridSpacingX / particlesPerCellAxis;
 	const subSpacingY = gridSpacingY / particlesPerCellAxis;
 
+	// Deterministic by default -- see jitter_random.js for what this
+	// replaced and the measurements that found it.
+	const random = createJitterRandom( randomSeed );
+
 	const positionsList = [];
 	const phasesList = [];
 
@@ -425,8 +432,8 @@ export function computeTwoPhaseBoxSeed( {
 
 				for ( let subI = 0; subI < particlesPerCellAxis; subI ++ ) {
 
-					const jx = ( Math.random() * 2 - 1 ) * jitter * subSpacingX;
-					const jy = ( Math.random() * 2 - 1 ) * jitter * subSpacingY;
+					const jx = ( random() * 2 - 1 ) * jitter * subSpacingX;
+					const jy = ( random() * 2 - 1 ) * jitter * subSpacingY;
 
 					const x = minX + cellI * gridSpacingX + ( subI + 0.5 ) * subSpacingX + jx;
 					const y = minY + cellJ * gridSpacingY + ( subJ + 0.5 ) * subSpacingY + jy;
@@ -1186,22 +1193,40 @@ export function createGridTwoPhaseFlipSolver2( {
 		const poolHalfNode = int( poolHalf );
 		const poolTopNode = int( maxParticles - 1 );
 
-		// [ pushLiquid, pushGas, popLiquid, popGas ] -- one binding instead
-		// of four array0s. See bug 1 above.
-		const CURSOR_PUSH_LIQUID = 0;
-		const CURSOR_PUSH_GAS = 1;
-		const CURSOR_POP_LIQUID = 2;
-		const CURSOR_POP_GAS = 3;
-		const cursors = tsl_array_n.arrayN( 'int', 4 );
-		cursors.node.toAtomic();
+		// *** The four atomic cursors are gone, and with them the last reason
+		// this scene could not be run twice ***
+		//
+		// They handed out unique slots, which is what they were verified to do
+		// and not what a reproducible simulation needs: which particle won
+		// slot 0 depended on which thread reached the atomic first. Ranks from
+		// a prefix sum are defined by index instead, so the same input gives
+		// the same assignment on every run. See linalg/prefix_sum.js for the
+		// measurements, and grid_flip_solver2.js for the same change in the
+		// single-phase solver.
+		//
+		// Four scans rather than two, because this solver keeps two pools in
+		// one buffer: liquid donors from index 0 upward, gas donors from the
+		// top downward, with each phase's recipients drawing only from its own
+		// pool. The pool layout, the eligibility rules and what happens to a
+		// relocated particle are all unchanged.
+		const donorFlagLiquid = tsl_array_n.arrayN( 'int', maxParticles );
+		const donorFlagGas = tsl_array_n.arrayN( 'int', maxParticles );
+		const needLiquid = tsl_array_n.arrayN( 'int', cellCount );
+		const needGas = tsl_array_n.arrayN( 'int', cellCount );
 
-		const zeroCursors = new Int32Array( 4 );
+		const liquidScan = createInclusivePrefixSum( maxParticles, donorFlagLiquid );
+		const gasScan = createInclusivePrefixSum( maxParticles, donorFlagGas );
+		const needLiquidScan = createInclusivePrefixSum( cellCount, needLiquid );
+		const needGasScan = createInclusivePrefixSum( cellCount, needGas );
 
-		function resetResampleBuffers() {
+		// Nothing to reset: every one of the four inputs is written in full by
+		// its own kernel each frame. The cursors had to be zeroed, and that
+		// upload had to stay outside the batch because a pending upload is
+		// only guaranteed to land before a dispatch that begins a pass.
+		function resetResampleBuffers() {}
 
-			cursors.fromArray( zeroCursors );
-
-		}
+		// Cell arrays are 2-D, a prefix sum is 1-D.
+		const cellFlatIndex = ( i, j ) => i.add( j.mul( resolutionX ) );
 
 		const maxParticlesPerCellNode = int( maxParticlesPerCell );
 		const minParticlesPerCellNode = int( minParticlesPerCell );
@@ -1286,34 +1311,58 @@ export function createGridTwoPhaseFlipSolver2( {
 		// Over/under detection is on the TOTAL count -- that part is about
 		// particle sampling density, which both phases share a grid for --
 		// and only which end of the pool a donor lands in depends on phase.
-		const buildDonorPoolKernel = tsl_array_n.kernel( maxParticles, ( p ) => {
+		// Who volunteers, and for which pool. Reads only counts that integer
+		// atomics accumulated exactly, so it was already order-independent.
+		const markDonorsKernel = tsl_array_n.kernel( maxParticles, ( p ) => {
 
 			const { i, j } = cellIndexOf( positions( p ) );
 			const count = atomicLoad( totalCellCount( i, j ) );
+			const over = count.greaterThan( maxParticlesPerCellNode );
+			const liquid = isLiquidParticle( p );
 
-			If( count.greaterThan( maxParticlesPerCellNode ), () => {
+			donorFlagLiquid( p ).assign( over.and( liquid ).select( int( 1 ), int( 0 ) ) );
+			donorFlagGas( p ).assign( over.and( liquid.not() ).select( int( 1 ), int( 0 ) ) );
 
-				If( isLiquidParticle( p ), () => {
+		} );
 
-					const slot = atomicAdd( cursors( CURSOR_PUSH_LIQUID ), 1 );
-					If( slot.lessThan( poolHalfNode ), () => {
+		// Where each volunteer goes: its rank within its own phase's pool. The
+		// inclusive scan is 1-based, hence the subtraction, and the cap is the
+		// same one the cursor version applied to its returned slot.
+		const scatterDonorsKernel = tsl_array_n.kernel( maxParticles, ( p ) => {
 
-						donorPool( slot ).assign( p );
+			If( donorFlagLiquid( p ).equal( int( 1 ) ), () => {
 
-					} );
+				const rank = liquidScan.result( p ).sub( 1 );
+				If( rank.lessThan( poolHalfNode ), () => {
 
-				} ).Else( () => {
-
-					const slot = atomicAdd( cursors( CURSOR_PUSH_GAS ), 1 );
-					If( slot.lessThan( poolHalfNode ), () => {
-
-						donorPool( poolTopNode.sub( slot ) ).assign( p );
-
-					} );
+					donorPool( rank ).assign( p );
 
 				} );
 
 			} );
+
+			If( donorFlagGas( p ).equal( int( 1 ) ), () => {
+
+				const rank = gasScan.result( p ).sub( 1 );
+				If( rank.lessThan( poolHalfNode ), () => {
+
+					donorPool( poolTopNode.sub( rank ) ).assign( p );
+
+				} );
+
+			} );
+
+		} );
+
+		// Each phase's per-cell demand, split out of recipientNeed's signed
+		// encoding so the two scans have something to sum.
+		const splitNeedKernel = tsl_array_n.kernel( cellShape, ( i, j ) => {
+
+			const need = recipientNeed( i, j );
+			const flat = cellFlatIndex( i, j );
+
+			needLiquid( flat ).assign( need.greaterThan( int( 0 ) ).select( need, int( 0 ) ) );
+			needGas( flat ).assign( need.lessThan( int( 0 ) ).select( need.negate(), int( 0 ) ) );
 
 		} );
 
@@ -1351,14 +1400,13 @@ export function createGridTwoPhaseFlipSolver2( {
 		// loop body is factored into a JS helper and instantiated twice at
 		// graph-build time: same code, two clean branches, no select over any
 		// atomic anywhere.
-		function buildClaimLoop( pushCursor, popCursor, poolIndexOf, needed, claimed, i, j ) {
+		function buildClaimLoop( donorTotal, base, poolIndexOf, needed, claimed, i, j ) {
 
-			// A push cursor keeps counting past the cap it stopped writing at, so
-			// it is an over-count rather than a length -- clamped here (via
-			// select over plain ints, which is fine) so that `claimSlot <
-			// available` is an honest in-range test.
-			const pushed = atomicLoad( cursors( pushCursor ) );
-			const available = pushed.lessThan( poolHalfNode ).select( pushed.toInt(), poolHalfNode );
+			// The scan's last element counts every volunteer, including the ones
+			// past the cap that were never written -- an over-count rather than a
+			// length, exactly as the push cursor was -- so it is clamped here so
+			// that `claimSlot < available` is an honest in-range test.
+			const available = donorTotal.lessThan( poolHalfNode ).select( donorTotal.toInt(), poolHalfNode );
 
 			Loop( minParticlesPerCell, () => {
 
@@ -1368,7 +1416,12 @@ export function createGridTwoPhaseFlipSolver2( {
 
 				} );
 
-				const claimSlot = atomicAdd( cursors( popCursor ), 1 );
+				// This cell's own slice: everything earlier cells of the same
+				// phase asked for comes first. No cursor, no contention, and the
+				// same answer every run -- when donors are scarce the lower cell
+				// index wins, deterministically, rather than whichever thread
+				// arrived first.
+				const claimSlot = base.add( claimed );
 
 				If( claimSlot.lessThan( available ), () => {
 
@@ -1408,13 +1461,15 @@ export function createGridTwoPhaseFlipSolver2( {
 				const needed = wantsLiquid.select( need, need.negate() );
 				const claimed = int( 0 ).toVar();
 
+				const flat = cellFlatIndex( i, j );
+
 				If( wantsLiquid, () => {
 
-					buildClaimLoop( CURSOR_PUSH_LIQUID, CURSOR_POP_LIQUID, ( slot ) => slot, needed, claimed, i, j );
+					buildClaimLoop( liquidScan.result( maxParticles - 1 ), needLiquidScan.result( flat ).sub( needed ), ( slot ) => slot, needed, claimed, i, j );
 
 				} ).Else( () => {
 
-					buildClaimLoop( CURSOR_PUSH_GAS, CURSOR_POP_GAS, ( slot ) => poolTopNode.sub( slot ), needed, claimed, i, j );
+					buildClaimLoop( gasScan.result( maxParticles - 1 ), needGasScan.result( flat ).sub( needed ), ( slot ) => poolTopNode.sub( slot ), needed, claimed, i, j );
 
 				} );
 
@@ -1426,7 +1481,13 @@ export function createGridTwoPhaseFlipSolver2( {
 
 			resetResampleBuffers();
 			computeRecipientNeedKernel();
-			buildDonorPoolKernel();
+			markDonorsKernel();
+			for ( const pass of liquidScan.kernels ) pass();
+			for ( const pass of gasScan.kernels ) pass();
+			scatterDonorsKernel();
+			splitNeedKernel();
+			for ( const pass of needLiquidScan.kernels ) pass();
+			for ( const pass of needGasScan.kernels ) pass();
 			claimDonorsKernel();
 
 		};
