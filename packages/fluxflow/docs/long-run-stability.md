@@ -256,11 +256,10 @@ in 2026-09-15. The rest, named rather than left implicit:
   32. They verify against a known answer on load and finish -- layer 2 in
   `verification.md`, not layer 3. `31-conjugate-gradient-3d` and
   `32-grid-solver-3d` are the 3D linear algebra and grid solver checks.
-- **Scenes with no probe, which is a real gap**: `14-stable-fluids`,
-  `24-two-phase-bubble-rise`, `25-dye-injection`. The first is a fully
-  closed autonomous stability scene and the second is the two-phase solver
-  -- both are exactly the kind of thing a 12,000-step run is for, and
-  neither has ever had one. Adding a probe is about five lines.
+- **Scenes with no probe, which was a real gap**: `14-stable-fluids`,
+  `24-two-phase-bubble-rise`, `25-dye-injection`. All three have one now --
+  see [closing the probe gap](#closing-the-probe-gap-and-what-was-behind-it)
+  below, which is where the gap turned out to be hiding a broken scene.
 
 ## Method
 
@@ -576,6 +575,100 @@ also flagged, since that means the thing the expectation was about has changed.
 
 Extending the level coverage is no longer the next step on this thread; it was
 never missing. Making the V-cycle exact enough for a 1e-6 tolerance is.
+
+---
+
+# Closing the probe gap, and what was behind it
+
+Three scenes had no `window.__fluxflowProbe`, so nothing could step them
+faster than `requestAnimationFrame` and none of them had ever had a long run.
+That was listed as an open gap rather than hidden, and closing it cost about
+five lines each.
+
+It was worth it on the first run.
+
+| scene | verdict over 12,000 steps | converged | breakdowns | stopped early |
+| --- | --- | --- | --- | --- |
+| 14 stable fluids | **HEALTHY** (narrow) | 11,999 / 12,001 | 0 | 2 |
+| 24 two-phase bubble rise | **HEALTHY** (narrow) | — | 0 | 0 |
+| 25 dye injection | **BROKEN at frame 800** | 1,283 / 12,001 | 175 | 221 |
+
+`14-stable-fluids` is the reassuring one, and it is the scene that most needed
+asking: a fully closed autonomous domain, nothing driving it and nothing
+leaving, which is the configuration a slow leak would show up in. 11,999 of
+12,001 solves converged, and the two that did not are the subject of the next
+section.
+
+## The new stop reason was making a healthy scene read BROKEN
+
+Example 14's first 12,000-step run came back **BROKEN**, on two frames out of
+12,001 -- 4852 and 4863 -- both of them T3's new `residual-growing`. Every
+residual sample was inside the bar. A criterion added one commit earlier was
+failing a scene that is otherwise flawless.
+
+The criterion was wrong, and the reason is a distinction T3 introduced without
+revisiting what consumes it. The four guards that criterion was calibrated
+against -- `degenerate-pAp`, `pAp-growth`, `alpha-magnitude`,
+`degenerate-oldRZ` -- fire when the iteration is about to produce garbage, so
+any of them after establishment decides the verdict. `residual-growing` is the
+opposite kind of event: the solve noticed it was walking away from its best
+answer and stopped **before** any harm, returning a usable iterate. Whether
+that mattered is a question about what it returned, and the residual criterion
+measures exactly that, independently.
+
+So `solver_health.mjs` reports these separately and does not count them as
+breakdowns.
+
+**Relaxing a criterion is the easiest way to fool yourself, so the only
+evidence that justifies it is that the healthy scene passes and the broken one
+still fails.** These two supply exactly that pair, in one measurement:
+
+| | before | after |
+| --- | --- | --- |
+| 14 stable fluids | BROKEN, 2 breakdowns | **HEALTHY**, 2 early stops reported |
+| 25 dye injection | BROKEN, 396 breakdowns | **BROKEN**, 175 breakdowns + 221 early stops, on the residual criterion at 1.54e+1 |
+
+## 25-dye-injection is broken, and was broken before any of this
+
+The projection leaves **15.4 times** the divergence it was asked to remove --
+against a bar of 1e-2, so three orders of magnitude past it. The shape of the
+failure is intermittent rather than terminal:
+
+```
+frame    fluid speed     max div     residual/|b|
+  500          2.38      3.76e-6         3.96e-6
+  600          3.90      4.32e-6         8.18e-6
+  700          1.51      8.11e-6         3.33e-5
+  800          0.86      2.24e+0         1.54e+1
+  900          1.18      2.64e-2         2.27e-2
+```
+
+Median residual across the run is 3.33e-5, which is fine; the 90th percentile
+is 2.27e-2 and the worst is 1.54e+1. So most frames are healthy and a few come
+apart completely -- and at length it is worse than the first thousand frames
+suggested: only **1,283 of 12,001** solves converge.
+
+The stop reasons say what is happening: over 12,000 steps, **`pAp-growth`
+x175** and `residual-growing` x221. The first is a guard that predates all of this work,
+and `linalg.js` documents exactly the failure it catches -- several
+individually-reasonable betas compounding `p` geometrically within one solve,
+with no denominator ever looking degenerate. That guard firing seventeen times
+in a thousand frames is not a threshold being grazed. Nothing was rejected by
+the pressure circuit breaker, so the pressure stayed inside its plausible
+bounds the whole time; what was left behind was the divergence.
+
+Two things make this tractable rather than just alarming:
+
+- **It is reproducible.** Two 1,000-step runs are identical line for line, so
+  it can be bisected. That is a direct return on T2 -- before the seeding was
+  made deterministic, a scene that failed on 4% of frames would have failed on
+  a different 4% every run.
+- **It is intermittent in a specific way.** The frames that fail are few and
+  the median is healthy, which points at a condition the scene reaches
+  occasionally rather than a systematically wrong operator.
+
+Recorded, not fixed. It is its own investigation and it does not belong folded
+into the one that found it.
 
 ---
 

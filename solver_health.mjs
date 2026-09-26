@@ -126,7 +126,7 @@ page.on( 'console', ( m ) => { const t = m.text(); if ( /error|Error/.test( t ) 
 await page.addInitScript( ( [ frames, sample ] ) => {
 
 	let stored, counter = 0;
-	window.__health = { samples: [], counters: { rejected: 0, breakdowns: 0, converged: 0, frames: 0, breakdownFrames: [], stopReasons: {}, zeroRhsFrames: 0, stopResiduals: [], stopsOnSolved: 0, atRestFrames: 0 }, geometry: null };
+	window.__health = { samples: [], counters: { rejected: 0, breakdowns: 0, converged: 0, frames: 0, breakdownFrames: [], stopReasons: {}, zeroRhsFrames: 0, stopResiduals: [], stopsOnSolved: 0, atRestFrames: 0, stoppedGrowing: 0 }, geometry: null };
 	window.__done = false;
 
 	Object.defineProperty( window, '__fluxflowProbe', {
@@ -191,7 +191,35 @@ await page.addInitScript( ( [ frames, sample ] ) => {
 
 				if ( stoppedOnASolvedSystem ) c.stopsOnSolved ++;
 
-				if ( d.stoppedBy && d.stoppedBy !== 'none' && ! stoppedOnASolvedSystem ) {
+				// *** 'residual-growing' is not a breakdown, and lumping it in with
+				// the corruption guards was a mistake this probe made on the day
+				// that reason was added ***
+				//
+				// The four guards this criterion was calibrated against --
+				// degenerate-pAp, pAp-growth, alpha-magnitude, degenerate-oldRZ --
+				// fire when the iteration is about to produce garbage. A scene
+				// reaching them after it has established itself is in trouble, which
+				// is why any of them decides the verdict.
+				//
+				// 'residual-growing' is the opposite kind of event: the solve noticed
+				// it was walking away from its own best answer and stopped BEFORE any
+				// harm, returning a usable iterate. Whether that mattered is a
+				// question about the answer it returned, and the residual criterion
+				// already measures exactly that, independently.
+				//
+				// Measured, which is what settles it rather than the argument above:
+				// examples/14-stable-fluids/ over 12,001 steps converges on 11,999 of
+				// them and hits this reason twice, at frames 4852 and 4863, with every
+				// residual sample inside the bar -- counted as breakdowns that made
+				// the scene BROKEN on two frames in twelve thousand. Meanwhile
+				// examples/25-dye-injection/ is BROKEN either way, on the residual
+				// criterion, at 1.54e+1 against a bar of 1e-2. So this change lets a
+				// healthy scene pass without letting a broken one through, which is
+				// the only form of evidence that justifies relaxing a criterion.
+				const stoppedWhileStillSafe = d.stoppedBy === 'residual-growing';
+				if ( stoppedWhileStillSafe ) c.stoppedGrowing ++;
+
+				if ( d.stoppedBy && d.stoppedBy !== 'none' && ! stoppedOnASolvedSystem && ! stoppedWhileStillSafe ) {
 
 					c.breakdowns ++; c.breakdownFrames.push( n );
 					// WHY, not just how often. A guard that fires because the
@@ -615,6 +643,7 @@ if ( ! first.hasWeights ) console.log( 'no collider face weights from this solve
 if ( ! first.driven ) console.log( 'no inlet: nothing in this formulation forces a vent-only domain to balance, so the verdict here rests on finiteness alone and everything else is reported' );
 console.log( `solver counters: ${ counters.converged } converged, ${ counters.rejected } rejected, ${ counters.breakdowns } CG breakdowns` +
 	( counters.breakdownFrames.length ? ` (first at frame ${ counters.breakdownFrames[ 0 ] }, last ${ counters.breakdownFrames[ counters.breakdownFrames.length - 1 ] })` : '' ) );
+if ( counters.stoppedGrowing ) console.log( `   ${ counters.stoppedGrowing } solves stopped early because the residual was growing away from their best -- reported, not counted as breakdowns, because the residual criterion judges what they returned` );
 if ( counters.atRestFrames ) console.log( `   ${ counters.atRestFrames } frames handed the solve a system already at a residual of exactly 0 -- the scene was at rest for those` );
 if ( counters.stopsOnSolved ) console.log( `   ${ counters.stopsOnSolved } guard stops on a system already solved to a residual of exactly 0 -- not counted as breakdowns, see the note in this file` );
 if ( counters.breakdowns ) console.log( `   stopped by: ${ Object.entries( counters.stopReasons ).map( ( [ k, v ] ) => `${ k } x${ v }` ).join( ', ' ) }` +

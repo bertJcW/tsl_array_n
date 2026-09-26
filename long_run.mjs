@@ -35,6 +35,7 @@ const OUT = 'long-run-logs';
 // Everything with a probe, in the order the examples are numbered. The note
 // is what this scene is here to stress, so a failure has a subject.
 const SCENES = [
+	[ '14-stable-fluids', 'a fully closed autonomous domain -- nothing drives it and nothing leaves' ],
 	[ '15-flow-past-cylinder', 'inflow/outflow with a collider' ],
 	[ '16-karman-vortex-street', 'unsteady wake, the 2D outflow rewrite' ],
 	[ '17-smoke-fire', 'buoyancy, no inlet, top vent' ],
@@ -44,6 +45,8 @@ const SCENES = [
 	[ '21-flip-irregular-container', 'free surface against an SDF container' ],
 	[ '22-flip-multiple-colliders', 'several colliders at once' ],
 	[ '23-flip-moving-collider', 'a collider that moves every step' ],
+	[ '24-two-phase-bubble-rise', 'the two-phase solver: air simulated rather than a void' ],
+	[ '25-dye-injection', 'the two-phase solver in miscible mode' ],
 	[ '26-dye-free-surface', 'dye advected on a free surface' ],
 	[ '28-drop-into-pool', 'the iteration-cap case of the 2026-09-15 run' ],
 	[ '29-static-droplet', 'surface tension against Young-Laplace' ],
@@ -56,11 +59,15 @@ const SCENES = [
 // self-checking page has no long run to do, which is a different statement
 // from "not tested".
 const NOT_DRIVEN = [
-	[ '00-13, 27, 30, 31, 32', 'self-checking pages: they verify against a known answer on load and finish. Layer 2, not layer 3' ],
-	[ '14-stable-fluids', 'no probe. A fully closed autonomous stability scene, and a real gap -- it is exactly the kind of scene a long run is for' ],
-	[ '24-two-phase-bubble-rise', 'no probe. A real gap: the two-phase solver has never had a 12,000-step run' ],
-	[ '25-dye-injection', 'no probe. A real gap' ]
+	[ '00-13, 27, 30, 31, 32', 'self-checking pages: they verify against a known answer on load and finish. Layer 2, not layer 3, and run_page.mjs drives them' ]
 ];
+
+// Every scene that has a solver to drive now has a probe. The three that did
+// not -- 14, 24 and 25 -- were listed here as open gaps, and closing them was
+// worth it immediately: 25-dye-injection turns out to be BROKEN, leaving 15x
+// the divergence the projection was asked to remove, which nothing could see
+// because nothing could drive it.
+
 
 mkdirSync( OUT, { recursive: true } );
 

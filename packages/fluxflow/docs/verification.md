@@ -124,9 +124,15 @@ node solver_health.mjs <url> [frames] [sampleEvery]
 node long_run.mjs                    # every drivable scene, 12,000 steps each
 ```
 
-`long_run.mjs` is the whole-suite form: it runs each scene through the probe
-in turn, writes a per-scene log, and prints one table.
+`long_run.mjs` is the whole-suite form: it runs each scene through the probe in
+turn, writes a per-scene log, and prints one table.
 `long-run-stability.md` holds the most recent results.
+
+Every scene with a solver to drive now carries a probe. The last three to get
+one had been listed as open coverage gaps, and the first run of them found
+`examples/25-dye-injection/` leaving 15x the divergence its projection was
+asked to remove -- a scene that had looked fine for as long as nothing could
+drive it. A gap in coverage is not a neutral state.
 
 It replaced a detector that watched one scalar -- maximum velocity against a
 fixed 90 -- which cannot decide the question from either side: the solver's
@@ -140,7 +146,7 @@ admitted, and that 17.5 was reported as stability.
 | --- | --- |
 | nothing non-finite | always |
 | the projection left under 1e-2 of the divergence it was asked to remove | always -- it needs no geometry, so free surfaces and vent-only domains are covered by it |
-| no CG breakdowns after the scene established itself, not counting stops that left a residual of exactly 0 | always |
+| no CG breakdowns after the scene established itself -- the four corruption guards only, not counting stops that left a residual of exactly 0 nor stops on a growing residual, both of which are reported instead | always |
 | weighted flux equal across interior cross-sections, within 5% | the solver offers collider face weights, so solid faces can be excluded (the 2D solver has none, and reports instead of judging) |
 | net flux across the **solved region's** boundary in balance, on a trailing 20-sample average | the scene has an inlet |
 | fluid speed within 6x the inflow's own | the scene has an inlet |

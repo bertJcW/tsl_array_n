@@ -375,6 +375,16 @@ try {
 
 	}
 
+	// Measurement handle only -- nothing here changes what the scene does.
+	// These are the names solver_health.mjs reads: the object whose
+	// onAdvanceTimeStep is one step, the velocity field it projects, and the
+	// renderer, without which the probe refuses to believe any number from
+	// this page. Until this existed the scene could not be driven faster than
+	// requestAnimationFrame allows, so it had never had a 12,000-step run or a
+	// determinism check -- a gap that was open rather than hidden, and listed
+	// as such in docs/long-run-stability.md.
+	window.__fluxflowProbe = { solver, velocityGrid, renderer };
+
 	requestAnimationFrame( animate );
 
 } catch ( error ) {
