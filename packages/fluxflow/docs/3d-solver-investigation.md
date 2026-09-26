@@ -7,6 +7,12 @@ that turned out to be wrong is retracted in place rather than quietly
 dropped. Section 6 is nothing but retractions, and three of them are of
 statements made during this same investigation.
 
+The tools this investigation had to build to answer its own questions -- the
+verdict probe, the offline fixtures, the in-page visitation checks -- outlive
+it, and are described on their own terms in
+[verification.md](verification.md). This file is the history; that one is the
+method. Anyone about to claim a 3D scene works should read it first.
+
 ## 0. Summary
 
 | | before | after |

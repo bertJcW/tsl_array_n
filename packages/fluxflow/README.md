@@ -44,6 +44,18 @@ lives in `docs/`.
   > submissions -- the command buffers, not the kernels -- that carry about a
   > third of the frame. The profiler's own figure of 502 was an undercount,
   > for the reason given in the profiling section above.
+- **[`docs/verification.md`](docs/verification.md)** -- how a solver is
+  decided to work: five layers of check, what each one can and cannot catch,
+  and the three rules without which a layer means nothing (every criterion
+  proven to fire on a known-broken build, every threshold calibrated on both
+  sides, and a criterion that does not apply saying so instead of passing).
+  Read with `project-history.md`'s Testing section, which it supersedes.
+- [`docs/3d-solver-investigation.md`](docs/3d-solver-investigation.md) --
+  why `examples/35-karman-vortex-street-3d/` blew up, the register of every
+  root cause found, and the retractions. The decisive one: `createDotReducer`
+  built two nested loops that both named their index `i`, so in 3D -- and
+  only in 3D -- every dot product summed a diagonal twenty-four times over.
+  Everything above it converged on the wrong scalars.
 - [`docs/two-phase-bubbles-research.md`](docs/two-phase-bubbles-research.md)
   -- the earlier bubble research, archived.
 

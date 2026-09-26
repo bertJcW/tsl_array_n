@@ -653,7 +653,14 @@ numerically identical, neutral in time, and a prerequisite for that.
 
 Three layers, because no one of them is sufficient here.
 
-### 1. Structural tests -- `npm test`, 29 files, 347 tests
+This section describes the 2D-era method. It is still accurate as far as it
+goes, and it is not sufficient: the 3D work found a defect that every layer
+below reported as healthy. **[verification.md](verification.md) is the
+current method** -- the same three layers plus offline fixtures and a
+conservation-based verdict probe, and the rules that make a layer mean
+something. Read that one before trusting a green run.
+
+### 1. Structural tests -- `npm test`, 29 files, 373 tests
 
 Vitest under Node, no GPU. They cover construction: allocating fields,
 building kernels, shape and option validation, and pure functions
