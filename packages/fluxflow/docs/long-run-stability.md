@@ -774,9 +774,93 @@ identical. If the floor travels with `b`, the next question is which component
 of it -- and `export_system.mjs` plus `sandbox/stalled-system/` are the pattern
 for that, built for the 3D case and needing a 2D counterpart.
 
-Not done. The scenes are acceptable as they run, and this is recorded so that
-whoever picks it up starts from four eliminated candidates rather than from
-zero.
+## Found: it is the float32 recomputation of the residual
+
+The experiment above was the right one and it answered something better than it
+asked. `export_system2.mjs` wrote example 17's frame 400 to disk -- b, the
+Dirichlet mask, the pressure the frame arrived with -- and `cpu_reference.mjs`
+solved it in Node with no GPU in it at all.
+
+Two cross-checks first, because a reimplementation that merely looks right
+measures the difference between two stencils rather than between two machines:
+the CPU operator is symmetric to 6.6e-18, and the norm of `b - A@pressure`
+computed on the CPU is **4.1193e-4 against the GPU's reported 4.1193e-4, a
+ratio of 1.000**. Same operator, and the GPU's residual reporting is honest.
+
+Then, plain unpreconditioned CG, warm-started from the same pressure the live
+solver starts from:
+
+| iteration | CPU | GPU |
+| --- | --- | --- |
+| 60 | 5.55e-2 | 5.55e-2 |
+| 300 | 3.41e-4 | 3.41e-4 |
+| 476 | **9.69e-7 - converged** | - |
+| 3000 | - | 6.96e-6, not converged |
+
+**Identical to three digits for 300 iterations, and then the CPU completes CG's
+superlinear endgame and the GPU does not.** So the difference is something that
+only bites once the residual is small.
+
+Four candidates were eliminated one arm at a time, all reaching 1e-6 in 476 to
+493 iterations: double arithmetic, float32 arithmetic, float32 reductions
+partitioned across 256 lanes (the GPU's own shape), and a serial float32 sum as
+the worst case. The dot product's precision is not the floor, and neither is
+b's dynamic range, which is 1.5e7 - magnitudes from 4.66e-7 to 7.01.
+
+The one thing none of those arms modelled is what the live solver does every
+single iteration: **rebuild `r` as `b - A@x` from scratch.**
+
+| arm | result |
+| --- | --- |
+| double, `r = b - Ax` every iteration | reaches 1e-6 in 476 |
+| **float32, `r = b - Ax` every iteration** | **floors at 5.84e-6, flat from 1,000 through 20,000 iterations** |
+| GPU, unpreconditioned | 6.96e-6 at 3,000 |
+
+5.84e-6 against the GPU's 6.96e-6. The CPU, in single precision, with the live
+solver's exact residual policy, reproduces the floor.
+
+**`b - A@x` in float32 is a cancellation once the residual is far below the norm
+of `A@x`:** the two operands agree to within the residual, so their difference
+keeps only the digits they disagree in. Below about 6e-6 relative on this system
+the recomputed residual is rounding noise, and CG cannot descend on noise. A
+tolerance of 1e-6 is underneath it. The incremental update `r -= alpha*Ap` never
+subtracts two nearly-equal large numbers and so has no such floor - which is why
+every arm that used it converged.
+
+### The irony, and it is worth keeping
+
+`RESIDUAL_RECOMPUTE_INTERVAL` is 1 deliberately. It was changed from 50 to 1 on
+2026-09-16 and `linalg.js` records why: with the residual always true, the drift
+that once made this library report convergence it had not achieved cannot
+accumulate at all. **The fix for that bug is what created this floor.** An
+honest residual, but only to the precision of the arithmetic that computes it.
+
+### The fix is available and it is a trade, not a win
+
+`verifyConvergence` already does the careful half: when the tracked residual
+first claims success it recomputes the true one once and re-tests, so a drifted
+claim cannot get through. With that in place, `recomputeInterval` back at ~50 -
+jet's own number, for exactly this reason - gives the iteration a residual with
+no cancellation floor, bounds the drift, and still verifies the claim before
+returning it.
+
+It is not free. The same file measures interval 1 as **1.15x to 1.43x faster**
+(example 15: 25.0 iterations down to 16.8), because a true residual means
+`verifyConvergence` never spends a second stop-test cycle. So the choice is
+real: interval 1 is faster for scenes whose tolerance sits above the
+cancellation floor, and unreachable for scenes whose tolerance sits below it.
+
+A third option is better than either and is what the T3 thread has been arguing
+for throughout: **the floor is computable.** It is about `eps * |A@x| * sqrt(N)`,
+which is 6e-8 * 26.9 * 110 - 1.8e-4 absolute, 6.6e-6 relative, against a
+measured 5.84e-6. A solver handed a tolerance beneath what its own arithmetic
+can verify should say so on the first iteration, rather than spending its whole
+budget and reporting `converged: false` with no reason. That is the same shape as
+every other finding in this document, and it is the one worth building.
+
+Not implemented. Changing the recompute policy alters every scene's iteration
+count and its speed, and which of the three answers is right is a decision about
+the library rather than a defect to be fixed quietly.
 
 ---
 

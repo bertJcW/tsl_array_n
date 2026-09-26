@@ -233,6 +233,7 @@ Reached for after a verdict, not before one. Each answers one question.
 | `diag_weights.mjs`, `diag_face.mjs` | what does each half of the collider think a face is? (CPU, no browser) |
 | `karman_shedding.mjs` | is the wake shedding -- period, Strouhal number, and which way the pattern travels |
 | `karman_verify.mjs` | a ten-minute run with a flux balance |
+| `export_system2.mjs` + `cpu_reference.mjs` | take a 2D scene's pressure system off the GPU entirely and solve it in Node, in double and in three flavours of single precision. It proves its own operator first - symmetry, and the norm of `b - A@pressure` against the number the GPU reported - because a reimplementation that merely looks right measures itself rather than the machine |
 | `run_page.mjs` | load a page and print what it says, waiting for it to finish rather than for a clock -- and saying PARTIAL rather than printing a truncated run as if it were whole |
 
 `diag_history.mjs` exists because polling a scene from outside cannot see

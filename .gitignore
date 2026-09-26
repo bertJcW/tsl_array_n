@@ -6,3 +6,7 @@ dist
 # Per-scene logs from long_run.mjs. Regenerable, large, and the numbers that
 # matter are quoted in docs/long-run-stability.md.
 long-run-logs/
+
+# Exported pressure systems from export_system2.mjs. Regenerable in a minute,
+# and every number taken from them is quoted in docs/long-run-stability.md.
+system-2d/
