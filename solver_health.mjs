@@ -123,7 +123,13 @@ const page = await browser.newPage();
 page.on( 'pageerror', ( e ) => console.log( '[pageerror]', e.message ) );
 page.on( 'console', ( m ) => { const t = m.text(); if ( /error|Error/.test( t ) ) console.log( '[console]', t.slice( 0, 300 ) ); } );
 
-await page.addInitScript( ( [ frames, sample ] ) => {
+// SOLVER_HEALTH_TOLERANCE overrides the scene's own pressure tolerance for the
+// run. For answering "would this scene be stable at a looser tolerance" without
+// editing the scene, which is a question about the solver rather than about the
+// scene's source.
+const TOLERANCE = process.env.SOLVER_HEALTH_TOLERANCE ? Number( process.env.SOLVER_HEALTH_TOLERANCE ) : null;
+
+await page.addInitScript( ( [ frames, sample, tolerance ] ) => {
 
 	let stored, counter = 0;
 	window.__health = { samples: [], counters: { rejected: 0, breakdowns: 0, converged: 0, frames: 0, breakdownFrames: [], stopReasons: {}, zeroRhsFrames: 0, stopResiduals: [], stopsOnSolved: 0, atRestFrames: 0, stoppedGrowing: 0 }, geometry: null };
@@ -140,6 +146,8 @@ await page.addInitScript( ( [ frames, sample ] ) => {
 			// grid solver rather than being one -- so the pressure solver
 			// and the collider weights are looked for one level down too.
 			const inner = solver.pressureSolver ? solver : ( solver.solver ?? solver );
+			if ( tolerance !== null && inner.pressureSolver ) inner.pressureSolver.settings.tolerance = tolerance;
+
 			const original = solver.onAdvanceTimeStep;
 
 			solver.onAdvanceTimeStep = async ( dt ) => {
@@ -505,13 +513,14 @@ await page.addInitScript( ( [ frames, sample ] ) => {
 		}
 	} );
 
-}, [ FRAMES, SAMPLE ] );
+}, [ FRAMES, SAMPLE, TOLERANCE ] );
 
 await page.goto( URL, { waitUntil: 'load' } );
 await page.waitForFunction( () => window.__fluxflowProbe !== undefined, undefined, { timeout: 120000 } );
 
 const backend = await page.evaluate( () => window.__fluxflowProbe?.renderer?.backend?.constructor?.name ?? 'unknown' );
 console.log( `backend: ${ backend }` );
+if ( TOLERANCE !== null ) console.log( `pressure tolerance overridden to ${ TOLERANCE }` );
 if ( backend !== 'WebGPUBackend' ) { console.log( 'FATAL: not WebGPU, nothing below would be evidence' ); await browser.close(); process.exit( 1 ); }
 
 await page.waitForFunction( () => window.__done === true, undefined, { timeout: TIMEOUT } ).catch( () => console.log( '(ran out of time before the frame count)' ) );

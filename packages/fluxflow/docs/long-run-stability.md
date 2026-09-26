@@ -903,6 +903,33 @@ float32's floor for recomputing `b - A@x`, and it applies to every scene whose
 Two scenes, 16 and 35, carry a hand-set 1e-5 for this reason. The others do not,
 and nothing tells them to.
 
+### What 1e-5 actually does to the three that ask for 1e-6
+
+Measured rather than assumed, with `SOLVER_HEALTH_TOLERANCE` overriding the
+scene's own tolerance so the source did not have to change. 12,000 steps each:
+
+| scene | converged at 1e-6 | converged at 1e-5 | rejected | breakdowns | verdict at 1e-5 |
+| --- | --- | --- | --- | --- | --- |
+| 17 smoke and fire | 0 / 12,001 | 4,667 / 12,001 | 0 | 0 | HEALTHY |
+| 18 explosion | 0 / 12,001 | **11,781 / 12,001** | 0 | 0 | HEALTHY |
+| 19 fuel fire | 0 / 12,001 | 388 / 12,001 | 0 | 0 | HEALTHY |
+
+**Nothing destabilises.** Zero circuit-breaker rejections and zero CG breakdowns
+across all three, with three early stops on 17 and one on 18 -- the
+`residual-growing` kind, reported and not judged. So a tolerance above the noise
+floor is strictly better here than one below it: the solve can finish, and
+nothing about the scene gets worse for letting it.
+
+What 1e-5 does *not* do is make these scenes converge on every frame. 18 is
+essentially there at 98%, 17 reaches 39%, and 19 only 3%. The noise floor
+explains why 1e-6 is impossible; it does not explain that spread, which is the
+three scenes' pressure problems differing in difficulty -- 19 by a lot.
+
+For contrast, examples 16 and 35 -- the two that have carried 1e-5 all along --
+converge on 12,000 of 12,001. So 1e-5 is reachable on nearly every frame of a
+well-conditioned scene, and 19's 3% is 19's own problem rather than the
+tolerance's.
+
 Not implemented. Changing the recompute policy alters every scene's iteration
 count and its speed, and which of the three answers is right is a decision about
 the library rather than a defect to be fixed quietly.
