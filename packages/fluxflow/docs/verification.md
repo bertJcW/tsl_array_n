@@ -17,12 +17,21 @@ are worth nothing without.
 
 ## The three rules
 
-**0. A check that compares two runs must be able to tell a pair of failures
-from a pair of successes.** Added last, after the determinism sweep in
-`long-run-stability.md` reported nine scenes reproducible including one that
-had never started: it had no probe, the probe timed out twice, and two
-identically-failed logs diff clean. Any comparison-based check needs to
-confirm both sides produced something before it compares them.
+**0. A check that cannot tell "finished and fine" from "did not finish" is
+not a check.** Learned three times, each time from a harness rather than from
+the code under test. A 14,643-frame stability claim came from reading a log
+from its tail, where the blow-up in the first 600 frames had scrolled past. A
+determinism sweep reported nine scenes reproducible including one that had
+never started, because it had no probe, timed out twice, and two
+identically-failed logs diff clean. And `run_page.mjs` waited a fixed fifteen
+seconds for a page that takes thirty-four, which cut a symmetry sweep off at
+three of its sixteen rows -- a truncated list of ticks that reads exactly like
+a complete one, and that a written conclusion was then reasoned from.
+
+So: a comparison-based check confirms both sides produced something before
+comparing them; a page-driving check waits for the page to stop rather than for
+a clock, and says PARTIAL when it gives up; and a self-checking page prints its
+own summary last, so that a missing summary is itself the signal.
 
 **1. A criterion nobody has seen fail is not a criterion.** Every check
 described here has been run against a build with a known defect deliberately
@@ -90,7 +99,7 @@ a tick or a cross per claim. The pre-existing ones are tabulated in
 | --- | --- |
 | `examples/31-conjugate-gradient-3d/` | MGPCG against an analytic 3D Poisson solution; restriction and prolongation are an adjoint pair; **the dot reducer visits every cell exactly once** |
 | `examples/32-grid-solver-3d/` | `createGridSolver3` leaves the field divergence-free; `createGridFlipSolver3`'s particles stay finite and in bounds |
-| `sandbox/poisson-3d-dirichlet/` | operator symmetry with and without a Dirichlet mask; V-cycle symmetry and positive-definiteness; convergence on a system built as `A @ xStar`, so no scene's right-hand side can be blamed for a failure |
+| `sandbox/poisson-3d-dirichlet/` | operator symmetry with and without a Dirichlet mask; V-cycle symmetry and sign-definiteness at 1, 2, 3 and 4 levels; convergence on a system built as `A @ xStar`, so no scene's right-hand side can be blamed for a failure. Its four permanent failures are marked as expected, with the reason inline, so the summary is a number that reads zero when nothing is wrong |
 | `sandbox/outflow-gradient/` | which way an outflow SDF's gradient actually points, measured, in 2D and in 3D |
 | `sandbox/prefix-sum/` | the GPU prefix sum the resamplers rank donors with: correct against a JS reference on the lengths that break scans, bit-identical across eight runs, and ranks that increase in the index rather than merely being distinct |
 
@@ -217,7 +226,7 @@ Reached for after a verdict, not before one. Each answers one question.
 | `diag_weights.mjs`, `diag_face.mjs` | what does each half of the collider think a face is? (CPU, no browser) |
 | `karman_shedding.mjs` | is the wake shedding -- period, Strouhal number, and which way the pattern travels |
 | `karman_verify.mjs` | a ten-minute run with a flux balance |
-| `run_page.mjs` | load a page and print what it says |
+| `run_page.mjs` | load a page and print what it says, waiting for it to finish rather than for a clock -- and saying PARTIAL rather than printing a truncated run as if it were whole |
 
 `diag_history.mjs` exists because polling a scene from outside cannot see
 what it does. With nothing reading back from it, a 48x24x24 scene runs at

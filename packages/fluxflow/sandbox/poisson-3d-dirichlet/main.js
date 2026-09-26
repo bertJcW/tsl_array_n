@@ -15,10 +15,63 @@ import { linalg } from 'fluxflow';
 
 const pre = document.querySelector( '#status pre' );
 const lines = [];
+let passed = 0, expected = 0, unexpected = 0;
 
-function log( label, ok, detail ) {
+// *** Expected failures are marked as such, because a page with permanent red
+// on it teaches you to stop reading the red ***
+//
+// Four of the checks below have always failed and always should: a 1-level
+// V-cycle is plain relaxation and is not a symmetric operator, and
+// unpreconditioned CG does not solve a 48x24x24 Dirichlet Poisson problem in
+// 300 iterations. Both are the point of the surrounding comparison rather than
+// news. Reported as plain crosses among the ticks, they made the page's own
+// summary read "4 failed" on every run, which is indistinguishable from a
+// regression and was in fact read past for weeks.
+//
+// So a check that is expected to fail says the reason inline, counts
+// separately, and turns the summary into a number that is 0 when nothing is
+// wrong. `why` is that reason; passing it and then PASSING is itself flagged,
+// since an expected failure that starts succeeding means the thing the
+// expectation was about has changed.
+function log( label, ok, detail, why ) {
 
-	lines.push( `<span class="${ ok ? 'ok' : 'err' }">${ ok ? '✓' : '✗' } ${ label }${ detail ? ' — ' + detail : '' }</span>` );
+	let mark, cls;
+
+	if ( why === undefined ) {
+
+		mark = ok ? '✓' : '✗';
+		cls = ok ? 'ok' : 'err';
+		ok ? passed ++ : unexpected ++;
+
+	} else if ( ! ok ) {
+
+		mark = '~';
+		cls = 'note';
+		expected ++;
+		detail = `${ detail } — EXPECTED: ${ why }`;
+
+	} else {
+
+		mark = '!';
+		cls = 'err';
+		unexpected ++;
+		detail = `${ detail } — this was expected to FAIL (${ why }) and did not; the expectation is stale`;
+
+	}
+
+	lines.push( `<span class="${ cls }">${ mark } ${ label }${ detail ? ' — ' + detail : '' }</span>` );
+	pre.innerHTML = lines.join( '\n' );
+
+}
+
+// Called at the end so a truncated run cannot look complete: no summary line
+// means the page did not finish. run_page.mjs reports that too, from the
+// outside, after a fixed 15-second wait once cut this page's own output off at
+// three of its sixteen V-cycle rows.
+function summarise() {
+
+	lines.push( '' );
+	lines.push( `<span class="${ unexpected === 0 ? 'ok' : 'err' }">${ passed } passed, ${ expected } expected failures, ${ unexpected } unexpected</span>` );
 	pre.innerHTML = lines.join( '\n' );
 
 }
@@ -160,7 +213,13 @@ try {
 				log(
 					`${ label }: PCG(${ name }) mask ${ masked }`,
 					ok === true && maxErr < 1e-2,
-					`converged=${ ok } iters=${ st.iterations } res/|b|=${ ( res / bNorm ).toExponential( 2 ) } stoppedBy=${ st.stoppedBy } max|x-xStar|=${ maxErr.toExponential( 2 ) }`
+					`converged=${ ok } iters=${ st.iterations } res/|b|=${ ( res / bNorm ).toExponential( 2 ) } stoppedBy=${ st.stoppedBy } max|x-xStar|=${ maxErr.toExponential( 2 ) }`,
+					// Unpreconditioned CG on the 3D problem is the control arm,
+					// not a candidate: it is here to show what the V-cycle is
+					// worth. 300 iterations is deliberately not enough for it,
+					// and the 2D control at a quarter the cells does clear it,
+					// which is the comparison.
+					( name === 'none' && shape.length === 3 ) ? 'unpreconditioned CG is the control arm; 300 iterations is not meant to be enough for it in 3D' : undefined
 				);
 
 			}
@@ -285,7 +344,15 @@ try {
 				log(
 					`V-cycle symmetric, ${ levels } level(s), ${ label }`,
 					rel < 1e-3,
-					`(Mx,y)=${ left.toFixed( 3 ) } (x,My)=${ right.toFixed( 3 ) } rel diff ${ rel.toExponential( 2 ) }`
+					`(Mx,y)=${ left.toFixed( 3 ) } (x,My)=${ right.toFixed( 3 ) } rel diff ${ rel.toExponential( 2 ) }`,
+					// A 1-level "V-cycle" is plain relaxation with no coarse
+					// grid, and red-black relaxation is not a symmetric
+					// operator. It fails here by construction, and it is kept
+					// as the row that shows what the coarse levels buy:
+					// 3.8e-3 at 1 level against 7e-6 to 1.6e-4 at 2, 3 and 4.
+					// numberOfLevels: 1 is separately documented as an
+					// inadequate preconditioner at these grid sizes.
+					levels === 1 ? 'a 1-level V-cycle is plain red-black relaxation, which is not symmetric; kept as the contrast that shows what coarse levels buy' : undefined
 				);
 
 				// Symmetric is half of what PCG needs. (Mx, x) must also keep
@@ -326,11 +393,12 @@ try {
 
 	}
 
-	log( 'done', true );
+	summarise();
 
 } catch ( error ) {
 
 	log( 'failed', false, error.message );
+	summarise();
 	console.error( error );
 
 }

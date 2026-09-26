@@ -511,10 +511,71 @@ so the choice is informed: either accept a tolerance this V-cycle can deliver,
 or make the V-cycle exact enough to deliver 1e-6. The second is the real
 answer and it is a preconditioner project, not a constant.
 
-`sandbox/poisson-3d-dirichlet/` is the place that should have caught this and
-did not: it checks V-cycle symmetry at 1 and 2 levels, and every scene in this
-package that uses the V-cycle in earnest runs 3 or 4. Extending it is the
-cheapest next step on this thread.
+## A retraction, and the tool that caused it
+
+The paragraph that stood here said `sandbox/poisson-3d-dirichlet/` should have
+caught this and did not, because it only checked V-cycle symmetry at 1 and 2
+levels while every scene that uses the V-cycle in earnest runs 3 or 4.
+
+**That was false. The sandbox has always looped over 1, 2, 3 and 4 levels.**
+What was wrong was `run_page.mjs`, which waited a fixed fifteen seconds and
+then printed whatever the page had produced so far. This page takes 34 seconds.
+Fifteen got three of its sixteen V-cycle rows, and **the output of a truncated
+run looks exactly like the output of a complete one** -- a list of ticks. The
+conclusion above was reasoned from that list.
+
+`run_page.mjs` now waits for the page to stop producing output rather than for
+a clock, and labels a run PARTIAL, loudly, when it hits its cap instead. The
+page also prints its own summary line as its last act, so a run with no summary
+is visibly unfinished from the inside as well as the outside.
+
+This is the third time in this document that a measurement harness reported a
+partial or absent run as a pass -- after reading a 14,643-frame log from its
+tail, and after a determinism sweep diffing two runs that had both failed to
+start. It is the same mistake each time and it is worth naming as a class: **a
+check that cannot tell "finished and fine" from "did not finish" is not a
+check.** `verification.md`'s rule 0 covers the comparison case; this one adds
+the truncation case.
+
+## What the complete run actually says
+
+V-cycle symmetry, relative difference between (Mx,y) and (x,My), on example
+35's own shape and mask:
+
+| levels | mask only | mask + weights |
+| --- | --- | --- |
+| 1 | 3.76e-3 (expected failure) | 2.80e-3 (expected failure) |
+| 2 | 7.03e-6 | 5.55e-5 |
+| 3 | 1.60e-4 | 9.77e-6 |
+| 4 | 1.07e-4 | 1.63e-4 |
+
+So symmetry does not degrade with the level count -- it is best at 2 levels and
+sits around 1e-4 at 3 and 4, which is consistent with the 7.10e-5 measured on
+example 17's own live system. A 1-level V-cycle is plain red-black relaxation
+and is not symmetric at all; that row is the contrast that shows what the
+coarse levels buy, and it is now marked as an expected failure rather than
+appearing as a plain cross.
+
+It also puts a number on how little this explains. `16-karman-vortex-street`
+runs a V-cycle asymmetric to 1.00e-2 -- worse than the 1-level case that fails
+this page outright -- and converges on 12,000 of 12,001 frames. Whatever sets
+the floor on achievable residual, it is not asymmetry alone.
+
+## The page had four permanent red marks and nobody read them
+
+Two unpreconditioned-CG rows and the two 1-level symmetry rows have always
+failed and always should: the first pair is the control arm the V-cycle is
+being measured against, the second is relaxation being asked to be symmetric.
+Reported as plain crosses among the ticks, they made the page's own summary
+read "4 failed" on every run, which is indistinguishable from a regression.
+
+Expected failures now say their reason inline, count separately, and the
+summary reads `34 passed, 4 expected failures, 0 unexpected` -- a number that
+is zero when nothing is wrong. An expected failure that starts *passing* is
+also flagged, since that means the thing the expectation was about has changed.
+
+Extending the level coverage is no longer the next step on this thread; it was
+never missing. Making the V-cycle exact enough for a 1e-6 tolerance is.
 
 ---
 
