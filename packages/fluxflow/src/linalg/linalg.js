@@ -972,6 +972,36 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	// for both kinds of reason -- see alphaKernel.
 	const STOP_CONVERGED = 5;
 
+	// *** How far the residual may grow from its own best before the loop
+	// stops and says so ***
+	//
+	// PCG with an inexact preconditioner is not monotone in the residual
+	// norm, and over enough iterations it can walk away from its own best
+	// answer entirely. Measured on examples/17-smoke-fire/, one frozen frame
+	// re-solved at three budgets with everything else identical:
+	//
+	//     60 iterations   residual 4.12e-4   (relative 1.53e-5)
+	//    300 iterations   residual 2.17e-3
+	//   3000 iterations   residual 7.45e-1   -- 1800x WORSE
+	//
+	// The same system with the jacobi preconditioner, or with none at all,
+	// converges normally over the same 3000 iterations, so this is the
+	// V-cycle's inexactness being amplified rather than the operator or the
+	// arithmetic. That scene's tolerance of 1e-6 relative is below anything
+	// this stack delivers for it at any budget, so the loop used to spend the
+	// whole budget every frame, return a worse answer than it had at
+	// iteration 60, and report `converged: false, stoppedBy: none` -- which is
+	// indistinguishable from "the budget was simply too small", and calls for
+	// the opposite response.
+	//
+	// 100x in r.r, which is 10x in the norm, is chosen to be unmistakable:
+	// CG's residual fluctuates, and this has to be divergence rather than a
+	// fluctuation. No scene in this package trips it except the ones that are
+	// genuinely walking away -- examples/16-karman-vortex-street/ converges on
+	// 12,000 of 12,001 frames with a V-cycle 140x LESS symmetric than example
+	// 17's, and never comes near this.
+	const MAX_RESIDUAL_GROWTH = 100;
+
 	const STOP_REASONS = {
 		[ STOP_DEGENERATE_PAP ]: 'degenerate-pAp',
 		[ STOP_PAP_GROWTH ]: 'pAp-growth',
@@ -1625,6 +1655,9 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		// instead of chasing a threshold of zero.
 		let stopThreshold = tol;
 
+		// The best residual this solve has seen, for MAX_RESIDUAL_GROWTH.
+		let bestRTr = null;
+
 		// *** A guard code that arrives on an iterate already at the stop
 		// threshold is not a breakdown, and this is the only place that
 		// decides so ***
@@ -1738,6 +1771,22 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 				const stopCode = snapshot[ SLOT_STOP ];
 
 				state.residualSquared = snapshot[ SLOT_RR ];
+
+				// Walking away from its own best answer. Checked here because
+				// this is where the host sees a residual at all in this path;
+				// the GPU's own stop test only knows about the tolerance.
+				if ( Number.isFinite( snapshot[ SLOT_RR ] ) ) {
+
+					if ( bestRTr === null || Math.abs( snapshot[ SLOT_RR ] ) < bestRTr ) bestRTr = Math.abs( snapshot[ SLOT_RR ] );
+					else if ( bestRTr > 0 && Math.abs( snapshot[ SLOT_RR ] ) > bestRTr * MAX_RESIDUAL_GROWTH && stopCode !== STOP_CONVERGED ) {
+
+						state.stoppedBy = 'residual-growing';
+						lastIterationCount = ran;
+						return false;
+
+					}
+
+				}
 
 				if ( stopCode === STOP_CONVERGED ) {
 
@@ -2067,6 +2116,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		const pApBaseline = Math.max( Math.abs( initRTr ), 1e-12 );
 
 		let forceResidualRecompute = false;
+		let bestRTr = null;
 
 		// The same rule as the GPU-resident path's guardIsANonEvent, in this
 		// loop's own terms. Each guard below fires BEFORE this iteration reads
@@ -2189,6 +2239,16 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 					newRTr = await dotRR.read();
 
 					if ( Math.sqrt( Math.abs( newRTr ) ) < tol ) break;
+
+					// Walking away from its own best answer -- see
+					// MAX_RESIDUAL_GROWTH. Distinct from the growth check
+					// below, which compares against the PREVIOUS iteration and
+					// responds by recomputing the true residual; this one
+					// compares against the best of the whole solve and gives
+					// up, because a residual an order of magnitude worse than
+					// the best is not drift to be corrected.
+					if ( bestRTr === null || Math.abs( newRTr ) < bestRTr ) bestRTr = Math.abs( newRTr );
+					else if ( bestRTr > 0 && Math.abs( newRTr ) > bestRTr * MAX_RESIDUAL_GROWTH ) { state.stoppedBy = 'residual-growing'; break; }
 
 					// Residual grew since last iteration -- shouldn't happen in
 					// exact arithmetic; a sign the incremental r has drifted,

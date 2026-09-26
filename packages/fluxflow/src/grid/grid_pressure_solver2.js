@@ -886,6 +886,15 @@ export function createGridPressureSolver2( {
 	// solved, not the edge of the grid. Measuring the grid's own outermost
 	// faces instead reads velocities nothing constrains -- see
 	// solver_health.mjs's own control-surface comment.
-	return { project, pressure: pressureGrid, b, diagnostics, settings, dirichletMask: dirichletMaskField ?? null };
+	// buildPreconditioner is exposed for measurement only, on the same terms
+	// as dirichletMask above. PCG requires a symmetric preconditioner, and
+	// convergence is a poor way to ask whether this one is: a V-cycle that is
+	// slightly asymmetric helps for the first few dozen iterations and then
+	// diverges, which reads from outside as "does not converge" and is a
+	// different defect from "converges too slowly". Handing the builder out
+	// lets a probe form (Mx,y) and (x,My) on a scene's own frozen system --
+	// see diag_symmetry.mjs -- rather than inferring from a residual curve.
+	return { project, pressure: pressureGrid, b, diagnostics, settings, dirichletMask: dirichletMaskField ?? null,
+		buildPreconditioner: ( input, output ) => preconditionerBuilders.multigrid( input, output ) };
 
 }

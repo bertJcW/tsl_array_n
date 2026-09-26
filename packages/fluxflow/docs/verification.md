@@ -161,7 +161,9 @@ details are easy to get wrong and were got wrong first:
   28 frames out of 900 while being perfectly healthy, a broken scene
   converged on 73% of its frames, and `examples/17-smoke-fire/`,
   `18-explosion` and `19-fuel-fire` converge on **0 of 12,001** frames while
-  leaving a median relative residual of 2e-5 to 5e-5 against a bar of 1e-2. Velocity on fully closed collider faces is
+  leaving a median relative residual of 2e-5 to 5e-5 against a bar of 1e-2 --
+  those three ask for a tolerance their preconditioner cannot deliver at any
+  budget, which `long-run-stability.md`'s T3 measures. Velocity on fully closed collider faces is
   the same -- `constrainVelocity` extrapolates into the solid on purpose, so
   a nonzero reading there is the design. Both are evidence to explain,
   printed beside the verdict.
@@ -209,6 +211,8 @@ Reached for after a verdict, not before one. Each answers one question.
 | `diag_event.mjs` | what did the field look like at exactly these frames? |
 | `diag_freeze.mjs` | stop at one frame and re-solve that system every way available |
 | `diag_where.mjs` | which part of the domain is the large one? |
+| `diag_iterations.mjs` | is this solve slow, stalled, or diverging? One frozen frame, re-solved at three budgets against every preconditioner |
+| `diag_symmetry.mjs` | is this scene's own V-cycle symmetric, and does (Mr,r) keep one sign? Measured on its frozen system rather than inferred from a residual curve |
 | `diag_control_volume.mjs` | which surface should conservation be measured across? |
 | `diag_weights.mjs`, `diag_face.mjs` | what does each half of the collider think a face is? (CPU, no browser) |
 | `karman_shedding.mjs` | is the wake shedding -- period, Strouhal number, and which way the pattern travels |

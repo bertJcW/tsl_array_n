@@ -220,7 +220,7 @@ reported and not judged. Read as a criterion it says these three scenes are
 60 iterations a frame to buy nothing they asked for, which is real. Both
 numbers are needed; only one of them can decide.
 
-Recorded as an open item, not fixed here.
+Pursued as T3, below, where it turns out to be worse than wasted iterations.
 
 ### 3. Example 28 no longer stalls
 
@@ -399,6 +399,122 @@ longer the one this scene takes, which is not the same as showing the solver
 cannot produce it. Whether that excursion recurs under other seeds is
 untested, and is now testable precisely because the seed is a parameter --
 which is the practical argument for determinism, over and above tidiness.
+
+---
+
+# T3: the solve was walking away from its own best answer, silently
+
+`17-smoke-fire`, `18-explosion` and `19-fuel-fire` converge on 0 of 12,001
+steps. The obvious readings are "the budget is too small" and "the
+preconditioner is too weak", and the way to tell them apart is to freeze one
+frame and re-solve the identical system at increasing budgets
+(`diag_iterations.mjs`, written for this). Example 17, frame 400, every arm
+starting from the velocity and pressure the frame arrived with:
+
+| preconditioner | 60 iterations | 300 | 3000 |
+| --- | --- | --- | --- |
+| multigrid | 4.12e-4 | 2.17e-3 | **7.45e-1** |
+| jacobi | 1.50e+0 | 8.78e-3 | 1.58e-4 |
+| none | 1.50e+0 | 9.18e-3 | 1.87e-4 |
+
+Neither reading was right. **With the multigrid preconditioner the residual
+grows with the iteration count** -- 1800x worse at 3000 iterations than at 60
+-- while the same frozen system with jacobi, or with no preconditioner at all,
+converges normally over the same 3000. Unpreconditioned CG converging
+monotonically clears the operator and the arithmetic; the V-cycle is what is
+being amplified.
+
+`|b|` here is 26.9 and the tolerance is 1e-6 relative, so the stop test
+demands a residual below 2.69e-5 and the best the stack reaches is 4.12e-4.
+**That tolerance is unreachable at any budget**, which is why the counter read
+0 and kept reading 0.
+
+## What it was not
+
+Two hypotheses died on measurement, and the second one inverted.
+
+**Not the level count.** `16-karman-vortex-street` uses the same
+`numberOfLevels: 4` and converges on 12,000 of 12,001 steps.
+
+**Not the V-cycle's asymmetry**, which is the thing this repository has been
+caught by before and the obvious suspect for a preconditioner that destroys
+PCG. Measuring it directly on each scene's own frozen system
+(`diag_symmetry.mjs`, which needed `grid_pressure_solver2.js` to expose its
+preconditioner builder for measurement):
+
+| scene | (Mx,y) vs (x,My), relative | tolerance / budget | converged |
+| --- | --- | --- | --- |
+| 16 Kármán vortex street | **1.00e-2** | 1e-5 / 40 | 12,000 / 12,001 |
+| 17 smoke and fire | 7.10e-5 | 1e-6 / 60 | 0 / 12,001 |
+| 19 fuel fire | 7.10e-5 | 1e-6 / 60 | 0 / 12,001 |
+
+The scene that converges has a V-cycle **140x less symmetric** than the ones
+that do not. Asymmetry is real here and it is not the discriminator; the
+discriminator is whether the tolerance asked for is one this stack can deliver
+at that budget.
+
+(Examples 17 and 19 report identical figures because they are the same shape
+with the same mask and the probe seeds its random draws identically -- which
+is a determinism check passing, not a copy-paste error.)
+
+## The fix, and why it is not a per-scene number
+
+The tempting fix is to loosen these three scenes' tolerance to something
+reachable. That is a magic number per scene, it leaves the next scene to
+rediscover the same thing, and it does not address what actually went wrong,
+which is that **nothing told anyone.** `converged: false, stoppedBy: none` is
+what a solver reports when the budget was simply too small, and it was
+reporting that while returning an answer 1800x worse than the one it had
+passed through at iteration 60.
+
+So `linalg.js` now distinguishes the two. It tracks the best residual a solve
+has seen, and if the residual grows past 100x that best -- 10x in the norm,
+chosen to be unmistakable rather than a fluctuation -- the loop stops and sets
+`stoppedBy = 'residual-growing'`. Both paths do it: the host loop at its own
+residual check, and the GPU-resident path in the chunk loop, which is the only
+place a host sees a residual in that path at all.
+
+Measured on the same frozen frame, same command:
+
+```
+multigrid      3000   1250       false    2.20e-2      8.18e-4   residual-growing
+jacobi         3000   3000       false    1.58e-4      5.85e-6   none
+none           3000   3000       false    1.87e-4      6.96e-6   none
+```
+
+It stops at 1250 instead of 3000, returns a residual **34x better** than
+before, and names the reason. The jacobi and unpreconditioned arms of the same
+run are untouched, which is the evidence that it fires on the pathology and
+stays quiet on ordinary convergence -- both sides of the threshold, in one
+measurement.
+
+## Verified, including the part that could have gone wrong
+
+The risk in a new stop condition is that it fires on a healthy scene and turns
+a good verdict bad.
+
+- `examples/05-preconditioned-conjugate-gradient/` still reaches
+  `degenerate-pAp` on a singular operator and `alpha-magnitude` on a near-null
+  one, on all three paths. The new reason did not displace the old ones.
+- 375 tests pass.
+- It fires **once** on `35-karman-vortex-street-3d`, at frame 0 -- the first
+  solve of an impulsively started flow, which is the known hardest frame in
+  these scenes and the one example 16 has always missed. 2,000 of 2,001 frames
+  converge and the verdict stays HEALTHY. That is a real detection stopping a
+  frame early rather than a misfire.
+
+## What is still open, and is a question rather than a defect
+
+The three smoke scenes still ask for 1e-6 and still get ~1.5e-5. Now they say
+so instead of leaving a counter at zero, and the reachable floor is measured,
+so the choice is informed: either accept a tolerance this V-cycle can deliver,
+or make the V-cycle exact enough to deliver 1e-6. The second is the real
+answer and it is a preconditioner project, not a constant.
+
+`sandbox/poisson-3d-dirichlet/` is the place that should have caught this and
+did not: it checks V-cycle symmetry at 1 and 2 levels, and every scene in this
+package that uses the V-cycle in earnest runs 3 or 4. Extending it is the
+cheapest next step on this thread.
 
 ---
 
