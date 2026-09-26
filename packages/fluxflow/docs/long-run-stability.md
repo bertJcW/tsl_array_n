@@ -921,6 +921,52 @@ calibrating it once per machine: the floor moved by four orders of magnitude
 between two frames of the same scene, and `eps` -- the only machine-dependent
 term -- is fixed at `2^-24` by the WebGPU specification.
 
+### The residual as a multiple of the floor, which is what a dynamic tolerance
+### would be reaching for
+
+A tolerance that floats up to the floor each solve is one line away, now that
+the floor is computed. It should not be built: `converged: true` would mean
+something different on every frame, a badly conditioned frame would silently
+lower its own bar and report success, and example 16's frame 1 -- floor 1.26e-2,
+above even the conservation criterion -- would become a converged frame.
+
+`diagnostics.residualOverFloor` answers the same question without moving
+anything. Around 1 means the solve reached what the arithmetic allows, and
+neither a larger budget nor a better preconditioner would improve it; much
+greater than 1 means something other than precision is the constraint. It is
+comparable across frames and across scenes, which a floating tolerance is not.
+
+Measured over 300 frames:
+
+| scene | residual / floor, median | reading |
+| --- | --- | --- |
+| 17 smoke and fire | **0.6** | at the limit of float32 |
+| 16 Kármán vortex street | **3.6** | stopped on request, well short of the limit |
+
+(The floor is an underestimate by roughly a factor of two, as derived above, so
+0.6 is "at the limit" rather than "past it".)
+
+**This settles why example 17 does not converge, and it is not the
+preconditioner.** At the shipped 60-iteration budget that scene already extracts
+everything float32 permits; the only thing standing between it and
+`converged: true` is that it asks for 2.49e-6 where the arithmetic can verify
+5.93e-6. Example 16, whose tolerance sits above its floor, stops when asked
+rather than when it runs out of precision -- hence 3.6.
+
+### It also unifies the two halves of T3
+
+The section above records two findings: a floor near 6e-6, and multigrid's
+residual *growing* from 4.12e-4 at 60 iterations to 7.45e-1 at 3000. Those are
+the same phenomenon. Below the floor there is nothing but rounding noise to
+descend on, so an iteration pushed past it wanders rather than converges. Jacobi
+and the unpreconditioned arm looked like they kept descending only because they
+were still above the floor at 3000 iterations -- they had not reached it yet.
+
+So the ordering is: multigrid gets to the floor in tens of iterations, and
+everything after that is noise. The weaker preconditioners take thousands of
+iterations to arrive at the same place. Nothing was diverging; one arm simply got
+there first.
+
 ### It was already half-known, in the right words
 
 `examples/16-karman-vortex-street/` sets `tolerance: 1e-5` and says why:

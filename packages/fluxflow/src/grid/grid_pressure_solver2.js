@@ -854,6 +854,13 @@ export function createGridPressureSolver2( {
 			diagnostics.noiseFloor = cg.state ? cg.state.noiseFloor : null;
 			diagnostics.noiseFloorRelative = cg.state ? cg.state.noiseFloorRelative : null;
 			diagnostics.toleranceBelowFloor = cg.state ? cg.state.toleranceBelowFloor : null;
+			// The residual as a multiple of the floor, which is the comparable form:
+			// ~1 means the solve reached what the arithmetic allows and no budget or
+			// preconditioner would improve it, while >>1 means something other than
+			// precision is the constraint. A dynamic tolerance would answer the same
+			// question by moving the bar, and then `converged` would mean a different
+			// thing on every frame; this leaves the bar alone.
+			diagnostics.residualOverFloor = ( diagnostics.residual !== null && diagnostics.noiseFloor ) ? diagnostics.residual / diagnostics.noiseFloor : null;
 			diagnostics.stoppedBy = cg.state ? cg.state.stoppedBy : null;
 
 			// *** Measurement instrument, not a feature ***
