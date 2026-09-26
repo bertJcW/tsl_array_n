@@ -126,7 +126,7 @@ page.on( 'console', ( m ) => { const t = m.text(); if ( /error|Error/.test( t ) 
 await page.addInitScript( ( [ frames, sample ] ) => {
 
 	let stored, counter = 0;
-	window.__health = { samples: [], counters: { rejected: 0, breakdowns: 0, converged: 0, frames: 0, breakdownFrames: [], stopReasons: {}, zeroRhsFrames: 0, stopResiduals: [], stopsOnSolved: 0 }, geometry: null };
+	window.__health = { samples: [], counters: { rejected: 0, breakdowns: 0, converged: 0, frames: 0, breakdownFrames: [], stopReasons: {}, zeroRhsFrames: 0, stopResiduals: [], stopsOnSolved: 0, atRestFrames: 0 }, geometry: null };
 	window.__done = false;
 
 	Object.defineProperty( window, '__fluxflowProbe', {
@@ -179,6 +179,14 @@ await page.addInitScript( ( [ frames, sample ] ) => {
 				// measured: the sampled divergence below is computed here from the
 				// velocity field itself, independently of anything the solver
 				// says about its own progress.
+				// How many frames handed the solver a system that was already
+				// solved -- a scene at rest. Counted independently of any stop
+				// reason, because once linalg.js stops reporting the non-event
+				// there is otherwise no way to tell a run whose liquid settled
+				// from one whose liquid never did, and those two runs are exactly
+				// what has to be distinguished to know the library fix fired.
+				if ( d.residual === 0 ) c.atRestFrames ++;
+
 				const stoppedOnASolvedSystem = d.stoppedBy && d.stoppedBy !== 'none' && d.residual === 0;
 
 				if ( stoppedOnASolvedSystem ) c.stopsOnSolved ++;
@@ -607,6 +615,7 @@ if ( ! first.hasWeights ) console.log( 'no collider face weights from this solve
 if ( ! first.driven ) console.log( 'no inlet: nothing in this formulation forces a vent-only domain to balance, so the verdict here rests on finiteness alone and everything else is reported' );
 console.log( `solver counters: ${ counters.converged } converged, ${ counters.rejected } rejected, ${ counters.breakdowns } CG breakdowns` +
 	( counters.breakdownFrames.length ? ` (first at frame ${ counters.breakdownFrames[ 0 ] }, last ${ counters.breakdownFrames[ counters.breakdownFrames.length - 1 ] })` : '' ) );
+if ( counters.atRestFrames ) console.log( `   ${ counters.atRestFrames } frames handed the solve a system already at a residual of exactly 0 -- the scene was at rest for those` );
 if ( counters.stopsOnSolved ) console.log( `   ${ counters.stopsOnSolved } guard stops on a system already solved to a residual of exactly 0 -- not counted as breakdowns, see the note in this file` );
 if ( counters.breakdowns ) console.log( `   stopped by: ${ Object.entries( counters.stopReasons ).map( ( [ k, v ] ) => `${ k } x${ v }` ).join( ', ' ) }` +
 	( counters.zeroRhsFrames ? `; ${ counters.zeroRhsFrames } of those left a residual of exactly 0, meaning the guard tripped on a system that was already solved -- see linalg.js's applySnapshot, which declines to name that a breakdown` : '' ) );

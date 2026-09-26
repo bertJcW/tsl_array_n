@@ -49,7 +49,9 @@ stopping an already-solved system as a breakdown, which flagged
 which nothing whatever was wrong -- the scene's liquid had come to rest, so
 the residual was exactly 0, so the search direction was 0, so the guard fired
 every frame. `linalg.js` already declined to call that a breakdown at one of
-the five places it sets a stop reason; the probe now declines at all of them.
+the seven places it sets a stop reason; all seven now share one test, and
+`examples/05-preconditioned-conjugate-gradient/` is what proves a real guard
+still fires on all three code paths.
 
 Every one of those looked convincing at the time. Note what none of them was
 fixed by: widening a threshold, or adding an exception for the scene that

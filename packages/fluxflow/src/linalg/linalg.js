@@ -1625,6 +1625,44 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		// instead of chasing a threshold of zero.
 		let stopThreshold = tol;
 
+		// *** A guard code that arrives on an iterate already at the stop
+		// threshold is not a breakdown, and this is the only place that
+		// decides so ***
+		//
+		// There is nothing left to solve, so the search direction p is ~0, so
+		// p.Ap is ~0, and alpha forced to 0 leaves x exactly where it belongs.
+		// Calling that 'degenerate-pAp' is alarming and wrong: the solve did
+		// its job and then a guard fired on the arithmetic of having finished.
+		//
+		// The GPU writes its stop slot and its residual slot in the same
+		// iteration, so the two can arrive together -- a guard code beside a
+		// residual that has already met the threshold -- and which of them the
+		// host sees first is a race the host cannot win by looking harder.
+		//
+		// This test used to exist inline in applySnapshot and nowhere else,
+		// which meant the two paths that return a stop code directly reported
+		// the non-event to every caller. Measured, on a scene whose liquid
+		// comes to rest partway through a long run
+		// (examples/33-flip-dam-break-3d/): 7,557 consecutive frames of
+		// 'degenerate-pAp', every one of them leaving a residual of exactly 0,
+		// reported to the caller as a breakdown on each one. Two other runs of
+		// the same build, whose liquid happened not to settle, reported none --
+		// which is how this survived as long as it did.
+		//
+		// normBSquared is passed where the caller has a fresh one, since
+		// stopThreshold is only recomputed at the points that read it; without
+		// it this falls back to whatever threshold is current, which is the
+		// conservative direction (a smaller threshold excludes fewer stops).
+		function guardIsANonEvent( residualSquared, normBSquared ) {
+
+			const threshold = ( relativeTolerance && normBSquared !== undefined )
+				? Math.max( tol * Math.sqrt( Math.abs( normBSquared ) ), tol )
+				: stopThreshold;
+
+			return Math.sqrt( Math.abs( residualSquared ) ) < threshold;
+
+		}
+
 		// The read issued but not yet listened to, under optimisticStopTest.
 		// Every read that is issued is awaited before this function returns:
 		// an unawaited one would resolve into `state` during whatever solve
@@ -1714,7 +1752,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 				if ( stopCode !== STOP_NONE ) {
 
-					state.stoppedBy = STOP_REASONS[ stopCode ] ?? 'unknown';
+					if ( ! guardIsANonEvent( snapshot[ SLOT_RR ], snapshot[ SLOT_BB ] ) ) state.stoppedBy = STOP_REASONS[ stopCode ] ?? 'unknown';
 					lastIterationCount = ran;
 
 					return false;
@@ -1744,13 +1782,11 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 			if ( stopCode !== STOP_NONE ) {
 
-				// A guard tripping on an already-converged residual is
-				// not a failure: there is nothing left to solve, p is
-				// ~0 so p.Ap is ~0, and alpha being forced to 0 leaves
-				// x exactly where it belongs. Without the pre-loop read
-				// that case now reaches the loop, and calling it
-				// 'degenerate-pAp' would be alarming and wrong.
-				if ( Math.sqrt( Math.abs( newRTr ) ) >= stopThreshold ) {
+				// See guardIsANonEvent. This is where the rule was born --
+				// without the pre-loop read, an already-converged iterate
+				// reaches the loop and trips a guard -- and it is now shared
+				// with the two paths that used to report it regardless.
+				if ( ! guardIsANonEvent( newRTr ) ) {
 
 					state.stoppedBy = STOP_REASONS[ stopCode ] ?? 'unknown';
 
@@ -1980,7 +2016,11 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 			}
 
-			if ( stopCode !== STOP_NONE ) state.stoppedBy = STOP_REASONS[ stopCode ] ?? 'unknown';
+			// The lines below return `sqrt(|newRTr|) < stopThreshold` as this
+			// solve's verdict, so reporting a breakdown here as well would
+			// have the same function say the solve converged and broke down
+			// on the same iterate. It did neither: it finished.
+			if ( stopCode !== STOP_NONE && ! guardIsANonEvent( newRTr ) ) state.stoppedBy = STOP_REASONS[ stopCode ] ?? 'unknown';
 
 		}
 
@@ -2028,6 +2068,20 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 		let forceResidualRecompute = false;
 
+		// The same rule as the GPU-resident path's guardIsANonEvent, in this
+		// loop's own terms. Each guard below fires BEFORE this iteration reads
+		// its residual, so newRTr is the residual belonging to the x currently
+		// held -- which is the number the question is about.
+		//
+		// This loop can reach an already-converged iterate for a different
+		// reason than the batched one: residualCheckInterval > 1 skips the
+		// convergence test on most iterations, so the residual can fall below
+		// tol without the loop noticing, and the next iteration's p is then ~0.
+		// When the check was skipped, newRTr is from an earlier iteration and
+		// can only be larger than the true one, so this under-excludes rather
+		// than over-excludes -- the safe direction for a guard.
+		const guardIsANonEvent = () => Math.sqrt( Math.abs( newRTr ) ) < tol;
+
 		if ( Math.sqrt( Math.abs( initRTr ) ) >= tol ) {
 
 			for ( let iter = 0; iter < maxiter; iter ++ ) {
@@ -2048,7 +2102,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 				// it, since A@constant=0 exactly), and once p is dominated by
 				// it, Ap collapses toward 0 everywhere -- exactly the
 				// condition this check catches.
-				if ( isDegenerateDenominator( pAp ) ) { state.stoppedBy = 'degenerate-pAp'; break; }
+				if ( isDegenerateDenominator( pAp ) ) { if ( ! guardIsANonEvent() ) state.stoppedBy = 'degenerate-pAp'; break; }
 
 				// p has drifted implausibly far from this solve's own starting
 				// scale across the iterations so far -- see MAX_PAP_GROWTH_
@@ -2058,7 +2112,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 				// one individually passing every other guard here). Same
 				// "break, don't corrupt x further" response as every other
 				// guard in this loop.
-				if ( Math.abs( pAp ) > pApBaseline * MAX_PAP_GROWTH_FACTOR ) { state.stoppedBy = 'pAp-growth'; break; }
+				if ( Math.abs( pAp ) > pApBaseline * MAX_PAP_GROWTH_FACTOR ) { if ( ! guardIsANonEvent() ) state.stoppedBy = 'pAp-growth'; break; }
 
 				const alphaValue = oldRZ / pAp;
 
@@ -2086,7 +2140,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 				// (956 stable frames -> 178) on the exact same repro this
 				// fix's other half (beta) was confirmed against. Magnitude
 				// alone, without the sign condition, is what's kept here.
-				if ( Math.abs( alphaValue ) > MAX_ALPHA_MAGNITUDE ) { state.stoppedBy = 'alpha-magnitude'; break; }
+				if ( Math.abs( alphaValue ) > MAX_ALPHA_MAGNITUDE ) { if ( ! guardIsANonEvent() ) state.stoppedBy = 'alpha-magnitude'; break; }
 
 				setScalar( alpha, alphaValue ); // alpha = rz / pTAp
 				updateX();
@@ -2157,7 +2211,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 				// no other convergence check anywhere in this loop (only r.r
 				// is compared against tol), so this is the *only* guard
 				// protecting this particular division.
-				if ( isDegenerateDenominator( oldRZ ) ) { state.stoppedBy = 'degenerate-oldRZ'; break; }
+				if ( isDegenerateDenominator( oldRZ ) ) { if ( ! guardIsANonEvent() ) state.stoppedBy = 'degenerate-oldRZ'; break; }
 
 				// *** A real, confirmed-on-real-hardware CG robustness fix,
 				// found via direct real-hardware dot-product logging ***

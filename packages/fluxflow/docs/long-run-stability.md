@@ -126,13 +126,21 @@ comes to rest partway through the run; after that the pressure system is
 solved exactly, so the search direction is zero, so `p.Ap` is zero, and the
 guard fires every frame on a system that has nothing left to solve.
 
-`linalg.js`'s `applySnapshot` already refuses to name this case, in a
-comment that gives the reason in full -- "a guard tripping on an
-already-converged residual is not a failure: there is nothing left to solve,
-p is ~0 so p.Ap is ~0, and alpha being forced to 0 leaves x exactly where it
-belongs." That test guards **one of the five sites that set `stoppedBy`**.
-The other four (`linalg.js` ~2051, ~2061, ~2089, ~2160) set it
-unconditionally, so the reason reaches a caller anyway.
+`linalg.js`'s `applySnapshot` already refused to name this case, in a comment
+that gives the reason in full -- "a guard tripping on an already-converged
+residual is not a failure: there is nothing left to solve, p is ~0 so p.Ap is
+~0, and alpha being forced to 0 leaves x exactly where it belongs." That test
+guarded **one of the seven sites that set `stoppedBy`**, and not the one this
+scene goes through.
+
+An earlier draft of this section named the four host-loop sites as the
+culprits. That was wrong: a 3D scene runs the GPU-resident path, and the two
+sites there that return a stop code directly (`solveWithGpuResidentScalars`'s
+chunk loop and its final read) are what reported the non-event here. The host
+loop's four guards can reach the same state by a different route --
+`residualCheckInterval > 1` skips the convergence test on most iterations, so
+the residual can fall below `tol` without the loop noticing and the next
+iteration's `p` is then ~0. Six sites were missing the test, not four.
 
 `solver_health.mjs` no longer counts a stop that left a residual of exactly
 0 as a breakdown. It reports them on their own line instead, because a scene
@@ -163,11 +171,32 @@ rule 3 exists because of the first four. Note what did *not* happen: no
 threshold was widened and no scene-specific exception was added. A stop that
 leaves zero residual is benign by definition, everywhere.
 
-Two things remain undone, and neither is cosmetic:
+**The library was fixed too, and that is the part that matters.** All seven
+sites now go through one function, `guardIsANonEvent`, so the rule exists in
+one place instead of being reimplemented -- or forgotten -- at each. The probe
+excluding these stops only protected the probe; every other caller of
+`solve()` was still being told a solve broke down when it had finished.
 
-- **The four guard sites in `linalg.js` should apply the test the fifth
-  already has.** The probe now compensates for a library that reports a
-  non-event; every other caller still receives it.
+The regression that had to hold is that genuine failures still report, and
+`examples/05-preconditioned-conjugate-gradient/` is the page that says so: a
+singular operator (A = 0) still reaches `degenerate-pAp` and a near-null one
+(A = diag(1e-12)) still reaches `alpha-magnitude`, on all three paths -- host,
+GPU-resident, and GPU-resident checking every 4th iteration. Silencing a real
+guard while fixing a false one is the obvious way for this change to go wrong,
+and that page is what rules it out.
+
+Verified the way the correction before it was not: by finding a run in which
+it fires. The probe now counts frames whose residual arrives at exactly 0 --
+the scene at rest -- independently of any stop reason, because once the
+library stops reporting the non-event a settling run and a non-settling run
+look identical from outside, and those are precisely the two that have to be
+told apart. A run that settled at frame 6330 and spent its remaining 5,672
+frames at rest reports **0 CG breakdowns**, and the probe's own exclusion
+never fires, because there is no longer anything to exclude. Before this
+change that run would have reported 5,672 breakdowns.
+
+One thing remains undone, and it is not cosmetic:
+
 - **The donor queue's slot assignment should not depend on atomic order.**
   A scene that cannot be run twice cannot be bisected, and that makes every
   future measurement of it weaker. The fixed-point P2G accumulation in the
