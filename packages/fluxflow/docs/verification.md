@@ -36,17 +36,26 @@ in the file, beside the constant. A threshold with only one side measured is
 a guess wearing a number.
 
 **3. A check that does not apply says so, out loud.** Weak passes and
-misapplied criteria are the failure mode of a probe, and this one was
-corrected four times in a single investigation -- each time because it had
-produced a confident wrong verdict. It divided by an inflow of zero on
-buoyancy scenes and reported `Infinity`. It invented a velocity scale of 1
-and called a plume broken for reaching 20. It measured conservation across
-the grid's outermost faces, which lie inside a region nothing constrains,
-and declared three healthy scenes to be losing all their mass. And it
-applied a fixed-region criterion to a free surface, whose region moves by
-definition. Every one of those looked convincing at the time, which is why
-the probe now names the criteria it is *not* applying to a scene rather than
-quietly counting them as passes.
+misapplied criteria are the failure mode of a probe, and this one has been
+corrected five times -- each time because it had produced a confident wrong
+verdict. It divided by an inflow of zero on buoyancy scenes and reported
+`Infinity`. It invented a velocity scale of 1 and called a plume broken for
+reaching 20. It measured conservation across the grid's outermost faces,
+which lie inside a region nothing constrains, and declared three healthy
+scenes to be losing all their mass. It applied a fixed-region criterion to a
+free surface, whose region moves by definition. And it counted a CG guard
+stopping an already-solved system as a breakdown, which flagged
+`examples/33-flip-dam-break-3d/` as BROKEN over 7,557 consecutive frames on
+which nothing whatever was wrong -- the scene's liquid had come to rest, so
+the residual was exactly 0, so the search direction was 0, so the guard fired
+every frame. `linalg.js` already declined to call that a breakdown at one of
+the five places it sets a stop reason; the probe now declines at all of them.
+
+Every one of those looked convincing at the time. Note what none of them was
+fixed by: widening a threshold, or adding an exception for the scene that
+tripped it. The probe now names the criteria it is *not* applying to a scene
+rather than quietly counting them as passes, and `long-run-stability.md`
+records each correction with the measurement that forced it.
 
 ---
 
@@ -93,7 +102,12 @@ rather than appearance.
 
 ```bash
 node solver_health.mjs <url> [frames] [sampleEvery]
+node long_run.mjs                    # every drivable scene, 12,000 steps each
 ```
+
+`long_run.mjs` is the whole-suite form: it runs each scene through the probe
+in turn, writes a per-scene log, and prints one table.
+`long-run-stability.md` holds the most recent results.
 
 It replaced a detector that watched one scalar -- maximum velocity against a
 fixed 90 -- which cannot decide the question from either side: the solver's
@@ -107,7 +121,7 @@ admitted, and that 17.5 was reported as stability.
 | --- | --- |
 | nothing non-finite | always |
 | the projection left under 1e-2 of the divergence it was asked to remove | always -- it needs no geometry, so free surfaces and vent-only domains are covered by it |
-| no CG breakdowns after the scene established itself | always |
+| no CG breakdowns after the scene established itself, not counting stops that left a residual of exactly 0 | always |
 | weighted flux equal across interior cross-sections, within 5% | the solver offers collider face weights, so solid faces can be excluded (the 2D solver has none, and reports instead of judging) |
 | net flux across the **solved region's** boundary in balance, on a trailing 20-sample average | the scene has an inlet |
 | fluid speed within 6x the inflow's own | the scene has an inlet |
@@ -134,8 +148,10 @@ details are easy to get wrong and were got wrong first:
   changed it puts the flux criteria out of scope and says so.
 - **It reports the solver's own counters without judging them.**
   Convergence counts are useless as a criterion: a bare channel converges on
-  28 frames out of 900 while being perfectly healthy, and a broken scene
-  converged on 73% of its frames. Velocity on fully closed collider faces is
+  28 frames out of 900 while being perfectly healthy, a broken scene
+  converged on 73% of its frames, and `examples/17-smoke-fire/`,
+  `18-explosion` and `19-fuel-fire` converge on **0 of 12,001** frames while
+  leaving a median relative residual of 2e-5 to 5e-5 against a bar of 1e-2. Velocity on fully closed collider faces is
   the same -- `constrainVelocity` extrapolates into the solid on purpose, so
   a nonzero reading there is the design. Both are evidence to explain,
   printed beside the verdict.
@@ -179,7 +195,7 @@ Reached for after a verdict, not before one. Each answers one question.
 | tool | question |
 | --- | --- |
 | `diag_history.mjs` | what did **every** frame's solve do, from frame zero? |
-| `diag_repeat.mjs` | does a fresh run do the same thing -- deterministic, or lucky? |
+| `diag_repeat.mjs` | does a fresh run do the same thing -- deterministic, or lucky? (`33-flip-dam-break-3d` does not: four runs of one build gave BROKEN, HEALTHY, BROKEN, HEALTHY) |
 | `diag_event.mjs` | what did the field look like at exactly these frames? |
 | `diag_freeze.mjs` | stop at one frame and re-solve that system every way available |
 | `diag_where.mjs` | which part of the domain is the large one? |

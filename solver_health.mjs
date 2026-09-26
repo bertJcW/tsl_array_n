@@ -90,6 +90,10 @@ import { chromium } from 'playwright-core';
 const URL = process.argv[ 2 ] ?? 'http://localhost:5200/examples/35-karman-vortex-street-3d/';
 const FRAMES = Number( process.argv[ 3 ] ?? 2000 );
 const SAMPLE = Number( process.argv[ 4 ] ?? 5 );
+// How long to let the page run before giving up on the frame count. The
+// default suits the couple-thousand-frame runs this is normally used for; a
+// 12,000-frame run on a 3D scene needs more, so long_run.mjs raises it.
+const TIMEOUT = Number( process.env.SOLVER_HEALTH_TIMEOUT ?? 900000 );
 
 // Thresholds, all relative to the scene's own inflow.
 const FLUX_TOLERANCE = 0.05;    // of the inlet flux, across interior cross-sections
@@ -122,7 +126,7 @@ page.on( 'console', ( m ) => { const t = m.text(); if ( /error|Error/.test( t ) 
 await page.addInitScript( ( [ frames, sample ] ) => {
 
 	let stored, counter = 0;
-	window.__health = { samples: [], counters: { rejected: 0, breakdowns: 0, converged: 0, frames: 0, breakdownFrames: [] }, geometry: null };
+	window.__health = { samples: [], counters: { rejected: 0, breakdowns: 0, converged: 0, frames: 0, breakdownFrames: [], stopReasons: {}, zeroRhsFrames: 0, stopResiduals: [], stopsOnSolved: 0 }, geometry: null };
 	window.__done = false;
 
 	Object.defineProperty( window, '__fluxflowProbe', {
@@ -150,7 +154,53 @@ await page.addInitScript( ( [ frames, sample ] ) => {
 				const c = window.__health.counters;
 				c.frames ++;
 				if ( d.rejected ) c.rejected ++;
-				if ( d.stoppedBy && d.stoppedBy !== 'none' ) { c.breakdowns ++; c.breakdownFrames.push( n ); }
+				// *** A guard that stops an already-solved system is the guard
+				// working, and counting it as a breakdown was this probe's fifth
+				// false positive ***
+				//
+				// linalg.js's applySnapshot already refuses to name this case,
+				// in a comment that gives the reason: there is nothing left to
+				// solve, so p is ~0, so p.Ap is ~0, and alpha forced to 0 leaves
+				// x exactly where it belongs. That test guards one of the five
+				// sites that set stoppedBy; the other four set it unconditionally,
+				// so the reason reaches here anyway.
+				//
+				// Measured on examples/33-flip-dam-break-3d/, whose liquid comes
+				// to rest partway through a 12,000-step run: one run reported
+				// 7,557 stops from frame 4444 and another 2,589 from frame 9412,
+				// every one of them degenerate-pAp and every one leaving a
+				// residual of exactly 0. Two other runs of the same build
+				// reported none at all.
+				//
+				// This trusts d.residual to be a true residual, which is exactly
+				// what the 3D dot product defect made false -- a broken reducer
+				// can report 0 for a system that is nowhere near solved. What
+				// keeps it honest is that the residual is not the only thing
+				// measured: the sampled divergence below is computed here from the
+				// velocity field itself, independently of anything the solver
+				// says about its own progress.
+				const stoppedOnASolvedSystem = d.stoppedBy && d.stoppedBy !== 'none' && d.residual === 0;
+
+				if ( stoppedOnASolvedSystem ) c.stopsOnSolved ++;
+
+				if ( d.stoppedBy && d.stoppedBy !== 'none' && ! stoppedOnASolvedSystem ) {
+
+					c.breakdowns ++; c.breakdownFrames.push( n );
+					// WHY, not just how often. A guard that fires because the
+					// system it was handed is degenerate -- a settled free surface
+					// whose right-hand side is zero, so the answer is x = 0 and
+					// there is nothing for pAp to be -- is the guard working, and
+					// reads identically in a count to a real breakdown. The
+					// residual norm at the stop separates them: b = 0 means
+					// nothing was asked of the solve.
+					c.stopReasons[ d.stoppedBy ] = ( c.stopReasons[ d.stoppedBy ] ?? 0 ) + 1;
+					// The residual the stop left behind. diagnostics.residual is
+					// sqrt(|r.r|) and is set every frame, so this costs nothing and
+					// is the number that separates the two cases.
+					if ( d.residual === 0 ) c.zeroRhsFrames ++;
+					if ( c.stopResiduals.length < 40 ) c.stopResiduals.push( d.residual );
+
+				}
 				if ( d.converged === true ) c.converged ++;
 
 				if ( n >= frames ) { window.__done = true; probe.stop && probe.stop(); return; }
@@ -428,7 +478,7 @@ const backend = await page.evaluate( () => window.__fluxflowProbe?.renderer?.bac
 console.log( `backend: ${ backend }` );
 if ( backend !== 'WebGPUBackend' ) { console.log( 'FATAL: not WebGPU, nothing below would be evidence' ); await browser.close(); process.exit( 1 ); }
 
-await page.waitForFunction( () => window.__done === true, undefined, { timeout: 900000 } ).catch( () => console.log( '(ran out of time before the frame count)' ) );
+await page.waitForFunction( () => window.__done === true, undefined, { timeout: TIMEOUT } ).catch( () => console.log( '(ran out of time before the frame count)' ) );
 
 const health = await page.evaluate( () => window.__health );
 if ( health.error ) { console.log( 'probe failed inside the page:', health.error ); await browser.close(); process.exit( 1 ); }
@@ -557,6 +607,10 @@ if ( ! first.hasWeights ) console.log( 'no collider face weights from this solve
 if ( ! first.driven ) console.log( 'no inlet: nothing in this formulation forces a vent-only domain to balance, so the verdict here rests on finiteness alone and everything else is reported' );
 console.log( `solver counters: ${ counters.converged } converged, ${ counters.rejected } rejected, ${ counters.breakdowns } CG breakdowns` +
 	( counters.breakdownFrames.length ? ` (first at frame ${ counters.breakdownFrames[ 0 ] }, last ${ counters.breakdownFrames[ counters.breakdownFrames.length - 1 ] })` : '' ) );
+if ( counters.stopsOnSolved ) console.log( `   ${ counters.stopsOnSolved } guard stops on a system already solved to a residual of exactly 0 -- not counted as breakdowns, see the note in this file` );
+if ( counters.breakdowns ) console.log( `   stopped by: ${ Object.entries( counters.stopReasons ).map( ( [ k, v ] ) => `${ k } x${ v }` ).join( ', ' ) }` +
+	( counters.zeroRhsFrames ? `; ${ counters.zeroRhsFrames } of those left a residual of exactly 0, meaning the guard tripped on a system that was already solved -- see linalg.js's applySnapshot, which declines to name that a breakdown` : '' ) );
+if ( counters.stopResiduals && counters.stopResiduals.length ) console.log( `   residual left at the first ${ counters.stopResiduals.length } stops: ${ counters.stopResiduals.map( ( r ) => ( r === null ? 'null' : r.toExponential( 1 ) ) ).join( ', ' ) }` );
 {
 	const withResidual = samples.filter( ( s ) => s.relativeResidual !== null );
 	if ( withResidual.length ) {
@@ -624,8 +678,26 @@ if ( firstBad ) {
 	const worst = settled.reduce( ( a, s ) => ( s.worstFlux > a.worstFlux ? s : a ), settled[ 0 ] );
 	const last = samples[ samples.length - 1 ];
 	console.log( `\nVERDICT: HEALTHY over ${ counters.frames } frames` );
-	console.log( `   worst interior flux deviation ${ ( worst.worstFlux * 100 ).toFixed( 2 ) }% at frame ${ worst.n }; ${ ( last.outletFlux / ( last.inletFlux || 1 ) ).toFixed( 3 ) }x leaving at the end; every sample inside every bound` );
-	if ( last.regionMoved ) console.log( '   note: the solved region moves between samples -- a free surface -- so every criterion but finiteness is out of scope here. This is a weak pass, not a certificate' );
-	else if ( ! last.driven ) console.log( '   note: with no inlet, the only criterion that applied was finiteness. This is a weak pass, not a certificate' );
+
+	// Only quote a figure the criteria actually used. The flux and outlet
+	// ratios divide by an inlet flux, so on a scene with no inlet they are a
+	// division by something near zero -- one of them printed as
+	// "21932594728469.85%" next to a HEALTHY verdict, which is how a report
+	// loses the reader's trust even when the verdict is right.
+	const inScope = [];
+	if ( last.driven && last.hasWeights ) inScope.push( `worst interior flux deviation ${ ( worst.worstFlux * 100 ).toFixed( 2 ) }% at frame ${ worst.n }` );
+	if ( last.driven ) inScope.push( `${ ( last.outletFlux / last.inletFlux ).toFixed( 3 ) }x leaving at the end` );
+	{
+		const withResidual = samples.filter( ( x ) => x.relativeResidual !== null ).map( ( x ) => x.relativeResidual );
+		if ( withResidual.length ) inScope.push( `the projection's worst leftover residual ${ Math.max( ...withResidual ).toExponential( 2 ) } of what it was asked to remove` );
+	}
+	console.log( `   ${ inScope.join( '; ' ) }${ inScope.length ? '; ' : '' }every sample inside every bound that applied` );
+
+	// Name what did NOT apply, rather than letting a pass stand for more than
+	// it covers. The residual criterion needs no geometry, so it is in scope
+	// even here -- worth saying, because it is the one criterion the dot
+	// product defect could not hide from.
+	if ( last.regionMoved ) console.log( '   note: the solved region moves between samples -- a free surface -- so the flux and mass-balance criteria are out of scope. What still applied: finiteness, the projection residual, and CG breakdowns. A narrower pass than a fixed-region scene gets' );
+	else if ( ! last.driven ) console.log( '   note: with no inlet, the flux and mass-balance criteria are out of scope. What still applied: finiteness, the projection residual, and CG breakdowns. A narrower pass than a driven scene gets' );
 
 }

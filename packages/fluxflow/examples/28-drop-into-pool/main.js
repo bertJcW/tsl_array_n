@@ -620,6 +620,10 @@ try {
 
 	window.__fluxflowProbe = {
 		flip, velocityGrid, stats, seedScene, step, adaptiveTimeStep,
+		// The name solver_health.mjs reads, alongside this scene's own:
+		// the object whose onAdvanceTimeStep is one step. Measurement
+		// handle only, exactly as in examples/33-flip-dam-break-3d/.
+		solver: flip,
 		// Measurement handle only -- see 16-karman-vortex-street's own probe
 		// comment. flip.pressureSolver.settings carries the runtime switches.
 		renderer,

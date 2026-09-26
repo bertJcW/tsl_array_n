@@ -2,3 +2,7 @@ node_modules
 dist
 .DS_Store
 .npmrc
+
+# Per-scene logs from long_run.mjs. Regenerable, large, and the numbers that
+# matter are quoted in docs/long-run-stability.md.
+long-run-logs/

@@ -614,6 +614,14 @@ try {
 	// step already in flight has finished.
 	window.__fluxflowProbe = {
 		flip, stats, seedScene, velocityGrid, step, adaptiveTimeStep,
+		// The renderer is here for solver_health.mjs, which refuses to
+		// believe any number from a page it cannot confirm is on WebGPU.
+		// Without it that check reads 'unknown' and the run is discarded.
+		renderer,
+		// The name solver_health.mjs reads, alongside this scene's own:
+		// the object whose onAdvanceTimeStep is one step. Measurement
+		// handle only, exactly as in examples/33-flip-dam-break-3d/.
+		solver: flip,
 		pause: async () => {
 
 			driverPaused = true;

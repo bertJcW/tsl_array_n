@@ -466,6 +466,10 @@ try {
 	// solve, so an automated run exercises the same physics the page does.
 	const probe = {
 		flip, velocityGrid,
+		// The name solver_health.mjs reads, alongside this scene's own:
+		// the object whose onAdvanceTimeStep is one step. Measurement
+		// handle only, exactly as in examples/33-flip-dam-break-3d/.
+		solver: flip,
 		// Measurement handle only -- see examples/16-karman-vortex-street/'s
 		// probe comment. The renderer is here so a driver can count
 		// renderer.compute() calls per step and flip the solvers' runtime

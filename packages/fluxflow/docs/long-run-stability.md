@@ -1,5 +1,273 @@
 # Long-run stability: 12,000 frames per scene
 
+Two runs are recorded here, and the older one is kept rather than replaced
+because most of what it measured still holds and because this repository
+retracts in place instead of quietly dropping things.
+
+- **[The 2026-09-26 run](#the-2026-09-26-run-15-scenes-180000-steps-judged-not-counted)
+  is the current one.** 15 scenes, 180,000 solver steps, each scene given a
+  verdict from conservation laws rather than a column of counters. It is the
+  re-run the 2026-09-15 report asked for.
+- **[The 2026-09-15 run](#the-2026-09-15-run-superseded-kept-for-the-record)**
+  is below, with its own warning box intact. Its `converged` column was
+  never valid; its non-finite counts, rejection counts, peak pressures and
+  occupied-cell curves were, and the two investigations that follow it --
+  why example 28 stalled, and the float32 digit budget -- are still the
+  reference for those questions.
+
+---
+
+# The 2026-09-26 run: 15 scenes, 180,000 steps, judged not counted
+
+Every example that exposes a probe, 12,000 solver steps each, sampled every
+100, on real WebGPU, run sequentially. `node long_run.mjs`.
+
+## Why the instrument changed
+
+The 2026-09-15 report ends with "a full 12,000-step re-run is the
+outstanding item". This is that re-run, and it does not report the same
+thing, because the 3D investigation established that the thing the old
+report measured cannot decide the question.
+
+Counters cannot. `examples/16-karman-vortex-street/` converged on **every
+frame** of a run in which its outflow carried 13.89x its inflow out of the
+domain, and `examples/35-karman-vortex-street-3d/` settled after blowing up
+into a state whose maximum velocity was a perfectly ordinary 17.5. Both
+would have passed any column in the old table. So each scene here goes
+through `solver_health.mjs`, which judges conservation of mass and the
+residual the projection leaves behind, exits 0 or 2, and prints the counters
+beside the verdict as evidence to explain rather than as criteria.
+`../docs/verification.md` describes the instrument and the three rules it
+is built on.
+
+## Results
+
+180,000 solver steps. Every run confirmed `WebGPUBackend` before any number
+from it was believed.
+
+| example | verdict | steps | converged | rejected | CG breakdowns | residual left, median / worst | fps |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 15 flow past cylinder | **HEALTHY** | 12,001 | 11,998 | 0 | 0 | 5.03e-7 / 2.84e-4 | 57 |
+| 16 Kármán vortex street | **HEALTHY** | 12,001 | 12,000 | 0 | 0 | 7.84e-6 / 1.27e-3 | 58 |
+| 17 smoke and fire | **HEALTHY** (narrow) | 12,001 | **0** | 0 | 1 (frame 0) | 2.21e-5 / 3.57e-4 | 55 |
+| 18 explosion | **HEALTHY** (narrow) | 12,001 | **0** | 0 | 0 | 1.99e-5 / 3.42e-4 | 54 |
+| 19 fuel fire | **HEALTHY** (narrow) | 12,001 | **0** | 0 | 1 (frame 0) | 5.43e-5 / 4.62e-4 | 58 |
+| 20 FLIP dam break | **HEALTHY** (narrow) | 12,001 | 12,001 | 0 | 0 | 1.95e-8 / 9.50e-7 | 59 |
+| 21 irregular container | **HEALTHY** (narrow) | 12,001 | 12,001 | 0 | 0 | 2.41e-7 / 9.98e-7 | 37 |
+| 22 multiple colliders | **HEALTHY** (narrow) | 12,001 | 12,001 | 0 | 0 | 3.86e-7 / 9.60e-7 | 49 |
+| 23 moving collider | **HEALTHY** (narrow) | 12,001 | 12,001 | 0 | 0 | 1.02e-8 / 9.48e-7 | 59 |
+| 26 dye in free surface | **HEALTHY** (narrow) | 12,001 | 12,001 | 0 | 0 | 2.43e-8 / 9.76e-7 | 59 |
+| 28 drop into pool | **HEALTHY** (narrow) | 12,001 | 12,001 | 0 | 0 | 7.97e-7 / 9.97e-7 | 53 |
+| 29 static droplet | **HEALTHY** (narrow) | 12,001 | 12,001 | 0 | 0 | 4.47e-5 / 5.70e-5 | 48 |
+| 33 FLIP dam break 3D | **HEALTHY** (narrow) | 12,001 | see below | 0 | 0 (see below) | 7.95e-8 / 9.81e-7 | 39 |
+| 34 smoke plume 3D | **HEALTHY** (narrow) | 12,001 | 12,000 | 0 | 1 (frame 0) | 4.33e-7 / 1.20e-6 | 59 |
+| 35 Kármán vortex street 3D | **HEALTHY** | 12,001 | 12,000 | 0 | 0 | 4.37e-6 / 1.61e-3 | 51 |
+
+**Zero rejections in 180,000 solves.** The pressure circuit breaker never
+reverted a solve in any scene.
+
+"Narrow" is not a hedge, it is the scope of the pass. Twelve of these
+scenes are free-surface or vent-only, so the flux and mass-balance criteria
+do not apply to them and the probe says so rather than counting them as
+passes; what still applied is finiteness, the projection residual and the
+CG guards. Only three scenes -- 15, 16 and 35, the ones with an inlet --
+were judged on every criterion. See `verification.md`, rule 3.
+
+The headline: **`examples/35-karman-vortex-street-3d/` runs 12,001 steps
+clean at 51 fps.** That is the scene the entire 3D investigation was about,
+the one that used to pin all three velocity components at the solver's
+clamp of 100 within 600 frames.
+
+## What this run found
+
+### 1. Example 33 was flagged BROKEN by a criterion that was wrong
+
+The first 12,000-step run of `examples/33-flip-dam-break-3d/` reported
+**2,589 CG breakdowns beginning at frame 9412** -- every frame from 9412 to
+the end -- and was judged BROKEN. Two things came out of chasing it, and the
+second one is a defect in this probe rather than in the solver.
+
+**It does not give the same answer twice.** Four runs of the same build:
+
+| run | verdict | guard stops | from frame |
+| --- | --- | --- | --- |
+| 1 | BROKEN | 2,589 | 9412 |
+| 2 | HEALTHY | 0 | — |
+| 3 | BROKEN | 7,557 | 4444 |
+| 4 | HEALTHY | 0 | — |
+
+When it settles it settles anywhere: a later run reached rest at frame 1605
+and spent the remaining 10,396 frames there.
+
+The sampled fields diverge early -- maximum divergence at frame 300 reads
+1.45 in one run and 2.51 in another -- so this is not a threshold being
+grazed, it is two different trajectories.
+
+The mechanism is in the particle resampler, not the pressure solve.
+`grid_flip_solver3.js` assigns donor slots with
+`atomicAdd( donorPushCursor(), 1 )`: which over-dense particle lands in
+which slot depends on the order threads win the atomic, and that order is
+not fixed between runs. The resampler then moves those particles into
+under-filled cells, so a different set of particles is teleported each run,
+and 12,000 frames is ample for the two to part company.
+
+The contrast inside the same file is the instructive part. Its P2G
+accumulation (around line 522) scatters through atomics too, but in **fixed
+point** -- `round( value * w * scale ).toInt()` -- because integer addition
+is associative and exact, so atomic order cannot change the answer. That was
+a deliberate choice made for exactly this reason. The donor queue does not
+have that property.
+
+**But the stops were never a failure, and the probe should not have said
+they were.** Instrumenting the stop reason settles it: all 7,557 stops in
+run 3 are `degenerate-pAp`, and **all 7,557 left a residual of exactly 0**.
+The first forty read `0.0e+0` without exception. The liquid in this scene
+comes to rest partway through the run; after that the pressure system is
+solved exactly, so the search direction is zero, so `p.Ap` is zero, and the
+guard fires every frame on a system that has nothing left to solve.
+
+`linalg.js`'s `applySnapshot` already refuses to name this case, in a
+comment that gives the reason in full -- "a guard tripping on an
+already-converged residual is not a failure: there is nothing left to solve,
+p is ~0 so p.Ap is ~0, and alpha being forced to 0 leaves x exactly where it
+belongs." That test guards **one of the five sites that set `stoppedBy`**.
+The other four (`linalg.js` ~2051, ~2061, ~2089, ~2160) set it
+unconditionally, so the reason reaches a caller anyway.
+
+`solver_health.mjs` no longer counts a stop that left a residual of exactly
+0 as a breakdown. It reports them on their own line instead, because a scene
+coming to rest is worth seeing.
+
+**The fix was verified by watching it fire, not by watching the suite go
+green.** Two runs immediately after it came back HEALTHY with zero stops --
+and proved nothing, because they were runs in which the liquid never settled,
+so the corrected path was never reached. That is the same shape of mistake as
+the ones-field dot product test: an input that cannot distinguish the
+failure. A third run settled at frame 1605 and reported
+
+```
+solver counters: 1605 converged, 0 rejected, 0 CG breakdowns
+   10396 guard stops on a system already solved to a residual of exactly 0
+          -- not counted as breakdowns
+VERDICT: HEALTHY over 12001 frames
+```
+
+which before the fix would have read BROKEN with 10,396 breakdowns. Six
+12,000-step runs of this scene in total; every one of them HEALTHY under the
+corrected criterion, and two of six would have been BROKEN under the old
+one.
+
+This is the fifth false positive this probe has produced and the fifth to be
+found by pursuing a verdict instead of accepting it; `verification.md`'s
+rule 3 exists because of the first four. Note what did *not* happen: no
+threshold was widened and no scene-specific exception was added. A stop that
+leaves zero residual is benign by definition, everywhere.
+
+Two things remain undone, and neither is cosmetic:
+
+- **The four guard sites in `linalg.js` should apply the test the fifth
+  already has.** The probe now compensates for a library that reports a
+  non-event; every other caller still receives it.
+- **The donor queue's slot assignment should not depend on atomic order.**
+  A scene that cannot be run twice cannot be bisected, and that makes every
+  future measurement of it weaker. The fixed-point P2G accumulation in the
+  same file is the pattern to copy.
+
+One caveat on the fix itself, recorded because it is the obvious way for
+this to go wrong later: excluding a zero-residual stop trusts `d.residual`
+to be a true residual, and the 3D dot product defect is precisely what made
+that false -- a broken reducer can report 0 for a system nowhere near
+solved. What keeps it honest is that the residual is not the only thing
+measured: the sampled divergence is computed by the probe from the velocity
+field itself, independently of anything the solver claims about its own
+progress.
+
+### 2. Three scenes never converge once in 12,001 steps, and are healthy
+
+`17-smoke-fire`, `18-explosion` and `19-fuel-fire` report **0 converged
+frames out of 12,001**. They are also fine: the projection leaves a median
+of 2.0e-5 to 5.4e-5 of the divergence it was asked to remove, worst 4.6e-4,
+against a bar of 1e-2.
+
+All three run `maxIterations: 60`, so they spend the full budget every
+frame and never reach the tolerance they asked for. The control is
+`34-smoke-plume-3d`, which has the same cap and converges on 12,000 of
+12,001 steps.
+
+This is the sharpest instance yet of why the convergence counter is
+reported and not judged. Read as a criterion it says these three scenes are
+0% healthy, which is wrong. Ignored entirely it hides that they are burning
+60 iterations a frame to buy nothing they asked for, which is real. Both
+numbers are needed; only one of them can decide.
+
+Recorded as an open item, not fixed here.
+
+### 3. Example 28 no longer stalls
+
+The 2026-09-15 report's own follow-up investigation established that
+`28-drop-into-pool` could not converge at any iteration budget -- 1194 of
+1200 at a cap of 2000 -- because its absolute stop test asked float32 for a
+reduction of 5.5e7 when the arithmetic can express about 1.7e7. That
+investigation is below and its reasoning is unchanged.
+
+It converges on **12,001 of 12,001 steps** now, with a worst leftover
+residual of 9.97e-7.
+
+The likely cause is the 2026-09-16 change in which the solver recomputes
+the true residual every iteration and runs its stop test on the GPU, which
+postdates that investigation. This has not been confirmed by bisection, and
+is recorded as the plausible explanation rather than the established one.
+
+### 4. Four scenes were discarded, and the probe was right to discard them
+
+`21`, `22`, `26` and `29` first reported `NOT WEBGPU` and 0 frames. Their
+probes did not expose `renderer`, so the backend check read `unknown` and
+`solver_health.mjs` threw the whole run away rather than report a number
+whose provenance it could not confirm. That is the correct behaviour and it
+cost four runs, which is the cheaper failure by a wide margin. `renderer`
+is now on those four probes and all four pass on re-run.
+
+## Coverage, and what was not run
+
+15 of 36 examples expose `window.__fluxflowProbe` and were run, against 9
+in 2026-09-15. The rest, named rather than left implicit:
+
+- **Self-checking pages, which have no long run to do**: 00-13, 27, 30, 31,
+  32. They verify against a known answer on load and finish -- layer 2 in
+  `verification.md`, not layer 3. `31-conjugate-gradient-3d` and
+  `32-grid-solver-3d` are the 3D linear algebra and grid solver checks.
+- **Scenes with no probe, which is a real gap**: `14-stable-fluids`,
+  `24-two-phase-bubble-rise`, `25-dye-injection`. The first is a fully
+  closed autonomous stability scene and the second is the two-phase solver
+  -- both are exactly the kind of thing a 12,000-step run is for, and
+  neither has ever had one. Adding a probe is about five lines.
+
+## Method
+
+Each scene runs in its own real Chrome, launched with the
+anti-occlusion-throttling flags, at its own frame rate through its own rAF
+loop -- what a long run asks about is the scene as it actually runs.
+`solver_health.mjs` intercepts the assignment to `window.__fluxflowProbe`
+before the first frame, so recording starts at frame 0; reading a run from
+its tail is how `35-karman-vortex-street-3d` was once reported stable over
+14,643 frames while its first 600 frames contained the blow-up.
+
+Scenes run **sequentially**, one browser at a time, which is why there is
+an fps column here and there was none in 2026-09-15: concurrent tabs
+contend for the GPU and make wall-clock meaningless.
+
+Full per-scene logs, including every sampled row, are written to
+`long-run-logs/` by the orchestrator and are not committed.
+
+```bash
+node long_run.mjs                          # all of it, 12,000 steps each
+node long_run.mjs 2000 50 35-karman        # one scene, shorter
+```
+
+---
+
+# The 2026-09-15 run (superseded, kept for the record)
+
 Every drivable example run for **12,000 solver steps** on real WebGPU
 hardware, 2026-09-15, on the current defaults (`preconditioner:
 'multigrid'`, `residualCheckInterval: 4`, `gpuResidentScalars` and
@@ -13,9 +281,9 @@ over a run far longer than any demo.
 
 > ## ⚠ Read this before the table
 >
-> **The `converged` column below is not valid**, and the run has not been
-> repeated since. Two separate reasons, both documented in full further
-> down and in `perf-investigation-cg-gpu-resident-alpha-beta.md`:
+> **The `converged` column below is not valid.** Two separate reasons, both
+> documented in full further down and in
+> `perf-investigation-cg-gpu-resident-alpha-beta.md`:
 >
 > 1. **It was measured before the convergence bug was fixed** (the same
 >    day, a few commits later). The solver was reporting convergence
@@ -34,8 +302,14 @@ over a run far longer than any demo.
 >
 > Shorter runs on the current defaults (250-400 steps on examples 15, 20,
 > 23, 26 and 28) report 100% convergence with zero rejections, and
-> example 26's peak pressure is unchanged at 10.382. **A full 12,000-step
-> re-run is the outstanding item.**
+> example 26's peak pressure is unchanged at 10.382.
+>
+> **The re-run this asked for is done: see
+> [the 2026-09-26 run](#the-2026-09-26-run-15-scenes-180000-steps-judged-not-counted)
+> above.** It covers 15 scenes rather than nine, and it reports a verdict
+> per scene instead of this table's counters -- for the reason this box is
+> itself an example of, which is that a counter can be green and wrong at
+> the same time.
 
 ---
 
@@ -61,6 +335,14 @@ Across all 108,000 steps:
 - **Every stop reason was `none`.** Not one of the four CG guards
   (`degenerate-pAp`, `pAp-growth`, `alpha-magnitude`, `degenerate-oldRZ`)
   fired in 108,000 solves.
+
+  Still true of these nine scenes, and worth reading against the 2026-09-26
+  run's finding on `33-flip-dam-break-3d`, where `degenerate-pAp` fires on
+  thousands of consecutive frames without anything being wrong -- a scene
+  whose liquid comes to rest hands the solver a system that is already
+  solved. None of the nine scenes here settles that completely, which is
+  why the guards stayed quiet rather than because a firing guard would have
+  meant trouble.
 
 ## Convergence
 

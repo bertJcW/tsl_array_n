@@ -384,6 +384,10 @@ try {
 
 	window.__fluxflowProbe = {
 		flip, velocityGrid,
+		// The name solver_health.mjs reads, alongside this scene's own:
+		// the object whose onAdvanceTimeStep is one step. Measurement
+		// handle only, exactly as in examples/33-flip-dam-break-3d/.
+		solver: flip,
 		// One simulation step, for a driver that has paused the rAF loop --
 		// see examples/16-karman-vortex-street/'s probe comment.
 		step: () => flip.onAdvanceTimeStep(),
