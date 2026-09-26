@@ -102,6 +102,7 @@ a tick or a cross per claim. The pre-existing ones are tabulated in
 | `sandbox/poisson-3d-dirichlet/` | operator symmetry with and without a Dirichlet mask; V-cycle symmetry and sign-definiteness at 1, 2, 3 and 4 levels; convergence on a system built as `A @ xStar`, so no scene's right-hand side can be blamed for a failure. Its four permanent failures are marked as expected, with the reason inline, so the summary is a number that reads zero when nothing is wrong |
 | `sandbox/outflow-gradient/` | which way an outflow SDF's gradient actually points, measured, in 2D and in 3D |
 | `sandbox/prefix-sum/` | the GPU prefix sum the resamplers rank donors with: correct against a JS reference on the lengths that break scans, bit-identical across eight runs, and ranks that increase in the index rather than merely being distinct |
+| `sandbox/vcycle-floor/` | how far down the V-cycle drives a residual on a clean system of a scene's own shape, across levels and smoothing sweeps. Built to ask what a scene cannot: it found PCG's host path ignoring `relativeTolerance` |
 
 The dot-reducer check is the one whose shape is worth copying. A field of
 ones reduces to the right total however wrongly its cells are chosen -- any

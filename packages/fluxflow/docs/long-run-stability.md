@@ -672,6 +672,114 @@ into the one that found it.
 
 ---
 
+# T3 continued: why 1e-6 is out of reach, as far as it has been narrowed
+
+The 2D smoke scenes are acceptable as they run. The question pursued here is
+the other one: **what actually stops them reaching the tolerance they ask
+for.** Four candidates were eliminated by measurement and one real bug was
+found on the way that was not theirs.
+
+## The bug that was not theirs
+
+`sandbox/vcycle-floor/` was built to ask the question a scene cannot answer: on
+a clean system -- `b = A @ xStar` from a known xStar, example 17's exact 96x128
+shape and its 192 pinned cells in the top two rows -- is 1e-6 reachable, and
+which V-cycle knob moves the floor? Twelve arms: two, three and four levels
+against two, four and eight smoothing sweeps.
+
+Ten of twelve failed, and the first two rows gave it away:
+
+```
+✓ multigrid x4, tolerance 1e-5 —   16 iterations, res/|b| 5.58e-7
+✗ multigrid x4, tolerance 1e-6 — 3000 iterations, res/|b| 6.96e-7
+```
+
+The arm asking for 1e-6 finished at 6.96e-7, comfortably inside the tolerance
+it was asked for, and reported failure. The arm asking for 1e-5 stopped at
+5.58e-7 in sixteen iterations -- a *better* answer than the arm with the
+stricter target. With `|b| = 12.61`, an absolute test against `tol` demands
+1e-6 absolute, which is 7.9e-8 relative; both rows fit that exactly.
+
+**PCG's host path accepted `relativeTolerance` and ignored it**, testing the
+absolute residual against `tol` while the GPU-resident path computed
+`max(tol*|b|, tol)` and tested against that. Same call, same arguments, two
+different meanings of convergence depending on `gpuResidentScalars` -- a
+performance switch quietly redefining the criterion. Fixed: the host path
+computes the same threshold, at the cost of one extra read per solve on a path
+that is not the default.
+
+All twelve arms now reach 1e-6, in 16 to 25 iterations rather than 3000. And
+the shipped configuration -- four levels, two sweeps -- is the best of the
+twelve, which is worth knowing on its own: more sweeps or fewer levels both
+make it worse.
+
+Two consequences beyond the arithmetic. `sandbox/poisson-3d-dirichlet/` also
+passes `gpuResidentScalars: false`, so every convergence flag it has ever
+printed was an absolute-threshold pass; its unpreconditioned-CG rows now clear
+the relative tolerance in 73 and 86 iterations where 300 used to be too few.
+That change was caught by the stale-expectation flag added to that page an hour
+earlier -- an expected failure that starts passing is reported, because the
+thing the expectation was about has changed. It fired on its first exposure to
+a real one.
+
+## But that is not what stops examples 17-19
+
+They run the GPU-resident path by default, which had the threshold right. The
+fix changes nothing for them, and the floor is real on both paths:
+
+| path | preconditioner | 60 | 300 | 3000 |
+| --- | --- | --- | --- | --- |
+| gpu | multigrid | 1.53e-5 | 8.07e-5 | 8.18e-4 (stopped, growing) |
+| host | multigrid | 1.29e-5 | 1.78e-5 (stopped, growing) | 1.78e-5 |
+| gpu | jacobi | 5.58e-2 | 3.26e-4 | 5.85e-6 |
+| host | jacobi | 5.58e-2 | 3.26e-4 | 5.77e-6 |
+| gpu | none | 5.55e-2 | 3.41e-4 | 6.96e-6 |
+
+Both paths agree to within 20%: multigrid floors near 1.4e-5 and then walks
+away; jacobi and no preconditioner at all reach 5.8e-6 and are still falling at
+3000.
+
+## What has been eliminated
+
+- **The stop test.** Both scalar paths, which disagreed about tolerance until
+  today, see the same floor.
+- **The operator and float32.** Unpreconditioned CG on the same frozen system
+  descends monotonically past where multigrid stops, and keeps going. Whatever
+  the floor is, the arithmetic can express numbers below it.
+- **The shape and the mask.** The clean system with identical dimensions and
+  identical pinned cells reaches 5.58e-7 in sixteen iterations.
+- **A geometric blind spot.** The leftover divergence was located per cell,
+  with the pinned cells excluded, and it is *uniform*: 1.25e-5 to 3.86e-5
+  across every band of rows, mildly worst around (44-46, 93-97), which is the
+  middle of the plume rather than a boundary or a coarse-grid seam.
+
+  The first version of that locator did not exclude the pinned cells and
+  reported the entire residual as living at j=126 -- the first of the two
+  pinned rows -- at 1.01e+1 against 2e-5 everywhere else. A dramatic
+  localisation, and just the vent being a vent. `solver_health.mjs` carries a
+  long comment about that exact mistake; a fresh tool made it again the same
+  day, which says something about how available the mistake is.
+
+## Where that leaves it
+
+**The V-cycle stops being a contraction for example 17's particular
+right-hand side once the residual is around 1e-5 relative, and PCG then walks
+away from its own best answer.** Not the shape, not the mask, not the operator,
+not the arithmetic, not a place in the domain -- the right-hand side.
+
+The experiment that would close the last link is the one this thread has been
+building towards: export example 17's actual `b` and substitute it into
+`sandbox/vcycle-floor/`, keeping the operator, mask and preconditioner
+identical. If the floor travels with `b`, the next question is which component
+of it -- and `export_system.mjs` plus `sandbox/stalled-system/` are the pattern
+for that, built for the 3D case and needing a 2D counterpart.
+
+Not done. The scenes are acceptable as they run, and this is recorded so that
+whoever picks it up starts from four eliminated candidates rather than from
+zero.
+
+---
+
 # The 2026-09-15 run (superseded, kept for the record)
 
 Every drivable example run for **12,000 solver steps** on real WebGPU

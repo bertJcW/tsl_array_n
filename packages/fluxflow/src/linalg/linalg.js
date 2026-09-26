@@ -2096,6 +2096,29 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		init(); // r = b - Ax, p = 0, Ap = 0
 
 		const initRTr = await dotRR.read();
+
+		// *** relativeTolerance was accepted here and ignored ***
+		//
+		// The GPU-resident form above computes max(tol*|b|, tol) and tests
+		// against that; this one compared the ABSOLUTE residual against tol. Same
+		// call, same arguments, two different criteria depending on
+		// gpuResidentScalars -- a performance switch silently changing what
+		// convergence means.
+		//
+		// Found from sandbox/vcycle-floor/, which passes gpuResidentScalars:
+		// false. Asking for 1e-6 relative on a 96x128 system with |b| = 12.61, it
+		// ran the full 3000 iterations reporting failure at a residual of 6.96e-7
+		// relative -- comfortably inside the tolerance it was asked for. The
+		// absolute test was demanding 1e-6 absolute, which is 7.9e-8 relative.
+		// The 1e-5 arm beside it 'converged' in 16 iterations to 5.58e-7
+		// relative, a better answer than the 1e-6 arm's, which is the shape of
+		// the tell.
+		//
+		// One extra read per solve, on a path that is not the default, and only
+		// when the caller asked for a relative test.
+		const stopThreshold = relativeTolerance
+			? Math.max( tol * Math.sqrt( Math.abs( await dotBB.read() ) ), tol )
+			: tol;
 		let newRTr = initRTr;
 		// Whether newRTr above reflects the current x -- only meaningful once
 		// the stop test starts being skipped. See the loop's own comment.
@@ -2130,9 +2153,9 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		// When the check was skipped, newRTr is from an earlier iteration and
 		// can only be larger than the true one, so this under-excludes rather
 		// than over-excludes -- the safe direction for a guard.
-		const guardIsANonEvent = () => Math.sqrt( Math.abs( newRTr ) ) < tol;
+		const guardIsANonEvent = () => Math.sqrt( Math.abs( newRTr ) ) < stopThreshold;
 
-		if ( Math.sqrt( Math.abs( initRTr ) ) >= tol ) {
+		if ( Math.sqrt( Math.abs( initRTr ) ) >= stopThreshold ) {
 
 			for ( let iter = 0; iter < maxiter; iter ++ ) {
 
@@ -2238,7 +2261,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 					newRTr = await dotRR.read();
 
-					if ( Math.sqrt( Math.abs( newRTr ) ) < tol ) break;
+					if ( Math.sqrt( Math.abs( newRTr ) ) < stopThreshold ) break;
 
 					// Walking away from its own best answer -- see
 					// MAX_RESIDUAL_GROWTH. Distinct from the growth check
@@ -2338,7 +2361,7 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 
 		// Unlike the sibling function above, this checks the true residual
 		// directly -- see this function's own header comment for why.
-		return Math.sqrt( Math.abs( newRTr ) ) < tol;
+		return Math.sqrt( Math.abs( newRTr ) ) < stopThreshold;
 
 	}
 

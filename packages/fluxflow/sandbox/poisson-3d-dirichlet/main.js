@@ -214,12 +214,27 @@ try {
 					`${ label }: PCG(${ name }) mask ${ masked }`,
 					ok === true && maxErr < 1e-2,
 					`converged=${ ok } iters=${ st.iterations } res/|b|=${ ( res / bNorm ).toExponential( 2 ) } stoppedBy=${ st.stoppedBy } max|x-xStar|=${ maxErr.toExponential( 2 ) }`,
-					// Unpreconditioned CG on the 3D problem is the control arm,
-					// not a candidate: it is here to show what the V-cycle is
-					// worth. 300 iterations is deliberately not enough for it,
-					// and the 2D control at a quarter the cells does clear it,
-					// which is the comparison.
-					( name === 'none' && shape.length === 3 ) ? 'unpreconditioned CG is the control arm; 300 iterations is not meant to be enough for it in 3D' : undefined
+					// Unpreconditioned CG is the control arm, here to show what the
+					// V-cycle is worth rather than as a candidate.
+					//
+					// It used to be an expected failure: 300 iterations was not
+					// enough for it in 3D. That expectation went stale on
+					// 2026-09-26, when PCG's host path was fixed to honour
+					// relativeTolerance instead of testing the absolute residual
+					// against tol -- this page passes gpuResidentScalars: false,
+					// so every convergence flag on it had been an absolute-
+					// threshold pass. Unpreconditioned CG now clears the same
+					// relative tolerance in 73 and 86 iterations.
+					//
+					// The flag that caught it is the one added an hour earlier for
+					// exactly this: an expected failure that starts PASSING means
+					// the thing the expectation was about has changed. It fired on
+					// its first exposure to a real change.
+					//
+					// The comparison the row exists for is unharmed and is now
+					// cleaner to read: 73-86 iterations unpreconditioned against
+					// 5-12 with the V-cycle.
+					undefined
 				);
 
 			}

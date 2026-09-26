@@ -109,14 +109,51 @@ const out = await page.evaluate( async () => {
 
 	};
 
-	const x = Array.from( { length: cells }, rand );
-	const y = Array.from( { length: cells }, rand );
-	const Mx = await apply( x );
-	const My = await apply( y );
+	// *** Two normalisations, because the obvious one is not safe ***
+	//
+	// Dividing |(Mx,y) - (x,My)| by |(Mx,y)| is what this tool did first, and it
+	// inflates the answer whenever that inner product is small through
+	// cancellation -- which it is, for random vectors: the dot of two random
+	// fields is ~sqrt(N) smaller than the product of their norms. Measured that
+	// way, examples/16-karman-vortex-street/ read 1.00e-2 against
+	// examples/17-smoke-fire/'s 7.10e-5, and a conclusion was written from the
+	// 140x. Example 16's (Mx,y) is -21.7 where example 17's is -216, so much of
+	// that gap is the denominator rather than the operator.
+	//
+	// Normalising by ||x||*||y|| estimates ||M - M^T|| directly. It
+	// underestimates by roughly sqrt(N), since random vectors rarely align with
+	// the worst direction, but that bias has the same shape for every scene --
+	// between these two it differs by 1.6x, not 140x -- so it is the figure that
+	// can be compared across scenes. Both are reported, over several draws,
+	// because one draw of a quantity with cancellation in it is not a
+	// measurement.
+	const draws = [];
 
-	const left = dot( Mx, y );
-	const right = dot( x, My );
-	const relative = Math.abs( left - right ) / Math.max( Math.abs( left ), Math.abs( right ), 1e-30 );
+	for ( let d = 0; d < 4; d ++ ) {
+
+		const x = Array.from( { length: cells }, rand );
+		const y = Array.from( { length: cells }, rand );
+		const Mx = await apply( x );
+		const My = await apply( y );
+
+		const l = dot( Mx, y );
+		const r = dot( x, My );
+		const normX = Math.sqrt( dot( x, x ) );
+		const normY = Math.sqrt( dot( y, y ) );
+
+		draws.push( {
+			left: l, right: r,
+			byInner: Math.abs( l - r ) / Math.max( Math.abs( l ), Math.abs( r ), 1e-30 ),
+			byNorms: Math.abs( l - r ) / Math.max( normX * normY, 1e-30 )
+		} );
+
+	}
+
+	const mean = ( key ) => draws.reduce( ( a, d ) => a + d[ key ], 0 ) / draws.length;
+	const left = draws[ 0 ].left;
+	const right = draws[ 0 ].right;
+	const relative = mean( 'byInner' );
+	const byNorms = mean( 'byNorms' );
 
 	const quads = [];
 	for ( let draw = 0; draw < 5; draw ++ ) {
@@ -136,7 +173,7 @@ const out = await page.evaluate( async () => {
 	return {
 		shape, cells, pinned,
 		levels: ps.settings?.multigrid?.numberOfLevels ?? null,
-		left, right, relative, quads
+		left, right, relative, byNorms, draws, quads
 	};
 
 } );
@@ -148,8 +185,13 @@ if ( out.error ) { console.log( `\ncould not measure: ${ out.error }` ); process
 console.log( `\n${ URL }` );
 console.log( `frozen at frame ${ AT }; shape ${ out.shape.join( 'x' ) } (${ out.cells } cells); ${ out.pinned } pinned cells; ${ out.levels ?? '?' } multigrid levels\n` );
 
-const symmetric = out.relative < 1e-4;
-console.log( `${ symmetric ? '\u2713' : '\u2717' } V-cycle symmetric -- (Mx,y) = ${ out.left.toExponential( 6 ) }, (x,My) = ${ out.right.toExponential( 6 ) }, rel diff ${ out.relative.toExponential( 2 ) }` );
+// The norm-normalised figure decides, since it is the one comparable between
+// scenes. 1e-6 of ||M|| is a tight bar for an operator assembled out of
+// several sweeps and transfers in float32.
+const symmetric = out.byNorms < 1e-6;
+console.log( `${ symmetric ? '\u2713' : '\u2717' } V-cycle symmetric -- |(Mx,y)-(x,My)| / ||x||||y|| = ${ out.byNorms.toExponential( 2 ) } (mean of 4 draws)` );
+console.log( `    normalised by the inner product instead -- the measure that misled this tool once: ${ out.relative.toExponential( 2 ) }` );
+console.log( `    first draw: (Mx,y) = ${ out.left.toExponential( 6 ) }, (x,My) = ${ out.right.toExponential( 6 ) }` );
 
 const negative = out.quads.every( ( q ) => q < 0 );
 const positive = out.quads.every( ( q ) => q > 0 );
