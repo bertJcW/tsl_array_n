@@ -347,7 +347,7 @@ export function createGridPressureSolver2( {
 	// paired inside one run -- see multigrid.js's own settings for the
 	// precedent. Off means the old, separate read; the check itself is
 	// identical either way.
-	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations, tolerance, checkBadCells: true, badCellsRideAlong: true, optimisticStopTest: true, gpuStopTest: true, fuseVcycleIntoIteration: true, fuseChunkIntoOneSubmission: false, gpuResidentSetup, relativeTolerance, residualRecomputeInterval, verifyConvergence };
+	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations, tolerance, checkBadCells: true, badCellsRideAlong: true, optimisticStopTest: true, gpuStopTest: true, fuseVcycleIntoIteration: true, fuseChunkIntoOneSubmission: false, gpuResidentSetup, relativeTolerance, residualRecomputeInterval, verifyConvergence , reportNoiseFloor: false};
 
 	const [ resolutionX, resolutionY ] = resolution;
 	const [ gridSpacingX, gridSpacingY ] = gridSpacing;
@@ -456,7 +456,21 @@ export function createGridPressureSolver2( {
 
 	const refreshPreconditionerMask = preconditionerBuilders.multigrid.refreshCoarseLevels;
 
-	const cg = createPreconditionedConjugateGradientSolver( applyLaplacian, applyPreconditioner, b, pressureGrid.data, { atomicScale } );
+	// operatorScale: an upper bound on the Laplacian's largest absolute diagonal,
+	// which is what the noise-floor estimate in linalg.js needs and cannot work
+	// out for itself -- the PCG solver takes the operator as an opaque function.
+	// The five-point/seven-point stencil's interior diagonal is the sum of 2/h^2
+	// over the axes; a boundary cell's is smaller, so this is the bound rather
+	// than the value.
+	//
+	// The estimate itself is off unless a caller asks for it -- it costs a host
+	// read per solve -- and is switched through settings.reportNoiseFloor at
+	// runtime rather than at construction, so a measurement can turn it on for
+	// one run. Diagnostic tools do; scenes do not.
+	const operatorScale = gridSpacing.slice( 0, 2 ).reduce( ( total, h ) => total + 2 / ( h * h ), 0 );
+
+	const cg = createPreconditionedConjugateGradientSolver( applyLaplacian, applyPreconditioner, b, pressureGrid.data,
+		{ atomicScale, operatorScale } );
 
 	// Updated after every project()-dispatch below, for diagnostics -- cg.solve()
 	// itself returns whether it actually converged (true residual < tolerance),
@@ -813,6 +827,7 @@ export function createGridPressureSolver2( {
 			cg.settings.gpuStopTest = settings.gpuStopTest === true;
 			cg.settings.fuseVcycleIntoIteration = settings.fuseVcycleIntoIteration === true;
 			cg.settings.fuseChunkIntoOneSubmission = settings.fuseChunkIntoOneSubmission === true;
+			cg.settings.reportNoiseFloor = settings.reportNoiseFloor;
 			diagnostics.converged = await timePhase( 'pressure-cg-solve', () => cg.solve(
 				settings.tolerance, settings.maxIterations,
 				settings.residualCheckInterval, settings.gpuResidentScalars, settings.batchIterations,
@@ -832,6 +847,13 @@ export function createGridPressureSolver2( {
 			// whether the solver's own residual agrees with a true
 			// b - Ax recomputed independently.
 			diagnostics.residual = cg.state ? Math.sqrt( Math.abs( cg.state.residualSquared ) ) : null;
+			// null unless reportNoiseFloor is on. toleranceBelowFloor being set is
+			// the answer to "why does this never converge": the tolerance asked for
+			// is under what float32 can verify a residual against, so no iteration
+			// count reaches it.
+			diagnostics.noiseFloor = cg.state ? cg.state.noiseFloor : null;
+			diagnostics.noiseFloorRelative = cg.state ? cg.state.noiseFloorRelative : null;
+			diagnostics.toleranceBelowFloor = cg.state ? cg.state.toleranceBelowFloor : null;
 			diagnostics.stoppedBy = cg.state ? cg.state.stoppedBy : null;
 
 			// *** Measurement instrument, not a feature ***

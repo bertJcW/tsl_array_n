@@ -795,6 +795,9 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	const dotRZ  = createDotReducer( shape, r, z );
 	const dotPAp = createDotReducer( shape, p, Ap );
 	const dotBB  = createDotReducer( shape, b, b );
+	// x.x, for the noise-floor estimate below. Built always, dispatched only when
+	// a caller asks for the estimate, so it costs a buffer and no dispatches.
+	const dotXX  = createDotReducer( shape, x, x );
 
 
 	// Live view of the most recent solve()'s own final r.r -- exposed (not
@@ -815,7 +818,67 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	// the solve is expensive, or because it is doing eighty iterations?" is
 	// not answerable without it, and it was guessed at more than once before
 	// it was measurable.
-	const state = { residualSquared: 0, iterations: 0, stoppedBy: 'none', companionValue: null };
+	// *** The floor this arithmetic can verify a residual against ***
+	//
+	// `r = b - A@x` in float32 is a cancellation: A is a difference operator, so
+	// forming A@x subtracts numbers of magnitude |x| from each other and leaves
+	// rounding error of order eps * |A| * |x| behind. That error does not shrink
+	// as the iteration proceeds while the residual does, so below
+	//
+	//     floor ~= eps * operatorScale * |x|
+	//
+	// the recomputed residual is rounding noise, and CG cannot descend on noise.
+	// A tolerance under that is unreachable at any iteration count.
+	//
+	// Measured on examples/17-smoke-fire/ frame 400 -- |b| = 26.93, |x| = 357.6,
+	// operatorScale 4 for the five-point stencil at h = 1 -- the estimate is
+	// 3.2e-6 relative against a floor of 5.84e-6 reproduced on the CPU in float32
+	// with this solver's own residual policy. Right order, within a factor of two,
+	// and an underestimate, which is the safe direction for a bound. See
+	// docs/long-run-stability.md, T3.
+	//
+	// *** Reported, never applied ***
+	//
+	// Nothing here changes a tolerance or a stop test. The value is a diagnostic:
+	// `converged: false` today means either "the budget was too small" or "the
+	// tolerance is under the floor", and those are indistinguishable and call for
+	// opposite responses. It took eliminating four candidates to tell them apart
+	// once; this says it on the first solve instead.
+	//
+	// Off by default because it costs one reduction and one host read per solve,
+	// and a host read is ~3 ms against a ~32 ms solve. The tool asking the
+	// question pays for the answer.
+	const OPERATOR_SCALE = options.operatorScale ?? null;
+	const FLOAT32_EPSILON = 2 ** -24;
+
+	const state = { residualSquared: 0, iterations: 0, stoppedBy: 'none', companionValue: null, noiseFloor: null, noiseFloorRelative: null, toleranceBelowFloor: null };
+
+	// Called once per solve, after the setup has put a residual in place, and
+	// only when a caller asked. `threshold` is what the stop test will actually
+	// compare against, so the comparison is like for like whether the caller
+	// asked for an absolute or a relative tolerance.
+	async function estimateNoiseFloor( tol, relativeTolerance ) {
+
+		state.noiseFloor = null;
+		state.toleranceBelowFloor = null;
+
+		if ( ! settings.reportNoiseFloor || OPERATOR_SCALE === null ) return;
+
+		// The threshold is derived here rather than passed in, so the two scalar
+		// paths need no plumbing and cannot disagree about it -- which they did,
+		// for months, about relativeTolerance itself.
+		const [ xxRaw, bbRaw ] = await Promise.all( [ dotXX.read(), dotBB.read() ] );
+		const xNorm = Math.sqrt( Math.abs( xxRaw ) );
+		const bNorm = Math.sqrt( Math.abs( bbRaw ) );
+		const threshold = relativeTolerance ? Math.max( tol * bNorm, tol ) : tol;
+
+		const floor = FLOAT32_EPSILON * OPERATOR_SCALE * xNorm;
+		state.noiseFloor = floor;
+		state.noiseFloorRelative = bNorm > 0 ? floor / bNorm : null;
+
+		if ( threshold < floor ) state.toleranceBelowFloor = { requested: threshold, floor, tolerance: tol };
+
+	}
 
 	// Runtime-switchable behaviour, the same shape multigrid.js uses and for
 	// the same reason: a comparison this project trusts is paired inside one
@@ -836,7 +899,11 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	// better of the two host-in-the-loop forms and stays for the
 	// configurations that cannot take the GPU one (a recompute interval
 	// above 1, or a host-side setup).
-	const settings = { optimisticStopTest: true, gpuStopTest: true };
+	// reportNoiseFloor lives here rather than being captured at construction, so a
+	// measurement tool can switch it on mid-run the way every other switch in
+	// this object can be switched -- see this file's header on why the paired
+	// arms of a comparison have to live inside one run.
+	const settings = { optimisticStopTest: true, gpuStopTest: true, reportNoiseFloor: options.reportNoiseFloor === true };
 
 	// How far past the last solve's iteration count a chunk reaches before
 	// the host looks. The trade is measurable in both directions:
@@ -1581,6 +1648,8 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 			//   seedScalarsKernel derives the remaining slots on the GPU
 			runGpuResidentSetup();
 
+			await estimateNoiseFloor( tol, relativeTolerance );
+
 			// Nothing is known about the residual yet. Infinity makes the
 			// first check's "did the residual grow?" test pass rather than
 			// fire against a value that was never measured.
@@ -2082,6 +2151,9 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 	async function solve( tol, maxiter, residualCheckInterval = 1, gpuResidentScalars = false, batchIterations = true, gpuResidentSetup = false, relativeTolerance = false, recomputeInterval = RESIDUAL_RECOMPUTE_INTERVAL, verifyConvergence = true ) {
 
 		state.stoppedBy = 'none';
+		state.noiseFloor = null;
+		state.noiseFloorRelative = null;
+		state.toleranceBelowFloor = null;
 		// Null until a read carrying the companion happens, so a caller can
 		// tell "no value from this solve" from "the value was zero".
 		state.companionValue = null;
@@ -2119,6 +2191,8 @@ export function createPreconditionedConjugateGradientSolver( applyOperator, appl
 		const stopThreshold = relativeTolerance
 			? Math.max( tol * Math.sqrt( Math.abs( await dotBB.read() ) ), tol )
 			: tol;
+
+		await estimateNoiseFloor( tol, relativeTolerance );
 		let newRTr = initRTr;
 		// Whether newRTr above reflects the current x -- only meaningful once
 		// the stop test starts being skipped. See the loop's own comment.

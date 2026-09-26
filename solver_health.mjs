@@ -132,7 +132,7 @@ const TOLERANCE = process.env.SOLVER_HEALTH_TOLERANCE ? Number( process.env.SOLV
 await page.addInitScript( ( [ frames, sample, tolerance ] ) => {
 
 	let stored, counter = 0;
-	window.__health = { samples: [], counters: { rejected: 0, breakdowns: 0, converged: 0, frames: 0, breakdownFrames: [], stopReasons: {}, zeroRhsFrames: 0, stopResiduals: [], stopsOnSolved: 0, atRestFrames: 0, stoppedGrowing: 0 }, geometry: null };
+	window.__health = { samples: [], counters: { rejected: 0, breakdowns: 0, converged: 0, frames: 0, breakdownFrames: [], stopReasons: {}, zeroRhsFrames: 0, stopResiduals: [], stopsOnSolved: 0, atRestFrames: 0, stoppedGrowing: 0, belowFloor: null, belowFloorFrames: 0 }, geometry: null };
 	window.__done = false;
 
 	Object.defineProperty( window, '__fluxflowProbe', {
@@ -147,6 +147,11 @@ await page.addInitScript( ( [ frames, sample, tolerance ] ) => {
 			// and the collider weights are looked for one level down too.
 			const inner = solver.pressureSolver ? solver : ( solver.solver ?? solver );
 			if ( tolerance !== null && inner.pressureSolver ) inner.pressureSolver.settings.tolerance = tolerance;
+
+			// Ask the solver what floor its own arithmetic can verify a residual
+			// against. Off by default in the library because it costs a host read per
+			// solve; this probe exists to explain a verdict, so it pays.
+			if ( inner.pressureSolver ) inner.pressureSolver.settings.reportNoiseFloor = true;
 
 			const original = solver.onAdvanceTimeStep;
 
@@ -246,6 +251,13 @@ await page.addInitScript( ( [ frames, sample, tolerance ] ) => {
 
 				}
 				if ( d.converged === true ) c.converged ++;
+
+				// The answer to "why does this never converge", when it is the answer:
+				// the tolerance asked for is under what float32 can verify, so no
+				// iteration count reaches it. Recorded once -- it is a property of the
+				// configuration, not news on every frame.
+				if ( d.toleranceBelowFloor && c.belowFloor === null ) c.belowFloor = { ...d.toleranceBelowFloor, relative: d.noiseFloorRelative, frame: n };
+				if ( d.toleranceBelowFloor ) c.belowFloorFrames ++;
 
 				if ( n >= frames ) { window.__done = true; probe.stop && probe.stop(); return; }
 				if ( n % sample !== 0 ) return;
@@ -652,6 +664,16 @@ if ( ! first.hasWeights ) console.log( 'no collider face weights from this solve
 if ( ! first.driven ) console.log( 'no inlet: nothing in this formulation forces a vent-only domain to balance, so the verdict here rests on finiteness alone and everything else is reported' );
 console.log( `solver counters: ${ counters.converged } converged, ${ counters.rejected } rejected, ${ counters.breakdowns } CG breakdowns` +
 	( counters.breakdownFrames.length ? ` (first at frame ${ counters.breakdownFrames[ 0 ] }, last ${ counters.breakdownFrames[ counters.breakdownFrames.length - 1 ] })` : '' ) );
+if ( counters.belowFloor ) {
+
+	const f = counters.belowFloor;
+	console.log( `   *** the tolerance asked for is BELOW this solver's own noise floor, on ${ counters.belowFloorFrames } of ${ counters.frames } frames ***` );
+	console.log( `   asked for a residual under ${ f.requested.toExponential( 2 ) }; float32 can only verify b - Ax down to ${ f.floor.toExponential( 2 ) }` +
+		( f.relative !== null && f.relative !== undefined ? ` (${ f.relative.toExponential( 2 ) } relative)` : '' ) +
+		`, first seen at frame ${ f.frame }` );
+	console.log( `   no iteration count reaches it. Raise the tolerance above the floor or accept that this scene cannot report convergence.` );
+
+}
 if ( counters.stoppedGrowing ) console.log( `   ${ counters.stoppedGrowing } solves stopped early because the residual was growing away from their best -- reported, not counted as breakdowns, because the residual criterion judges what they returned` );
 if ( counters.atRestFrames ) console.log( `   ${ counters.atRestFrames } frames handed the solve a system already at a residual of exactly 0 -- the scene was at rest for those` );
 if ( counters.stopsOnSolved ) console.log( `   ${ counters.stopsOnSolved } guard stops on a system already solved to a residual of exactly 0 -- not counted as breakdowns, see the note in this file` );

@@ -879,10 +879,47 @@ diagonal.
 > matches a number without a reason is the thing this document keeps being about.
 
 A solver handed a tolerance beneath what its own arithmetic can verify should
-say so on the first iteration -- `stoppedBy: 'tolerance-below-noise-floor'` with
-the computed value -- rather than spending its whole budget and reporting
-`converged: false` with no reason. That is the same shape as every other finding
-here, and it is the one worth building.
+say so rather than spending its whole budget and reporting `converged: false`
+with no reason. That is the same shape as every other finding here, and it is
+**built**.
+
+`createPreconditionedConjugateGradientSolver` takes an `operatorScale` -- an
+upper bound on the largest absolute diagonal, which the PCG cannot work out for
+itself because it takes the operator as an opaque function, and which both
+pressure solvers derive from their own grid spacing as the sum of `2/h^2` over
+the axes. Once per solve it then reads `|x|`, forms `eps * operatorScale * |x|`,
+and if the threshold the stop test will use falls under it, records
+`diagnostics.toleranceBelowFloor` alongside `diagnostics.noiseFloor`.
+
+**Reported, never applied.** No tolerance is changed and no stop test moves. The
+point is only that `converged: false` stops being ambiguous between "the budget
+was too small" and "the tolerance is unreachable".
+
+It is off by default -- `settings.reportNoiseFloor`, switchable at runtime like
+every other switch on that object -- because it costs one reduction and one host
+read per solve, and a host read is ~3 ms against a ~32 ms solve.
+`solver_health.mjs` turns it on, since explaining a verdict is what it is for.
+
+Measured over 300 frames each, which is also the check that it discriminates
+rather than merely fires:
+
+| scene | frames it fires on | asked for | floor | converged |
+| --- | --- | --- | --- | --- |
+| 17 smoke and fire | **299 / 301** | 2.49e-6 | 5.93e-6 | 0 / 301 |
+| 16 Kármán vortex street | **1 / 301** | 1.26e-4 | 1.26e-2 | 300 / 301 |
+
+Example 17 is under the floor structurally, and the probe now says so at frame 2
+-- where arriving at the same conclusion by hand took eliminating four
+candidates across two documents. Example 16 fires on frame 1 only: the
+impulsively started flow whose pressure peaks at 505, so `|x|` is briefly huge
+and the floor with it, at 1.26e-2. That is above even the health probe's own
+conservation bar, which is the right reading of a frame nobody can solve
+usefully, and it is the one frame of 12,001 that example 16 has always missed.
+
+That contrast is the argument for computing this per solve rather than
+calibrating it once per machine: the floor moved by four orders of magnitude
+between two frames of the same scene, and `eps` -- the only machine-dependent
+term -- is fixed at `2^-24` by the WebGPU specification.
 
 ### It was already half-known, in the right words
 
