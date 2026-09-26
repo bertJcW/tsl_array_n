@@ -851,12 +851,57 @@ real: interval 1 is faster for scenes whose tolerance sits above the
 cancellation floor, and unreachable for scenes whose tolerance sits below it.
 
 A third option is better than either and is what the T3 thread has been arguing
-for throughout: **the floor is computable.** It is about `eps * |A@x| * sqrt(N)`,
-which is 6e-8 * 26.9 * 110 - 1.8e-4 absolute, 6.6e-6 relative, against a
-measured 5.84e-6. A solver handed a tolerance beneath what its own arithmetic
-can verify should say so on the first iteration, rather than spending its whole
-budget and reporting `converged: false` with no reason. That is the same shape as
-every other finding in this document, and it is the one worth building.
+for throughout: **the floor is computable**, from quantities the solver already
+holds.
+
+`A` is a difference operator, so forming `A@x` subtracts numbers of magnitude
+`|x|` from each other. The rounding error that leaves behind is of order
+`eps * |A| * |x|`, and it does not shrink as the iteration proceeds while the
+residual does -- so the floor is where the two meet:
+
+> floor (relative) ~= eps * |A| * |x| / |b|
+
+Checked against the export: `|b|` = 2.693e+1, `|x|` = 3.576e+2, `eps` = 5.96e-8
+and `|A|` = 4 for the five-point stencil at h = 1, giving **3.2e-6 against a
+measured 5.8e-6** -- the right order, within a factor of two, and an
+underestimate, which is the safe direction for a bound. It is the computable
+stand-in for the classical `eps * kappa(A)`, and every term in it is already to
+hand: `|b|` is computed during setup (it is `SLOT_BB`, for the relative stop
+threshold), `|x|` is available after any iteration, and `|A|` is the largest
+diagonal.
+
+> **Retracted:** this section first gave the formula as `eps * sqrt(N)`, which
+> evaluates to 6.61e-6 and sits *closer* to the measurement than the expression
+> above. It has no derivation behind it, and it cannot be right in general: it
+> contains neither `|A|` nor `|x|`, and the floor must depend on both. On this
+> problem `|A|*|x|/|b|` is 53 and `sqrt(N)` is 111, within a factor of two of
+> each other, which is the whole reason both land near 5.8e-6. A formula that
+> matches a number without a reason is the thing this document keeps being about.
+
+A solver handed a tolerance beneath what its own arithmetic can verify should
+say so on the first iteration -- `stoppedBy: 'tolerance-below-noise-floor'` with
+the computed value -- rather than spending its whole budget and reporting
+`converged: false` with no reason. That is the same shape as every other finding
+here, and it is the one worth building.
+
+### It was already half-known, in the right words
+
+`examples/16-karman-vortex-street/` sets `tolerance: 1e-5` and says why:
+
+> 1e-6 only reaches 18 of 400, so it is below this operator's achievable floor.
+> That is a caller's accuracy requirement, not an internal constant tuned to
+> make the solver work -- the distinction this project's no-magic-numbers rule
+> turns on.
+
+Every part of that is right. It was measured, it was named a floor, and the
+override was correctly framed as a caller's requirement rather than a magic
+number. What was missing is that it is **not this operator's floor.** It is
+float32's floor for recomputing `b - A@x`, and it applies to every scene whose
+`|A|*|x|/|b|` is large enough -- which is why examples 17, 18 and 19 kept the
+1e-6 default and have converged on zero frames ever since.
+
+Two scenes, 16 and 35, carry a hand-set 1e-5 for this reason. The others do not,
+and nothing tells them to.
 
 Not implemented. Changing the recompute policy alters every scene's iteration
 count and its speed, and which of the three answers is right is a decision about
