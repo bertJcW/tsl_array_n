@@ -667,8 +667,55 @@ Two things make this tractable rather than just alarming:
   the median is healthy, which points at a condition the scene reaches
   occasionally rather than a systematically wrong operator.
 
-Recorded, not fixed. It is its own investigation and it does not belong folded
-into the one that found it.
+**Fixed. It was the same tolerance-below-floor pathology, at its most severe, and
+the cause was in the scene rather than the solver.**
+
+Example 25's pressure options carry a paragraph explaining that the tolerance is
+loosened to 1e-4, why 1e-5 was too tight for it, and that a small
+`velocityDamping` is kept alongside. **The `tolerance: 1e-4` that paragraph
+describes was never in the options.** The scene inherited the library default --
+1e-5 when the comment was written, 1e-6 since -- so the failure the loosening was
+meant to fix came back without the comment changing.
+
+The chain, measured over 3,000 frames at the inherited 1e-6:
+
+| | |
+| --- | --- |
+| the floor float32 can verify here | 8.72e-5 (4.73e-5 relative) |
+| what 1e-6 asks for | 1.84e-6 -- **47x under the floor** |
+| converged | 284 / 3,001 |
+| iterations spent | mean 179, median 200 -- the whole cap |
+| `pAp-growth` tripped | 57 times |
+| worst residual / floor | **139,372,513** |
+
+Grinding a 200-iteration budget below the noise floor is grinding in rounding
+noise, and `p` compounds geometrically until the guard stops it -- which is the
+failure `linalg.js`'s `pAp-growth` check was written for, doing its job.
+
+With `tolerance: 1e-4` actually set, over **30,000 frames**:
+
+| | before (1e-6) | after (1e-4) |
+| --- | --- | --- |
+| verdict | BROKEN at frame 750 | **HEALTHY over 30,001** |
+| converged | 284 / 3,001 | **30,001 / 30,001** |
+| rejections, CG breakdowns | 0, 57 | 0, 0 |
+| iterations per solve, mean / worst | 179 / 200 | **1.3 / 6** |
+| residual / floor, median / worst | 0.6 / 1.4e8 | **0.8 / 2.1** |
+| floor warning | 2,894 of 3,001 frames | **never** |
+
+138 times less solver work, and a worst case of 2.1x the floor means every frame
+now sits at what float32 can deliver. 3e-4 and 1e-3 also converge but stop at
+2.4x the floor, which is slack for nothing, so 1e-4 is the tightest that works --
+the same value the author had already chosen.
+
+The fields are flat too, which the verdict cannot check here since the scene has
+no inlet: speed falls from 0.10 at frame 750 to 0.03 at 29,250 as the dye settles,
+worst divergence stays between 1.4e-5 and 7.2e-5 across the whole run, and the
+residual holds around 8e-5. Nothing rises monotonically. Mass imbalance reads
+4.7%, reported and out of scope.
+
+`maxIterations: 200` is gone with it: the cap is derived from the grid now, and
+with a reachable tolerance the worst this scene spends is 6 iterations.
 
 ---
 
