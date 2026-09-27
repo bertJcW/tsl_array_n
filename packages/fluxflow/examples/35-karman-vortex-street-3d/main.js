@@ -342,7 +342,11 @@ try {
 		pressure: {
 			multigrid: { numberOfLevels: 4, numberOfSmoothingIterationsDown: 3, numberOfSmoothingIterationsUp: 3, numberOfCoarsestIterations: 30 },
 			tolerance: 1e-5,
-			maxIterations: 100
+			// maxIterations was 100. The derived cap is LOWER -- 72 for 48^3, since
+			// mantaflow's factor is 1 in 3D rather than 4 -- and that is still
+			// above the 54 iterations this scene was measured spending at its
+			// worst. Verified rather than assumed, because a reduction is the
+			// direction that can truncate.
 		}
 	} );
 

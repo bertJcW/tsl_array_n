@@ -70,7 +70,9 @@ export function createGridPressureSolver3( {
 	multigrid = {},
 	preconditioner = 'multigrid',
 	tolerance = 1e-6,
-	maxIterations = 100,
+	maxIterations = null,
+	// mantaflow's cgMaxIterFac. See the derivation below.
+	maxIterationsFactor = 1.5,
 	relativeTolerance = true,
 	residualRecomputeInterval = 1,
 	verifyConvergence = true,
@@ -82,7 +84,35 @@ export function createGridPressureSolver3( {
 	maxPlausiblePressure = DEFAULT_MAX_PLAUSIBLE_PRESSURE
 } = {} ) {
 
-	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations, tolerance, checkBadCells: true, badCellsRideAlong: true, optimisticStopTest: true, gpuStopTest: true, fuseVcycleIntoIteration: true, fuseChunkIntoOneSubmission: false, gpuResidentSetup, relativeTolerance, residualRecomputeInterval, verifyConvergence , reportNoiseFloor: false};
+	// *** The iteration cap is derived from the grid, not set per scene ***
+	//
+	// Borrowed from mantaflow, which computes it rather than asking for it
+	// (source/plugin/pressure.cpp): `maxIter = cgMaxIterFac * flags.getSize().max()
+	// * (flags.is3D() ? 1 : 4)`, with cgMaxIterFac defaulting to 1.5. The factor
+	// of 4 in 2D is theirs and is empirical: CG on a 2D Poisson problem needs
+	// several times more iterations relative to the linear dimension than in 3D.
+	//
+	// Worth borrowing because the hand-set numbers this replaces had come loose
+	// from the grids they were meant for. Surveyed before the change:
+	//
+	//   14 stable fluids      32^2       100
+	//   16 Karman             256x128     40   <- largest grid, smallest budget
+	//   17 smoke and fire     96x128      60
+	//   18 explosion          128x160     60
+	//   35 Karman 3D          48^3       100
+	//
+	// A cap only binds on the frames that need it, so raising it costs nothing on
+	// a frame that converges in eight iterations and stops truncating the ones
+	// that do not. It is safe to raise only now that the tolerances are above the
+	// noise floor: a scene asking for the unreachable would otherwise spend the
+	// whole of a much larger budget every frame instead of the whole of a small
+	// one. The `residual-growing` stop reason is the other half of that guard.
+	//
+	// maxIterations is still accepted and still wins, for a scene that has a
+	// measured reason.
+	const iterationCap = maxIterations ?? Math.ceil( maxIterationsFactor * Math.max( ...resolution ) * 1 /* this solver is 3D, so mantaflow's 3D factor */ );
+
+	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations: iterationCap, tolerance, checkBadCells: true, badCellsRideAlong: true, optimisticStopTest: true, gpuStopTest: true, fuseVcycleIntoIteration: true, fuseChunkIntoOneSubmission: false, gpuResidentSetup, relativeTolerance, residualRecomputeInterval, verifyConvergence , reportNoiseFloor: false};
 
 	const [ resolutionX, resolutionY, resolutionZ ] = resolution;
 	const [ gridSpacingX, gridSpacingY, gridSpacingZ ] = gridSpacing;

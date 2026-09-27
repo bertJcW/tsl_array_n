@@ -140,7 +140,11 @@ try {
 		//
 		// 0.8x means the solve is taking everything float32 allows, so nothing is
 		// being given away by asking for 3e-5 instead of 1e-5.
-		pressure: { multigrid: { numberOfLevels: 4 }, maxIterations: 60, tolerance: 3e-5 }
+		// The iteration cap is derived from the grid now -- see
+		// grid_pressure_solver2.js's own note, borrowed from mantaflow's
+		// cgMaxIterFac -- so this scene no longer states one. It was 60, against
+		// a measured worst of 14 iterations actually spent.
+		pressure: { multigrid: { numberOfLevels: 4 }, tolerance: 3e-5 }
 	} );
 
 	// Explicit clear -- grid_smoke_solver2.js's own header comment on why

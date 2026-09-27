@@ -191,7 +191,11 @@ try {
 		origin: [ 0, 0 ],
 		force,
 		dt,
-		pressure: { multigrid: { numberOfLevels: 4 }, maxIterations: 100 }
+		// The iteration cap is derived from the grid now -- see
+		// grid_pressure_solver2.js's own note, borrowed from mantaflow's
+		// cgMaxIterFac -- so this scene no longer states one. It was 100, against
+		// a measured worst of far fewer iterations actually spent.
+		pressure: { multigrid: { numberOfLevels: 4 } }
 	} );
 
 	// dye's own advection, bound to the solver's already-projected

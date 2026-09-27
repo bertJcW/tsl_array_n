@@ -433,7 +433,12 @@ try {
 			// this project's no-magic-numbers rule turns on. The number is
 			// also scene-independent in meaning now that it is relative.
 			tolerance: 1e-5,
-			maxIterations: 40,
+			// maxIterations was 40 here, and 40 was also the worst number of
+			// iterations this scene was measured actually spending -- it was
+			// sitting exactly on its own ceiling. The cap is derived from the grid
+			// now (1536 for 256x128; see grid_pressure_solver2.js, borrowed from
+			// mantaflow's cgMaxIterFac), which for a scene whose mean is 4.7 costs
+			// nothing and stops truncating the one frame that needed more.
 		}
 	} );
 

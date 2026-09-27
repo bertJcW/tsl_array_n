@@ -132,7 +132,7 @@ const TOLERANCE = process.env.SOLVER_HEALTH_TOLERANCE ? Number( process.env.SOLV
 await page.addInitScript( ( [ frames, sample, tolerance ] ) => {
 
 	let stored, counter = 0;
-	window.__health = { samples: [], counters: { rejected: 0, breakdowns: 0, converged: 0, frames: 0, breakdownFrames: [], stopReasons: {}, zeroRhsFrames: 0, stopResiduals: [], stopsOnSolved: 0, atRestFrames: 0, stoppedGrowing: 0, belowFloor: null, belowFloorFrames: 0, overFloor: [], floorRelative: [] }, geometry: null };
+	window.__health = { samples: [], counters: { rejected: 0, breakdowns: 0, converged: 0, frames: 0, breakdownFrames: [], stopReasons: {}, zeroRhsFrames: 0, stopResiduals: [], stopsOnSolved: 0, atRestFrames: 0, stoppedGrowing: 0, belowFloor: null, belowFloorFrames: 0, overFloor: [], floorRelative: [], iterations: [], maxIterationsSeen: 0 }, geometry: null };
 	window.__done = false;
 
 	Object.defineProperty( window, '__fluxflowProbe', {
@@ -264,6 +264,9 @@ await page.addInitScript( ( [ frames, sample, tolerance ] ) => {
 				// the first frame that happened to exceed the tolerance -- is not the
 				// number to choose from.
 				if ( Number.isFinite( d.noiseFloorRelative ) ) c.floorRelative.push( d.noiseFloorRelative );
+				// Iterations actually spent, which is what says whether raising the cap
+				// costs anything: a cap only binds on the frames that reach it.
+				if ( Number.isFinite( d.iterations ) ) { c.iterations.push( d.iterations ); if ( d.iterations > c.maxIterationsSeen ) c.maxIterationsSeen = d.iterations; }
 
 				if ( n >= frames ) { window.__done = true; probe.stop && probe.stop(); return; }
 				if ( n % sample !== 0 ) return;
@@ -670,6 +673,14 @@ if ( ! first.hasWeights ) console.log( 'no collider face weights from this solve
 if ( ! first.driven ) console.log( 'no inlet: nothing in this formulation forces a vent-only domain to balance, so the verdict here rests on finiteness alone and everything else is reported' );
 console.log( `solver counters: ${ counters.converged } converged, ${ counters.rejected } rejected, ${ counters.breakdowns } CG breakdowns` +
 	( counters.breakdownFrames.length ? ` (first at frame ${ counters.breakdownFrames[ 0 ] }, last ${ counters.breakdownFrames[ counters.breakdownFrames.length - 1 ] })` : '' ) );
+if ( counters.iterations && counters.iterations.length ) {
+
+	const sorted = counters.iterations.slice().sort( ( a, b ) => a - b );
+	const q = ( f ) => sorted[ Math.min( sorted.length - 1, Math.floor( f * ( sorted.length - 1 ) ) ) ];
+	const mean = sorted.reduce( ( a, v ) => a + v, 0 ) / sorted.length;
+	console.log( `   iterations per solve: mean ${ mean.toFixed( 1 ) }, median ${ q( 0.5 ) }, 90th ${ q( 0.9 ) }, worst ${ counters.maxIterationsSeen }` );
+
+}
 if ( counters.floorRelative && counters.floorRelative.length ) {
 
 	const sorted = counters.floorRelative.slice().sort( ( a, b ) => a - b );

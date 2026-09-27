@@ -1142,6 +1142,75 @@ diagnostic switch rather than a debug message.
 
 ---
 
+# The iteration cap comes from the grid now, and it is coupled to the tolerance
+
+Borrowed from mantaflow, which derives its budget rather than asking for one:
+`maxIter = cgMaxIterFac * flags.getSize().max() * (flags.is3D() ? 1 : 4)` with
+`cgMaxIterFac` defaulting to 1.5. Both pressure solvers now compute the same
+thing, `maxIterations` remains an override, and six scenes stopped stating one.
+
+The hand-set numbers had come loose from the grids they were for:
+
+| scene | grid | cap, before -> after | iterations actually spent, mean / worst | verdict |
+| --- | --- | --- | --- | --- |
+| 14 stable fluids | 32² | 100 -> 192 | 3.9 / 50 | HEALTHY |
+| 16 Kármán | 256x128 | **40 -> 1536** | 4.7 / **40 -> 70** | HEALTHY |
+| 17 smoke and fire | 96x128 | 60 -> 768 | 11.9 / **768** | HEALTHY |
+| 18 explosion | 128x160 | 60 -> 960 | 11.3 / 18 | HEALTHY |
+| 19 fuel fire | 96x128 | 60 -> 768 | 9.5 / 13 | HEALTHY |
+| 35 Kármán 3D | 48³ | **100 -> 72** | 7.3 / 54 | HEALTHY |
+
+12,000 steps each, zero circuit-breaker rejections and zero CG breakdowns
+throughout.
+
+**Example 16 is the one this fixes.** Its cap was 40 and 40 was also the worst
+number of iterations it was measured spending -- it was sitting exactly on its
+own ceiling. With the cap derived it spends 70 on that frame and converges,
+while the mean stays 4.7: a cap only binds on the frames that reach it, so
+raising one costs nothing on a frame that finishes in four.
+
+**Example 35 goes the other way.** Its derived cap is *lower* than its old one,
+72 against 100, because mantaflow's factor is 1 in 3D rather than 4. Its measured
+worst is 54, so the reduction is harmless -- verified rather than assumed, since a
+reduction is the direction that can truncate.
+
+## The coupling, found by breaking example 18
+
+With the derived cap and nothing else changed, `18-explosion` went **BROKEN**:
+worst iterations 960, exactly its new ceiling, and one CG guard tripped, where
+the same scene at a cap of 60 was HEALTHY.
+
+The mechanism is the one T3 established. Its tolerance was 1e-5, close to its
+floor, so a few percent of frames could not reach it. At a cap of 60 those frames
+stopped before the residual got down into the rounding noise; at 960 they ground
+all the way into it, and past the floor there is nothing but noise to descend on.
+
+So the earlier choice of 1e-5 for that scene -- justified as "the tighter of the
+two that work, and it converges on 98% of frames" -- stopped being right the
+moment the cap was derived. At 3e-5 it converges on 12,001 of 12,001 with a worst
+of 18 iterations.
+
+**The rule is general, not a number for that scene: a budget derived from the
+grid is safe only when the tolerance is comfortably above the floor**, because
+the budget is then never spent looking for something unreachable. The two knobs
+have to be set together, and `residual-growing` is the backstop for when they are
+not.
+
+## What is still rough
+
+`17-smoke-fire` spends **768 iterations -- its whole derived budget -- on 3 frames
+of 12,001**, and converges on 11,998. The verdict is HEALTHY and no guard fires,
+so this is not a correctness problem, but those frames do 64 times the median's
+work and will show as a frame-time spike. Its tolerance of 3e-5 is about five
+times its estimated median floor, which sounded comfortable and is evidently not
+comfortable on every frame.
+
+Recorded rather than smoothed over. Loosening 17 further would trade accuracy on
+11,998 frames to save three, which is the wrong trade to make without being asked
+for it.
+
+---
+
 # The 2026-09-15 run (superseded, kept for the record)
 
 Every drivable example run for **12,000 solver steps** on real WebGPU

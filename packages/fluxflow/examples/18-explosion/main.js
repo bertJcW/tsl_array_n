@@ -136,17 +136,32 @@ try {
 		// no-magic-numbers rule turns on, in examples/16-karman-vortex-street/'s
 		// own words.
 		//
-		// The tighter of the two that work, deliberately. Over 12,001 steps:
+		// 1e-5 was chosen here first, as the tighter of the two that work: over
+		// 12,001 steps it reached 11,781 against 3e-5's 12,001, and stopped three
+		// times closer to the floor. That was measured with a hand-set cap of 60
+		// iterations, and it stopped being the right answer when the cap became
+		// derived from the grid (960 for this scene).
 		//
-		//   1e-5   11,781 / 12,001, residual a median 0.5x the floor
-		//   3e-5   12,001 / 12,001, residual a median 5.0x the floor
+		// With the larger budget, the 2% of frames that could not reach 1e-5 no
+		// longer stopped at 60 -- they ran the full 960, which means grinding
+		// below the noise floor where there is nothing but rounding error to
+		// descend on. Measured: worst iterations 960, one CG guard tripped, and
+		// the health verdict BROKEN, where the same scene at a cap of 60 was
+		// HEALTHY.
 		//
-		// 3e-5 converges on every frame but stops five times above the floor,
-		// which is accuracy left on the table. 1e-5 misses 220 frames of 12,001
-		// and is three times tighter on the rest, and the frames it misses are at
-		// the floor anyway. Unlike 17 and 19, this scene has the headroom for the
-		// stricter number, which is why it does not share theirs.
-		pressure: { multigrid: { numberOfLevels: 4 }, maxIterations: 60, tolerance: 1e-5 }
+		// So the two knobs are coupled, and the rule is the general one rather
+		// than a number for this scene: a budget derived from the grid is only
+		// safe if the tolerance is comfortably above the floor, because the budget
+		// is then never spent looking for something unreachable. 3e-5 is that, and
+		// it converges on every frame.
+		//
+		//   1e-5   11,781 / 12,001 at a cap of 60; BROKEN at a cap of 960
+		//   3e-5   12,001 / 12,001
+		// The iteration cap is derived from the grid now -- see
+		// grid_pressure_solver2.js's own note, borrowed from mantaflow's
+		// cgMaxIterFac -- so this scene no longer states one. It was 60, against
+		// a measured worst of well under it iterations actually spent.
+		pressure: { multigrid: { numberOfLevels: 4 }, tolerance: 3e-5 }
 	} );
 
 	// *** density/temperature burst: injected on frame 0 itself, through a
