@@ -266,7 +266,41 @@ try {
 		// A small velocityDamping is kept as well, an order of magnitude below
 		// the default -- enough to stop FLIP noise accumulating over a long run,
 		// far too little to flatten a plume in the first few seconds.
-		pressure: { maxPlausiblePressure: 5000, maxIterations: 200 }
+		//
+		// *** The `tolerance: 1e-4` that the paragraph above describes was never
+		// actually in these options ***
+		//
+		// Everything above was the right diagnosis and the line implementing it
+		// was missing, so this scene inherited the library default -- 1e-5 at the
+		// time, 1e-6 since -- and the failure that the loosening was meant to fix
+		// came back without the comment changing. Found by measurement rather
+		// than by reading: solver_health.mjs reported it BROKEN at frame 750,
+		// leaving 1.31e-2 of the divergence the projection was asked to remove
+		// against a bar of 1e-2.
+		//
+		// The chain, measured over 3,000 frames at the inherited 1e-6:
+		//
+		//   the floor float32 can verify here   8.72e-5  (4.73e-5 relative)
+		//   what 1e-6 asks for                  1.84e-6  -- 47x under the floor
+		//   so: converged                       284 / 3,001
+		//       iterations spent                mean 179, median 200 -- the whole cap
+		//       pAp-growth guard tripped        57 times
+		//       worst residual / floor          139,372,513
+		//
+		// Grinding a 200-iteration budget below the noise floor is grinding in
+		// rounding noise, and `p` compounds geometrically until the guard stops
+		// it -- the failure linalg.js's pAp-growth check was written for.
+		//
+		// With tolerance 1e-4 actually set, over the same 3,000 frames:
+		// 3,001 / 3,001 converged, zero breakdowns, and iterations per solve fall
+		// from a mean of 179 to 1.3. The residual sits at 0.7x the floor, so the
+		// accuracy is everything float32 can deliver; 3e-4 and 1e-3 also converge
+		// but stop at 2.4x the floor, which is slack for nothing.
+		//
+		// maxIterations: 200 is gone with it. The cap is derived from the grid now
+		// (see grid_pressure_solver2.js), and with a reachable tolerance the worst
+		// this scene spends is 6 iterations, so no cap is doing any work here.
+		pressure: { maxPlausiblePressure: 5000, tolerance: 1e-4 }
 	} );
 
 	function seedScene() {
