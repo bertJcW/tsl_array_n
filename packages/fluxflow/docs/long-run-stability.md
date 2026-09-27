@@ -1081,6 +1081,65 @@ The number that decides a tolerance is the convergence count over a long run;
 the floor says which order of magnitude to try first, which is worth a great deal
 when the alternative is bisecting four candidates, and nothing more than that.
 
+## What mantaflow asks for, as an outside calibration
+
+Read from `tum-pbs/mantaflow` at `source/plugin/pressure.cpp` and
+`source/conjugategrad.{h,cpp}`.
+
+**Its default is `cgAccuracy = 1e-3`**, and that number is not comparable to ours
+by itself, because the criterion is a different quantity:
+
+```cpp
+// use the l2 norm of the residual for convergence check? (usually max norm is recommended instead)
+if (this->mUseL2Norm) { mResNorm = GridSumSqr(mResidual).sum; }
+else                  { mResNorm = mResidual.getMaxAbs(); }
+if (mResNorm < mAccuracy) { ... return false; }
+```
+
+By default it is the **maximum absolute per-cell residual, against an absolute
+threshold**. Ours is `|r|_2 < tolerance * |b|` -- an L2 norm, relativised. (Its
+L2 branch compares the *sum of squares* to the same threshold, which is looser
+again, and its own comment recommends against it.)
+
+Converted onto example 17, 12,288 cells with `|b|_2` = 26.93:
+
+| | criterion | implies max\|r\| under |
+| --- | --- | --- |
+| mantaflow default | max\|r\| < 1e-3 | 1e-3 |
+| ours, old 1e-6 | \|r\|_2 < 2.69e-5 | 2.69e-5 |
+| ours, new 3e-5 | \|r\|_2 < 8.1e-4 | 8.1e-4 |
+
+**Even after loosening, this package asks for more than mantaflow's default
+does.** The old 1e-6 was at least 37x stricter on the max norm, and around
+4000x stricter measured per cell.
+
+Its iteration budget is an order of magnitude larger as well:
+`cgMaxIterFac = 1.5` with `maxIter = 1.5 * max_dimension * (is3D ? 1 : 4)`, which
+for a 2D 96x128 scene is **768** against our 60.
+
+### And it has the same warning, reached independently
+
+`pressure.cpp`, lines 349-350:
+
+```cpp
+if (zeroPressureFixing || cgAccuracy < 1e-07) {
+    if (FLOATINGPOINT_PRECISION == 1)
+        debMsg("Warning - high CG accuracy with single-precision floating point accuracy might not converge...", 2);
+```
+
+That is this document's whole T3 thread in one line of someone else's source:
+**a high accuracy asked of single-precision arithmetic may simply not converge.**
+mantaflow guards it with a fixed threshold of 1e-7 and a printed warning;
+`settings.reportNoiseFloor` computes the threshold per solve from
+`eps * operatorScale * |x| / |b|` instead, which is the same idea with the
+scene's own numbers in it.
+
+The difference in emphasis is the one that matters for this port. mantaflow
+compiles double-precision by default, so for it this is an edge case a user has
+to opt into. WebGPU has no f64, so for us it is the normal condition -- which is
+why the check here is computed rather than a constant, and why it is on a
+diagnostic switch rather than a debug message.
+
 ---
 
 # The 2026-09-15 run (superseded, kept for the record)
