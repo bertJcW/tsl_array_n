@@ -436,6 +436,82 @@ its own dimension-generic (1D/2D/3D), non-Galerkin multigrid design,
 which has no direct structural equivalent to mantaflow's own
 topology-aware coarse-grid generation.
 
+### mantaflow (Apache License 2.0) — CG iteration budget derived from the grid, `src/grid/grid_pressure_solver2.js` + `src/grid/grid_pressure_solver3.js`
+
+A third consultation of mantaflow (same project as above), at the user's own
+explicit suggestion after a long investigation into why several scenes could
+never report convergence. No code is copied. What carries over is a formula and
+its default constant:
+
+```
+mantaflow (C++, Apache License 2.0, Tobias Pfaff & Nils Thuerey)
+  -> fluxflow (this package, JS/TSL, Apache-2.0, bert wang)
+```
+
+- **Source:** https://github.com/tum-pbs/mantaflow/blob/master/source/plugin/pressure.cpp (`solvePressure`'s `cgMaxIterFac` parameter and the `maxIter` expression derived from it), .../conjugategrad.h, .../conjugategrad.cpp (`GridCg::iterate`'s stop test, read to establish what `cgAccuracy` is measured against)
+- **License:** Apache License 2.0 — full text already reproduced above, under "fluxflow (Python) (Apache License 2.0)"; not repeated a second time.
+
+mantaflow does not ask a caller for an iteration cap, it derives one:
+
+```cpp
+maxIter = (int)(cgMaxIterFac * flags.getSize().max()) * (flags.is3D() ? 1 : 4);
+```
+
+with `cgMaxIterFac` defaulting to 1.5. Both of this port's pressure solvers now
+compute the same thing when `maxIterations` is not given, keeping the factor of
+1.5 and the dimension-dependent multiplier — 4 in 2D, 1 in 3D — as mantaflow has
+them. That multiplier is the part worth naming as borrowed: it is empirical, it
+encodes that CG on a 2D Poisson problem needs several times more iterations
+relative to the linear dimension than in 3D, and this port had no measurement of
+its own that would have produced it.
+
+Why it was worth taking: the hand-set caps it replaced had come loose from the
+grids they were meant for, most visibly in
+`examples/16-karman-vortex-street/`, whose cap of 40 was also the worst number of
+iterations it was measured spending — it sat exactly on its own ceiling.
+`docs/long-run-stability.md` records the before-and-after for six scenes.
+
+Two things are this port's own rather than mantaflow's. The tolerance those
+budgets are spent against is a relative L2 criterion here and an absolute
+max-norm one in mantaflow, so the numbers are not comparable and none of
+mantaflow's accuracy defaults were adopted — that comparison is written out in
+`docs/long-run-stability.md`. And the coupling found while making the change —
+that a derived budget is only safe once the tolerance sits above what float32 can
+verify a residual against, since otherwise the larger budget is spent grinding
+below the noise floor — is this port's own finding, on this port's own
+single-precision backend. mantaflow guards the same hazard with a fixed warning
+threshold (`cgAccuracy < 1e-07` under `FLOATINGPOINT_PRECISION == 1`), noted
+below.
+
+### mantaflow (Apache License 2.0) — the single-precision accuracy warning, `src/linalg/linalg.js`
+
+Read in the same pass as the entry above, and acknowledged because this port's
+own noise-floor reporting is the same idea arrived at from the same hazard. No
+code is copied.
+
+- **Source:** https://github.com/tum-pbs/mantaflow/blob/master/source/plugin/pressure.cpp (the `cgAccuracy < 1e-07` guard and its `debMsg` warning)
+- **License:** Apache License 2.0 — as above.
+
+mantaflow warns when a caller asks for a CG accuracy tighter than 1e-7 while
+compiled in single precision:
+
+```cpp
+if (zeroPressureFixing || cgAccuracy < 1e-07) {
+    if (FLOATINGPOINT_PRECISION == 1)
+        debMsg("Warning - high CG accuracy with single-precision floating point accuracy might not converge...", 2);
+```
+
+This port reaches the same hazard from the other direction: WebGPU has no f64, so
+single precision is not an option a caller opts into but the only thing there is,
+and a fixed threshold would be wrong for the same reason a fixed iteration cap
+was. `settings.reportNoiseFloor` therefore computes the threshold per solve from
+`eps * operatorScale * |x|` and reports it, rather than testing a constant. The
+mechanism is this port's own; the recognition that the hazard is worth warning
+about at all is mantaflow's, and finding that warning in their source is what
+confirmed the diagnosis rather than suggested it — the investigation in
+`docs/long-run-stability.md` reached it independently and read mantaflow
+afterwards.
+
 ### jet/fluid-engine-dev (MIT) — `src/grid/grid_smoke_solver2.js`, direct, no Python intermediary
 
 `src/grid/grid_smoke_solver2.js` (a reusable smoke/fire solver) has no Python source to port from at
