@@ -185,6 +185,32 @@ details are easy to get wrong and were got wrong first:
   a nonzero reading there is the design. Both are evidence to explain,
   printed beside the verdict.
 
+## Setting a scene's tolerance
+
+A scene's pressure tolerance is a stated accuracy requirement, not a constant
+tuned to make the solver behave -- the distinction the no-magic-numbers rule
+turns on, in `examples/16-karman-vortex-street/`'s own words. It is measured, and
+the procedure is:
+
+1. Run the scene through `solver_health.mjs`, which switches on
+   `settings.reportNoiseFloor`. Read the floor's distribution and
+   `residualOverFloor`. That says which order of magnitude to try.
+2. Try candidates **over 12,000 steps, never a short run.** Example 17 converges
+   on 600 of its first 600 frames at 1e-5 and on 4,667 of 12,001; example 19
+   reads 65% short and 3% long. Scenes get harder as they develop.
+3. Take the tightest candidate that converges on essentially every frame, and
+   check `residualOverFloor` is near 1 -- which says the solve is taking what the
+   arithmetic allows rather than stopping early with accuracy unspent.
+4. For a scene with no inlet the verdict is a narrow pass, so read the sampled
+   speed and divergence from first frame to last as well, and compare against the
+   old tolerance rather than explaining a trend away.
+5. Write the measured numbers in the comment beside the tolerance, so the choice
+   is checkable instead of folkloric.
+
+The floor estimate errs in both directions -- optimistic by 2x on one scene,
+pessimistic enough on another to warn on 94% of frames that nonetheless converge
+-- so treat it as the hint that saves the bisection, not as the answer.
+
 ## Layer 4 -- offline fixtures
 
 Reproducing a failure inside a running simulation costs minutes per attempt,

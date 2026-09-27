@@ -119,7 +119,34 @@ try {
 		dt,
 		buoyancyTemperatureFactor,
 		advection: { order: macCormackEnabled ? 2 : 1 }, // see this file's own macCormackEnabled/macCormackCheckbox comments above -- grid_smoke_solver2.js forwards this to BOTH velocity's own self-advection and density/temperature advection
-		pressure: { multigrid: { numberOfLevels: 4 }, maxIterations: 60 }
+		// *** tolerance, measured rather than inherited ***
+		//
+		// The default is 1e-6, and this scene cannot reach it at any iteration
+		// count: `r = b - A@x` recomputed in float32 is a cancellation, so below
+		// roughly `eps * |A| * |x| / |b|` the residual the stop test sees is
+		// rounding noise. This scene's own floor, over 600 samples of a 12,000
+		// step run, is 1.55e-5 relative at the median and 1.97e-5 at the worst
+		// (`settings.reportNoiseFloor`, printed by solver_health.mjs). At 1e-6 it
+		// converged on 0 of 12,001 frames -- every frame spent its whole budget
+		// and returned whatever residual it had got to, which is a WORSE answer
+		// than a solve that stops on target.
+		//
+		// This is a caller's accuracy requirement, not an internal constant tuned
+		// to make the solver work -- the distinction this project's
+		// no-magic-numbers rule turns on, in examples/16-karman-vortex-street/'s
+		// own words.
+		//
+		// The tighter of the two that work, deliberately. Over 12,001 steps:
+		//
+		//   1e-5   11,781 / 12,001, residual a median 0.5x the floor
+		//   3e-5   12,001 / 12,001, residual a median 5.0x the floor
+		//
+		// 3e-5 converges on every frame but stops five times above the floor,
+		// which is accuracy left on the table. 1e-5 misses 220 frames of 12,001
+		// and is three times tighter on the rest, and the frames it misses are at
+		// the floor anyway. Unlike 17 and 19, this scene has the headroom for the
+		// stricter number, which is why it does not share theirs.
+		pressure: { multigrid: { numberOfLevels: 4 }, maxIterations: 60, tolerance: 1e-5 }
 	} );
 
 	// *** density/temperature burst: injected on frame 0 itself, through a

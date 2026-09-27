@@ -304,7 +304,33 @@ try {
 			boundarySolver.constrainVelocity();
 
 		},
-		pressure: { multigrid: { numberOfLevels: 4 }, maxIterations: 60, maxPlausiblePressure: PRESSURE_MAX_PLAUSIBLE }
+		// *** tolerance, measured rather than inherited ***
+		//
+		// The default is 1e-6, and this scene cannot reach it at any iteration
+		// count: `r = b - A@x` recomputed in float32 is a cancellation, so below
+		// roughly `eps * |A| * |x| / |b|` the residual the stop test sees is
+		// rounding noise. This scene's own floor, over 600 samples of a 12,000
+		// step run, is 1.61e-5 relative at the median and 2.80e-5 at the worst
+		// (`settings.reportNoiseFloor`, printed by solver_health.mjs). At 1e-6 it
+		// converged on 0 of 12,001 frames -- every frame spent its whole budget
+		// and returned whatever residual it had got to, which is a WORSE answer
+		// than a solve that stops on target.
+		//
+		// This is a caller's accuracy requirement, not an internal constant tuned
+		// to make the solver work -- the distinction this project's
+		// no-magic-numbers rule turns on, in examples/16-karman-vortex-street/'s
+		// own words.
+		//
+		// The starkest of the three. Over 12,001 steps:
+		//
+		//   1e-5      388 / 12,001 -- and 388 / 600 over a short run, which is the
+		//                            same 388: it converges on its opening frames
+		//                            and then never again
+		//   3e-5   12,000 / 12,001, residual a median 0.6x the floor
+		//
+		// Its floor is the highest of the three smoke scenes, so 1e-5 sits under
+		// it almost everywhere.
+		pressure: { multigrid: { numberOfLevels: 4 }, maxIterations: 60, maxPlausiblePressure: PRESSURE_MAX_PLAUSIBLE, tolerance: 3e-5 }
 	} );
 
 	boundarySolver = solver.boundarySolver;

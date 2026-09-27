@@ -1019,6 +1019,70 @@ the library rather than a defect to be fixed quietly.
 
 ---
 
+# Tolerances set per scene from measurement, and what the estimate is worth
+
+Examples 17, 18 and 19 inherited the 1e-6 default and converged on **0 of
+12,001** frames each. Each now states its own tolerance, chosen from measurement
+and with the measurement written beside it.
+
+| scene | tolerance | converged | residual / floor, median | verdict |
+| --- | --- | --- | --- | --- |
+| 17 smoke and fire | 3e-5 | 11,999 / 12,001 | 0.8 | HEALTHY |
+| 18 explosion | 1e-5 | 11,781 / 12,001 | 1.2 | HEALTHY |
+| 19 fuel fire | 3e-5 | 12,000 / 12,001 | 0.6 | HEALTHY |
+
+Zero circuit-breaker rejections and zero CG breakdowns across all three.
+
+18 does not share the others' number on purpose. Over 12,001 steps it reaches
+11,781 at 1e-5 and 12,001 at 3e-5, but 3e-5 leaves it stopping five times above
+its floor -- accuracy left on the table -- while 1e-5 is three times tighter on
+the 98% of frames it converges on, and the 2% it misses are at the floor anyway.
+That headroom is the thing that distinguishes it, and it is measured rather than
+assumed.
+
+## Choosing from a short run would have chosen wrong
+
+Over the first 600 frames, 1e-5 converges on all 600 of example 17. Over 12,001
+it converges on 4,667. The plume gets harder as it develops. Example 19 is
+starker still: 388 of 600 on a short run, and **the same 388** of 12,001 on a
+long one -- it converges on its opening frames and then never again, so a short
+run reads as 65% where the truth is 3%.
+
+## Nothing destabilised, and the check that says so
+
+The verdict for these three is a narrow pass: they have no inlet, so the flux
+and mass-balance criteria are out of scope and what remains is finiteness, the
+projection residual and the CG guards. A slow divergence would show in the
+sampled fields before it tripped a guard, so those were read directly.
+
+- **19** is flat: speed 6.65 to 6.71, worst divergence 0.136 to 0.20, residual
+  1.19e-5 to 2.48e-5, first frame to last.
+- **18** decays, as an explosion should: speed 38 to 49 early, 13 to 25 late.
+- **17** roughly doubles, 25 early to 25-50 late, which needed the control rather
+  than an explanation. Re-run at the old 1e-6 it does the same thing -- 25.62
+  early, 42 to 48 late, peak 49.46 against 55.25 -- so the growth is the plume
+  accelerating and not the tolerance. Its mass imbalance is in fact *better* at
+  3e-5: 11.1% against 13.6%.
+
+## The floor estimate errs in both directions, so it is a hint and not a verdict
+
+`eps * operatorScale * |x|` is an error bound, and a bound is not the realised
+error. Both biases have now been measured:
+
+- **Optimistic** on example 17 at frame 400: 3.2e-6 estimated against 5.84e-6
+  reproduced on the CPU.
+- **Pessimistic** on example 19 over a long run: the warning fires on 11,263 of
+  12,001 frames, saying the tolerance is under the floor, while the scene
+  converges on 12,000 of 12,001. The realised rounding error is well inside the
+  bound there, so the solve gets below it.
+
+So `toleranceBelowFloor` firing is a reason to go and measure, not a conclusion.
+The number that decides a tolerance is the convergence count over a long run;
+the floor says which order of magnitude to try first, which is worth a great deal
+when the alternative is bisecting four candidates, and nothing more than that.
+
+---
+
 # The 2026-09-15 run (superseded, kept for the record)
 
 Every drivable example run for **12,000 solver steps** on real WebGPU

@@ -113,7 +113,34 @@ try {
 		// MGPCG-based example in this port -- numberOfLevels:1 was
 		// confirmed inadequate at comparable grid sizes elsewhere
 		// (examples/15's own header comment).
-		pressure: { multigrid: { numberOfLevels: 4 }, maxIterations: 60 }
+		// *** tolerance, measured rather than inherited ***
+		//
+		// The default is 1e-6, and this scene cannot reach it at any iteration
+		// count: `r = b - A@x` recomputed in float32 is a cancellation, so below
+		// roughly `eps * |A| * |x| / |b|` the residual the stop test sees is
+		// rounding noise. This scene's own floor, over 600 samples of a 12,000
+		// step run, is 6.02e-6 relative at the median and 1.29e-5 at the worst
+		// (`settings.reportNoiseFloor`, printed by solver_health.mjs). At 1e-6 it
+		// converged on 0 of 12,001 frames -- every frame spent its whole budget
+		// and returned whatever residual it had got to, which is a WORSE answer
+		// than a solve that stops on target.
+		//
+		// This is a caller's accuracy requirement, not an internal constant tuned
+		// to make the solver work -- the distinction this project's
+		// no-magic-numbers rule turns on, in examples/16-karman-vortex-street/'s
+		// own words.
+		//
+		// Chosen from 12,000-step runs rather than a short one, which would have
+		// picked wrong: over the first 600 frames 1e-5 converges on all of them,
+		// and over 12,001 it converges on 4,667. The scene gets harder as the
+		// plume develops.
+		//
+		//   1e-5    4,667 / 12,001
+		//   3e-5   11,999 / 12,001, residual a median 0.8x the floor
+		//
+		// 0.8x means the solve is taking everything float32 allows, so nothing is
+		// being given away by asking for 3e-5 instead of 1e-5.
+		pressure: { multigrid: { numberOfLevels: 4 }, maxIterations: 60, tolerance: 3e-5 }
 	} );
 
 	// Explicit clear -- grid_smoke_solver2.js's own header comment on why
