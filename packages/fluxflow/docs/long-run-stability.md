@@ -1211,6 +1211,71 @@ for it.
 
 ---
 
+# Two more mantaflow ideas, examined and declined, with the measurement
+
+Three things were worth taking from mantaflow's pressure solve. One was: the
+iteration budget, above. The other two were examined and are not being adopted,
+which is recorded here because a declined borrowing with a reason is worth as
+much as an accepted one and costs the next person the same investigation.
+
+## The max-norm convergence criterion: measured, and it would change nothing
+
+mantaflow's CG stops on the maximum absolute per-cell residual against an
+absolute threshold, and its own comment recommends that over its L2 branch:
+"usually max norm is recommended instead" (`source/conjugategrad.cpp`,
+`GridCg::iterate`). The physical argument is good -- one cell with large
+divergence is a local artefact that an L2 norm dilutes across the grid.
+
+So the two were measured against each other rather than argued about.
+`diagnostics.maxResidual` now reports `max|r|` beside `|r|_2`, over 3,000 frames
+each:
+
+| scene | max\|r\| / \|r\|_2, median | 90th | worst |
+| --- | --- | --- | --- |
+| 16 Kármán | 0.204 | 0.276 | 0.419 |
+| 17 smoke and fire | 0.104 | 0.168 | 0.341 |
+| 19 fuel fire | 0.082 | 0.125 | 0.279 |
+| 35 Kármán 3D | 0.103 | 0.140 | 0.204 |
+| 20 FLIP dam break | 0.302 | 0.632 | 0.784 |
+
+The ratio sits between 0.08 and 0.78 and is stable per scene. It is nowhere near
+1, which is what a single dominating cell would give, and nowhere near
+`1/sqrt(N)` = 0.009 for 12,288 cells, which is what a perfectly spread residual
+would give -- the residual lives in of order a hundred cells, consistently.
+
+**So neither norm hides anything from the other here.** A max-norm threshold
+would be the L2 threshold times a per-scene constant of about 0.1 to 0.3: a
+reparameterisation, not new information, and adopting it would invalidate every
+tolerance measured above. Declined.
+
+The ratio is kept and reported, on the same diagnostic switch. If some future
+scene shows it approaching 1, that is one cell carrying the whole residual, and
+that is the evidence that would justify the change.
+
+## Tying the coarsest level's accuracy to the requested tolerance: not portable
+
+mantaflow sets `MG->setCoarsestLevelAccuracy(mAccuracy * 1E-4)`
+(`source/conjugategrad.cpp`), so the coarsest grid is solved to a tolerance
+derived from the one the caller asked for rather than to a fixed effort. This
+port runs a fixed `numberOfCoarsestIterations` (default 20) of relaxation there,
+with no convergence test at all.
+
+Adopting it needs a residual test at the coarsest level, which needs a reduction
+and a host read **inside every V-cycle**, which is inside every CG iteration. A
+host read is ~3 ms against a ~32 ms solve, and the whole of this port's
+GPU-resident design exists to keep reads out of the iteration -- `linalg.js`'s
+chunked loop, its GPU-side stop test and its scalar slots are all that one
+decision. Paying a read per V-cycle to tune the effort at the level where
+inexactness is least harmful is the wrong trade by a wide margin.
+
+Declined as not portable rather than as a bad idea. Making the coarsest level's
+effort scale with something would still be an improvement over a constant; the
+version that fits this backend would derive it from the coarsest grid's size on
+the host at construction, which is a different change from mantaflow's and should
+not be filed as their idea.
+
+---
+
 # The 2026-09-15 run (superseded, kept for the record)
 
 Every drivable example run for **12,000 solver steps** on real WebGPU

@@ -483,6 +483,34 @@ single-precision backend. mantaflow guards the same hazard with a fixed warning
 threshold (`cgAccuracy < 1e-07` under `FLOATINGPOINT_PRECISION == 1`), noted
 below.
 
+### mantaflow (Apache License 2.0) — two ideas examined and NOT adopted
+
+Recorded for completeness, because the same reading pass that produced the two
+entries below also looked at these and they are not in this package. Nothing is
+copied and nothing is used; this entry exists so that a later reader does not
+have to repeat the examination, and so that the provenance record distinguishes
+"considered" from "taken".
+
+- **Source:** https://github.com/tum-pbs/mantaflow/blob/master/source/conjugategrad.cpp (`GridCg::iterate`'s max-norm stop test; `InitPreconditionMultigrid`'s `setCoarsestLevelAccuracy`)
+- **License:** Apache License 2.0 — as elsewhere in this file.
+
+1. **The max-norm convergence criterion.** mantaflow stops on
+   `mResidual.getMaxAbs() < mAccuracy` by default, and its own comment prefers
+   that to its L2 branch. This port measured the two against each other rather
+   than switching: `max|r| / |r|_2` sits between 0.08 and 0.78 and is stable per
+   scene across five scenes, so a max-norm threshold would be the L2 one times a
+   per-scene constant and would catch nothing the current criterion misses. The
+   criterion is unchanged; the ratio is reported as a diagnostic so that a scene
+   where one cell does carry the residual would be visible. Numbers in
+   `docs/long-run-stability.md`.
+
+2. **Coarsest-level accuracy derived from the requested tolerance.** mantaflow
+   sets it to `mAccuracy * 1E-4`. Adopting it requires a convergence test at the
+   coarsest level, hence a host read inside every V-cycle and so inside every CG
+   iteration, which is the single thing this port's GPU-resident solver design
+   exists to avoid. Declined as not portable to this backend rather than as a
+   poor idea.
+
 ### mantaflow (Apache License 2.0) — the single-precision accuracy warning, `src/linalg/linalg.js`
 
 Read in the same pass as the entry above, and acknowledged because this port's

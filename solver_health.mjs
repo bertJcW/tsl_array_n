@@ -132,7 +132,7 @@ const TOLERANCE = process.env.SOLVER_HEALTH_TOLERANCE ? Number( process.env.SOLV
 await page.addInitScript( ( [ frames, sample, tolerance ] ) => {
 
 	let stored, counter = 0;
-	window.__health = { samples: [], counters: { rejected: 0, breakdowns: 0, converged: 0, frames: 0, breakdownFrames: [], stopReasons: {}, zeroRhsFrames: 0, stopResiduals: [], stopsOnSolved: 0, atRestFrames: 0, stoppedGrowing: 0, belowFloor: null, belowFloorFrames: 0, overFloor: [], floorRelative: [], iterations: [], maxIterationsSeen: 0 }, geometry: null };
+	window.__health = { samples: [], counters: { rejected: 0, breakdowns: 0, converged: 0, frames: 0, breakdownFrames: [], stopReasons: {}, zeroRhsFrames: 0, stopResiduals: [], stopsOnSolved: 0, atRestFrames: 0, stoppedGrowing: 0, belowFloor: null, belowFloorFrames: 0, overFloor: [], floorRelative: [], iterations: [], maxIterationsSeen: 0, maxOverL2: [] }, geometry: null };
 	window.__done = false;
 
 	Object.defineProperty( window, '__fluxflowProbe', {
@@ -266,6 +266,9 @@ await page.addInitScript( ( [ frames, sample, tolerance ] ) => {
 				if ( Number.isFinite( d.noiseFloorRelative ) ) c.floorRelative.push( d.noiseFloorRelative );
 				// Iterations actually spent, which is what says whether raising the cap
 				// costs anything: a cap only binds on the frames that reach it.
+				// max|r| against |r|_2: mantaflow stops on the former, this port on the
+				// latter. Their ratio says whether the choice matters on this scene.
+				if ( Number.isFinite( d.maxResidual ) && Number.isFinite( d.residual ) && d.residual > 0 ) c.maxOverL2.push( d.maxResidual / d.residual );
 				if ( Number.isFinite( d.iterations ) ) { c.iterations.push( d.iterations ); if ( d.iterations > c.maxIterationsSeen ) c.maxIterationsSeen = d.iterations; }
 
 				if ( n >= frames ) { window.__done = true; probe.stop && probe.stop(); return; }
@@ -673,6 +676,14 @@ if ( ! first.hasWeights ) console.log( 'no collider face weights from this solve
 if ( ! first.driven ) console.log( 'no inlet: nothing in this formulation forces a vent-only domain to balance, so the verdict here rests on finiteness alone and everything else is reported' );
 console.log( `solver counters: ${ counters.converged } converged, ${ counters.rejected } rejected, ${ counters.breakdowns } CG breakdowns` +
 	( counters.breakdownFrames.length ? ` (first at frame ${ counters.breakdownFrames[ 0 ] }, last ${ counters.breakdownFrames[ counters.breakdownFrames.length - 1 ] })` : '' ) );
+if ( counters.maxOverL2 && counters.maxOverL2.length ) {
+
+	const sorted = counters.maxOverL2.slice().sort( ( a, b ) => a - b );
+	const q = ( f ) => sorted[ Math.min( sorted.length - 1, Math.floor( f * ( sorted.length - 1 ) ) ) ];
+	console.log( `   max|r| / |r|_2: median ${ q( 0.5 ).toFixed( 3 ) }, 90th ${ q( 0.9 ).toFixed( 3 ) }, worst ${ q( 1 ).toFixed( 3 ) }` +
+		` -- mantaflow stops on the max norm where this stops on the L2 one; a ratio that stays put means the choice does not matter here` );
+
+}
 if ( counters.iterations && counters.iterations.length ) {
 
 	const sorted = counters.iterations.slice().sort( ( a, b ) => a - b );

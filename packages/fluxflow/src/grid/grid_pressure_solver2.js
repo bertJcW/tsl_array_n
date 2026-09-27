@@ -93,6 +93,7 @@ import { createCellCenteredScalarGrid2 } from './grid_data2.js';
 import { faceCenteredDivergenceAtCenter2 } from './grid_math.js';
 import { createCopyKernel2 } from './array_utils.js';
 import { createLaplacianOperator, createMultigridPreconditioner, createJacobiPreconditioner, createIdentityPreconditioner } from '../linalg/multigrid.js';
+import { createMaxAbsReducer } from '../linalg/reduction.js';
 import { createPreconditionedConjugateGradientSolver } from '../linalg/linalg.js';
 import { isNonFiniteOrAbove } from '../float_guards.js';
 import { instrumentDispatch, timePhase } from '../profiling.js';
@@ -375,6 +376,25 @@ export function createGridPressureSolver2( {
 	//
 	// maxIterations is still accepted and still wins, for a scene that has a
 	// measured reason.
+	// *** max|r| beside |r|_2, for comparison and nothing else yet ***
+	//
+	// mantaflow's CG stops on the maximum absolute per-cell residual against an
+	// absolute threshold, and its own comment says so in preference to its L2
+	// branch: "usually max norm is recommended instead"
+	// (source/conjugategrad.cpp, GridCg::iterate). The physical argument is
+	// sound -- one cell with large divergence is a local artefact that an L2 norm
+	// dilutes across the whole grid.
+	//
+	// This port's criterion stays |r|_2 < tolerance * |b|. Changing it would
+	// invalidate every tolerance measured for every scene, so the max norm is
+	// measured first and reported beside the L2 one; if the two turn out to
+	// disagree on some scene, that is the evidence for changing the criterion, and
+	// if they track each other it is the evidence for leaving it alone.
+	//
+	// Costs one host read per solve, so it rides the same reportNoiseFloor switch
+	// as the other diagnostic that does.
+	let maxAbsResidual = null;
+
 	const iterationCap = maxIterations ?? Math.ceil( maxIterationsFactor * Math.max( ...resolution ) * 4 /* this solver is 2D, so mantaflow's 2D factor */ );
 
 	const settings = { residualCheckInterval, gpuResidentScalars, batchIterations, preconditioner, maxIterations: iterationCap, tolerance, checkBadCells: true, badCellsRideAlong: true, optimisticStopTest: true, gpuStopTest: true, fuseVcycleIntoIteration: true, fuseChunkIntoOneSubmission: false, gpuResidentSetup, relativeTolerance, residualRecomputeInterval, verifyConvergence , reportNoiseFloor: false};
@@ -858,6 +878,7 @@ export function createGridPressureSolver2( {
 			cg.settings.fuseVcycleIntoIteration = settings.fuseVcycleIntoIteration === true;
 			cg.settings.fuseChunkIntoOneSubmission = settings.fuseChunkIntoOneSubmission === true;
 			cg.settings.reportNoiseFloor = settings.reportNoiseFloor;
+			if ( settings.reportNoiseFloor && maxAbsResidual === null ) maxAbsResidual = createMaxAbsReducer( [ cg.r ] );
 			diagnostics.converged = await timePhase( 'pressure-cg-solve', () => cg.solve(
 				settings.tolerance, settings.maxIterations,
 				settings.residualCheckInterval, settings.gpuResidentScalars, settings.batchIterations,
@@ -890,6 +911,7 @@ export function createGridPressureSolver2( {
 			// precision is the constraint. A dynamic tolerance would answer the same
 			// question by moving the bar, and then `converged` would mean a different
 			// thing on every frame; this leaves the bar alone.
+			diagnostics.maxResidual = maxAbsResidual ? await maxAbsResidual.read() : null;
 			diagnostics.residualOverFloor = ( diagnostics.residual !== null && diagnostics.noiseFloor ) ? diagnostics.residual / diagnostics.noiseFloor : null;
 			diagnostics.stoppedBy = cg.state ? cg.state.stoppedBy : null;
 
