@@ -866,13 +866,19 @@ single iteration: **rebuild `r` as `b - A@x` from scratch.**
 5.84e-6 against the GPU's 6.96e-6. The CPU, in single precision, with the live
 solver's exact residual policy, reproduces the floor.
 
-**`b - A@x` in float32 is a cancellation once the residual is far below the norm
-of `A@x`:** the two operands agree to within the residual, so their difference
-keeps only the digits they disagree in. Below about 6e-6 relative on this system
-the recomputed residual is rounding noise, and CG cannot descend on noise. A
-tolerance of 1e-6 is underneath it. The incremental update `r -= alpha*Ap` never
-subtracts two nearly-equal large numbers and so has no such floor - which is why
-every arm that used it converged.
+**The error is in forming `A@x`, not in subtracting it.** This section first said
+the cancellation was `b - A@x` itself; that is wrong, and `src/linalg/double_single.js`
+already had it right: by Sterbenz's lemma the difference of two nearby f32 values
+is *exact*. What is not exact is the accumulation inside `A@x` -- the stencil sums
+five terms each of magnitude about `|b|`, and in f32 that accumulation carries a
+rounding error of roughly `|b| * eps`. That error does not shrink as the residual
+does, so below it the recomputed residual is the accumulation's own noise and CG
+cannot descend on noise. A tolerance of 1e-6 is underneath it. The incremental
+update `r -= alpha*Ap` never re-accumulates the stencil against a large `x`, which
+is why every arm that used it converged.
+
+The distinction matters because it says what the fix is: a wider accumulator for
+that one sum, not a different subtraction.
 
 ### The irony, and it is worth keeping
 
@@ -1063,6 +1069,44 @@ tolerance's.
 Not implemented. Changing the recompute policy alters every scene's iteration
 count and its speed, and which of the three answers is right is a decision about
 the library rather than a defect to be fixed quietly.
+
+## A fourth answer was already in the tree, built and verified and never wired in
+
+`src/linalg/double_single.js` is a double-single float -- a pair of f32s giving
+about 48 bits of mantissa, on Dekker's and Knuth's error-free transformations --
+and its header states its purpose in one line: **"It is for one place: computing
+the true residual `r = b - Ax`."**
+
+It had the mechanism right before this week's investigation started, including the
+part this document got wrong: the subtraction is exact by Sterbenz, the
+accumulation is not. It quantifies it on `examples/28-drop-into-pool/`, where
+`|b|` is about 550 and the stop test is looking for 1e-5: five stencil terms of
+magnitude 550 accumulated in f32 carry about 3.3e-5 of error, and simulated
+against exact arithmetic the worst case is **2.44e-4 against a true residual of
+1e-5 -- the computed residual twenty-four times larger than the thing it
+measures.** Which is why ~5% of that scene's solves stall at a residual they can
+never improve, and why 2000 iterations changed nothing.
+
+And the primitives are verified on hardware, not trusted:
+`examples/27-float-guard-probe/` imports them and checks the compiler has not
+reassociated or contracted them away -- the same discipline `float_guards.js`
+needed after the documented `x != x` NaN idiom turned out to be a no-op. Run
+today: **five terms of ~550 summing to 1.953e-3, plain f32 error 5.31e-5,
+double-single error exactly 0.**
+
+**Nothing imports it.** No solver, no test. The module, its analysis, its
+quantification and its hardware verification all exist; only the integration is
+missing. So the floor this whole section characterises is not a property of
+WebGPU that has to be accepted -- it is one accumulation, in one operator apply,
+with the wider accumulator for it already written and proven.
+
+That makes the integration the obvious next step on this thread, ahead of any
+choice between recompute intervals: apply the operator with a double-single
+accumulator on the path that recomputes `r = b - Ax`, and the noise floor moves
+far enough down that a 1e-6 tolerance is reachable and the per-scene tolerances
+above become unnecessary rather than merely measured. What it costs -- the
+stencil apply is a handful of dispatches against a V-cycle's 38 -- is the thing
+to measure first.
 
 ---
 
