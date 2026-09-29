@@ -104,6 +104,22 @@
 // through frame 5750+ -- `diagnostics.converged`/`rejected` stayed
 // healthy and no non-finite value appeared anywhere in that entire run.
 //
+// *** What that run established, and what it did not (2026-09-27) ***
+//
+// The criteria above -- a non-growing peak velocity, `diagnostics.converged` and
+// `rejected` staying healthy, nothing non-finite -- are the ones this package
+// has since found cannot tell a healthy scene from one quietly losing its fluid.
+// This very scene is the example: on the outflow formula that shipped before
+// 2026-09-22 it converged on every single frame while carrying 13.89x its
+// inflow out of the domain, and read BROKEN from frame 1720 the moment
+// conservation was measured instead of convergence.
+//
+// So the run above is kept as what it is: evidence of boundedness and of the
+// specific fix it was testing, not of conservation. The current evidence for
+// this scene is a conservation verdict from solver_health.mjs, which measures
+// flux across the solved region's own boundary: **HEALTHY over 12,001 frames**,
+// 12,000 of them converged, zero rejections and zero CG breakdowns. See docs/verification.md.
+//
 // *** Confirmed on real hardware: this scene genuinely sheds, alternating
 // -- read this before judging the result by the dye canvas alone ***
 //

@@ -79,7 +79,10 @@ records each correction with the measurement that forced it.
 
 ## Layer 1 -- structural tests, no GPU
 
-`npm test`: 396 tests in 30 files (373 in `fluxflow`, 23 in `tsl_array_n`),
+`npm test`: 398 tests in 30 files (375 in `fluxflow`, 23 in `tsl_array_n`) at the
+time of writing -- the count drifts, since one of the checks is a lint-style test
+per source file and two of these numbers had already gone stale within days of
+being written,
 Vitest under Node, seconds to run. They cover API shapes, construction-time
 validation, and the arithmetic that can be done on the host, plus
 lint-style tests such as the one forbidding `x != x`.
@@ -177,10 +180,14 @@ details are easy to get wrong and were got wrong first:
   Convergence counts are useless as a criterion: a bare channel converges on
   28 frames out of 900 while being perfectly healthy, a broken scene
   converged on 73% of its frames, and `examples/17-smoke-fire/`,
-  `18-explosion` and `19-fuel-fire` converge on **0 of 12,001** frames while
-  leaving a median relative residual of 2e-5 to 5e-5 against a bar of 1e-2 --
-  those three ask for a tolerance their preconditioner cannot deliver at any
-  budget, which `long-run-stability.md`'s T3 measures. Velocity on fully closed collider faces is
+  `18-explosion` and `19-fuel-fire` once converged on **0 of 12,001** frames
+  while leaving a median relative residual of 2e-5 to 5e-5 against a bar of
+  1e-2. Those three were asking for a tolerance beneath what float32 can verify
+  a residual against -- not a weakness of the preconditioner, as an earlier
+  version of this line said, but the cancellation in recomputing `b - A@x` in
+  single precision. They have measured tolerances now and converge on
+  essentially every frame; `long-run-stability.md`'s T3 has the derivation and
+  the numbers. Velocity on fully closed collider faces is
   the same -- `constrainVelocity` extrapolates into the solid on purpose, so
   a nonzero reading there is the design. Both are evidence to explain,
   printed beside the verdict.

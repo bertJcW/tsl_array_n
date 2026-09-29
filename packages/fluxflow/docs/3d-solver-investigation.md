@@ -548,7 +548,7 @@ examples 15, 16 and 17.
 
 ```bash
 npm install
-npm test                                  # 396 tests
+npm test                                  # the structural suite, no GPU
 npm run dev -w fluxflow                   # vite; note the port it prints
 ```
 

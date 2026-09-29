@@ -1646,7 +1646,9 @@ held stationary.
   peak speed 46.3, 33.5 ms per step in isolation (faster than the 44.3 ms
   measured while alternating with an arm that was allocating 28 pipelines per
   step).
-- `fluxflow` 347 tests, `tsl_array_n` 23, all pass.
+- `fluxflow` 347 tests, `tsl_array_n` 23, all pass. (The count is what it was
+  when this was measured; the suite is 373 and 23 now. Left as recorded rather
+  than updated, since a measurement's own conditions are part of it.)
 
 
 # What the V-cycle is worth: Jacobi and no preconditioner, measured (2026-09-14)

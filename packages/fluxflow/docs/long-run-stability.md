@@ -628,7 +628,7 @@ still fails.** These two supply exactly that pair, in one measurement:
 | 14 stable fluids | BROKEN, 2 breakdowns | **HEALTHY**, 2 early stops reported |
 | 25 dye injection | BROKEN, 396 breakdowns | **BROKEN**, 175 breakdowns + 221 early stops, on the residual criterion at 1.54e+1 |
 
-## 25-dye-injection is broken, and was broken before any of this
+## 25-dye-injection was broken, from before any of this, and is fixed
 
 The projection leaves **15.4 times** the divergence it was asked to remove --
 against a bar of 1e-2, so three orders of magnitude past it. The shape of the

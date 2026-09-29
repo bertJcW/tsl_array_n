@@ -660,7 +660,7 @@ current method** -- the same three layers plus offline fixtures and a
 conservation-based verdict probe, and the rules that make a layer mean
 something. Read that one before trusting a green run.
 
-### 1. Structural tests -- `npm test`, 29 files, 373 tests
+### 1. Structural tests -- `npm test`, 29 files, 375 tests
 
 Vitest under Node, no GPU. They cover construction: allocating fields,
 building kernels, shape and option validation, and pure functions

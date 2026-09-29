@@ -76,8 +76,10 @@
 // (pressure, convective velocity extrapolation, and scalar cleanup), the
 // collider, and the whole-domain force all active together, at their
 // default settings -- see grid_math.js's own bilinearGradientAtPosition2
-// and grid_outflow_solver2.js's own OUTFLOW_TIMESTEP_FLOOR/SCALE for two
-// real bugs found and fixed along the way, and that same file's own
+// and grid_outflow_solver2.js's own header on the timestep floor its
+// convective `factor` once needed, for two real bugs found and fixed along the
+// way (the constants themselves went when that formula was replaced), and that
+// same file's own
 // header comment for a third, more serious one (an asymmetric multigrid
 // relaxation schedule, not specific to this file) found afterward via a
 // longer-run investigation, root-caused, and fixed. Re-confirmed stable
@@ -89,6 +91,22 @@
 // roughly frame 500 and holds it, unchanged, through frame 5300+ --
 // `diagnostics.converged`/`rejected` stayed healthy and no non-finite
 // value appeared anywhere in that entire run.
+//
+// *** What that run established, and what it did not (2026-09-27) ***
+//
+// The criteria above -- a non-growing peak velocity, `diagnostics.converged` and
+// `rejected` staying healthy, nothing non-finite -- are the ones this package
+// has since found cannot tell a healthy scene from one quietly losing its fluid.
+// examples/16-karman-vortex-street/, which shares this file's outflow
+// mechanism, converged on every frame of a long run while carrying 13.89x
+// its inflow out of the domain, and read BROKEN from frame 1720 once
+// conservation was measured instead of convergence.
+//
+// So the run above is kept as what it is: evidence of boundedness and of the
+// specific fix it was testing, not of conservation. The current evidence for
+// this scene is a conservation verdict from solver_health.mjs, which measures
+// flux across the solved region's own boundary: **HEALTHY over 12,001 frames**,
+// conserving to 0.3% across its own fluid region. See docs/verification.md.
 
 import * as tsl_array_n from 'tsl_array_n';
 import { vec2, float, max } from 'three/tsl';

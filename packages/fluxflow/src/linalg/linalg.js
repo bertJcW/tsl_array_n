@@ -138,6 +138,31 @@ export const DEFAULT_ATOMIC_DOT_SCALE = 65536;
 // iterations, or the residual genuinely increases at some point.
 // *** Now 1, and that is faster as well as more honest (2026-09-16) ***
 //
+// *** And it is also what puts a floor under every tolerance (2026-09-27) ***
+//
+// Read the paragraphs below with that. They are accurate and they recommend
+// interval 1 without qualification, which is no longer the whole picture:
+// recomputing `b - A@x` every iteration means recomputing it in float32 every
+// iteration, and that subtraction is a cancellation once the residual is far
+// below |A@x|. Beneath roughly `eps * |A| * |x| / |b|` the recomputed residual
+// is rounding noise, so no tolerance under that level is reachable at any
+// iteration count -- which is why three scenes converged on 0 of 12,001 frames
+// each until their tolerances were measured and raised.
+//
+// Reproduced on the CPU with this exact policy: float32 with per-iteration
+// recomputation floors at 5.84e-6 relative on one scene's frozen system, while
+// the same arithmetic using the incremental `r -= alpha*Ap` reaches 1e-6 in 476
+// iterations, and double precision with per-iteration recomputation reaches it
+// too. So the floor belongs to this decision and not to single precision alone.
+// docs/long-run-stability.md, T3, has the derivation and the arms.
+//
+// The decision stands: an honest residual is worth more than the digits it
+// costs, `settings.reportNoiseFloor` now says where the floor is rather than
+// leaving a scene to discover it as a permanent `converged: false`, and
+// tolerances are measured per scene against it. What would be wrong is reading
+// the speed numbers below as a reason to prefer interval 1 in every
+// circumstance without knowing what it bounds.
+//
 // Recomputing b - Ax costs one operator apply -- a handful of dispatches
 // against a V-cycle's 38 -- and the GPU is busy under 1% of a solver step,
 // so on this hardware the extra work is close to free. What it buys is not

@@ -255,7 +255,11 @@ try {
 		// requirement, not an internal constant tuned to make the solver
 		// merely work).
 		//
-		// *** maxIterations is 100 and is not what was wrong here. ***
+		// *** The iteration cap was never what was wrong here. ***
+		//
+		// It was 100 when this paragraph was written and is derived from the grid
+		// now (72 for 48^3), against a measured worst of 54 iterations actually
+		// spent -- so the point below stands and the number it named has moved.
 		//
 		// It was 600, arrived at by an earlier session raising it in stages
 		// (40, 100, 200, 300, 600) because each rise pushed the frame at

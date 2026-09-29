@@ -219,9 +219,12 @@ export function createGridOutflowSolver2( { velocityGrid, velocityPrev, outflows
 	const list = Array.isArray( outflows ) ? outflows : [ outflows ];
 	const dtNode = typeof dt === 'number' ? float( dt ) : dt;
 
-	// See this file's own header comment on OUTFLOW_TIMESTEP_FLOOR/SCALE --
-	// mantaflow's own applyOutflowBC passes max(1.0, dt*4), not the raw dt,
-	// into extrapolateVelConvectiveBC's own `factor` computation. Kept as a
+	// OUTFLOW_TIMESTEP_FLOOR/SCALE are gone -- they belonged to the
+	// `(vel - velPrev)/factor + vel(upstream)` form this file used to carry, and
+	// that whole formula was replaced by the standard convective one (see this
+	// file's own header). What survives is mantaflow's reason for having had a
+	// floor at all: its applyOutflowBC passes max(1.0, dt*4) rather than the raw
+	// dt into extrapolateVelConvectiveBC's `factor`. Kept as a
 	// plain JS function (not a node computed once up front) so `dtNode.mul`
 	// is only ever evaluated lazily, inside a kernel's own callback body --
 	// matching every other per-cell computation in this file, and,

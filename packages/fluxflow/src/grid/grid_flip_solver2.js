@@ -255,15 +255,17 @@
 // reproducible; see linalg/prefix_sum.js for the measurements. The lesson is
 // worth more than the code: a GPU primitive can be correct and still be
 // unrepeatable, and only a test that runs it twice can tell.
-// (3) claimDonorsKernel: one thread per *cell* -- if its own count is below
-// minParticlesPerCell, it claims up to (minParticlesPerCell - count) donors
-// via Loop(minParticlesPerCell, ...) (this file's own first use of the
+// (3) markNeedKernel + a prefix sum + claimDonorsKernel: one thread per *cell*
+// -- if its own count is below minParticlesPerCell it records what it wants,
+// a prefix sum over those wants gives each cell the start of its own slice of
+// the pool, and the claim loop walks that slice via
+// Loop(minParticlesPerCell, ...) (this file's own first use of the
 // bounded-loop-with-early-Break idiom already real-hardware-proven in
-// advection_solver2.js's own backTrace), each claim doing its own atomicAdd
-// on donorPopCursor and stopping once either the cell has enough or the pop
-// cursor exceeds donorPushCursor's own live value (read via atomicLoad
-// directly inside this kernel -- no CPU readback needed at all, simpler
-// than the original plan's own JS-side-count draft). Each successful claim
+// advection_solver2.js's own backTrace), stopping once either the cell has
+// enough or its slice runs past the donor total (the scan's last element -- no
+// CPU readback needed at all). This too was an atomic cursor once, popped with
+// atomicAdd, and it went for the same reason the push cursor did: the slot a
+// cell got depended on which thread arrived first. Each successful claim
 // overwrites the donor's own positions() entry to the recipient cell's
 // center and velocities() via faceCenteredValueAtPosition2 sampled there
 // (the same helper g2pUpdate already uses) -- the relocated particle picks
@@ -676,9 +678,9 @@ export function createGridFlipSolver2( {
 	} );
 
 	// Shared by markFluidCellsKernel below and the resample kernels further
-	// down (countPerCellKernel/buildDonorPoolKernel) -- the same "which cell
-	// is this continuous position in" formula, factored out once it needed
-	// a third caller.
+	// down (countPerCellKernel/markDonorsKernel) -- the same "which cell is this
+	// continuous position in" formula, factored out once it needed a third
+	// caller.
 	function cellIndexOf( pos ) {
 
 		const cellF = pos.sub( originNode ).div( gridSpacingNode );
