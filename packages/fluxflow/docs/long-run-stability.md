@@ -866,19 +866,101 @@ single iteration: **rebuild `r` as `b - A@x` from scratch.**
 5.84e-6 against the GPU's 6.96e-6. The CPU, in single precision, with the live
 solver's exact residual policy, reproduces the floor.
 
-**The error is in forming `A@x`, not in subtracting it.** This section first said
-the cancellation was `b - A@x` itself; that is wrong, and `src/linalg/double_single.js`
-already had it right: by Sterbenz's lemma the difference of two nearby f32 values
-is *exact*. What is not exact is the accumulation inside `A@x` -- the stencil sums
-five terms each of magnitude about `|b|`, and in f32 that accumulation carries a
-rounding error of roughly `|b| * eps`. That error does not shrink as the residual
-does, so below it the recomputed residual is the accumulation's own noise and CG
-cannot descend on noise. A tolerance of 1e-6 is underneath it. The incremental
-update `r -= alpha*Ap` never re-accumulates the stencil against a large `x`, which
-is why every arm that used it converged.
+**It is not a precision problem at all.** Three mechanisms have been claimed for
+this floor in this document, two of them mine, and `where_error.mjs` measures
+every step directly rather than arguing about them. On example 17's exported
+frame, the difference between computing each step in f32 and in double:
 
-The distinction matters because it says what the fix is: a wider accumulator for
-that one sum, not a different subtraction.
+| step | error, relative to `\|b\|` |
+| --- | --- |
+| computing `A@x` in f32 at all | **3.57e-8** |
+| — of which the running sum | 1.84e-8 |
+| — of which the differences themselves | 3.16e-8 |
+| the subtraction `b - A@x`, given an exact `A@x` | 1.82e-8 |
+| **the floor being explained** | **5.84e-6** |
+
+**Computing `r = b - A@x` in f32 is accurate to 3.57e-8 -- one hundred and sixty
+times below the floor.** So neither candidate survives: not cancellation in the
+subtraction (Sterbenz, and measured at 1.82e-8), and not the accumulation inside
+`A@x` (measured at 1.84e-8). The residual is computed far more accurately than
+the level at which the iteration stalls.
+
+> **Retracted:** the formula this document gave for the floor,
+> `eps * |A| * |x| / |b|`, evaluates to 3.17e-6 here and so sits within a factor
+> of two of the measured 5.84e-6. That agreement is a coincidence: the quantity
+> it estimates -- the rounding error in forming `A@x` -- is actually 3.57e-8, so
+> the formula overestimates the thing it names by a factor of about ninety. It
+> was adopted because it matched a number, which is the failure this document
+> keeps recording.
+
+## What it actually is: replacing the residual breaks CG
+
+CG's recurrences assume `r` is the one its own iteration produced -- the vector
+consistent with the search direction `p` and the scalars alpha and beta it
+derived. The true residual `b - A@x` is a different vector, and a *more accurate*
+one, which does not make it a safe substitute.
+
+Sweeping how often the substitution happens, f32 throughout, same frozen system,
+20,000 iterations allowed:
+
+| recompute every | best residual reached | residual at the end |
+| --- | --- | --- |
+| 1 iteration | 5.60e-6 | 5.84e-6 |
+| 2 | 5.98e-6 | **1.78e+9** |
+| 5 | 5.44e-6 | 1.76e+1 |
+| 10 | 4.91e-6 | 1.20e-2 |
+| 50 | 3.00e-6 | 3.21e-5 |
+| **never (incremental only)** | **9.71e-7 — converged in 476** | — |
+| 1 iteration, in double | 9.69e-7 — converged in 476 | — |
+
+**Every replacement frequency floors in the 3e-6 to 6e-6 band, and the less
+frequent ones diverge outright** -- interval 2 ends nine orders of magnitude
+above where it passed through. Not replacing at all, in plain f32, converges to
+1e-6 in 476 iterations. Replacing in double converges too.
+
+So the mechanism is the substitution, and f32 is what makes it harmful: the
+discrepancy between the recurrence's `r` and the true one is ~1e-16 relative in
+double, where the substitution is a no-op, and ~1e-7 to 1e-6 in f32, where it
+injects a perturbation of that size into the Krylov space on every iteration.
+That caps the attainable residual at about the size of the perturbation, and a
+larger, less frequent correction destabilises the iteration instead of merely
+capping it. Residual replacement in CG is known to need care for exactly this
+reason; doing it every iteration is the careless end of it.
+
+### Two things this reverses
+
+**`double_single.js` is not the fix.** The previous revision of this section said
+it was, on the strength of its header's analysis. The accuracy of `b - A@x` is
+not the constraint -- it is already 160x better than the floor -- so a wider
+accumulator for it buys nothing. That claim is withdrawn. (The module's own
+commit, 2026-09-15, had already concluded it "turned out not to be needed"; the
+re-adoption read its header without reading its history.)
+
+**The fix points the opposite way from more accuracy: recompute less.** Plain f32
+with no replacement reaches 1e-6 in 476 iterations. What made per-iteration
+replacement attractive was the 2026-09-16 bug, where an incremental residual
+drifted optimistically and the solver reported convergence it had not achieved --
+and the answer to that is the one already built: `verifyConvergence` recomputes
+the true residual **once**, when the incremental one first claims success, to
+check the claim. Driving the iteration with the recurrence's residual and
+verifying at the stop gets both the convergence and the honesty; feeding the true
+residual back into the iteration every step gets neither.
+
+What is not yet measured: how long the incremental residual can be trusted before
+drift matters. These arms converged at 476 iterations, so nothing here tests
+thousands. That measurement is what the change needs before it ships.
+
+### And the shipped diagnostic names the wrong thing
+
+`settings.reportNoiseFloor` computes `eps * operatorScale * |x|` and calls it the
+floor. It discriminated correctly on four scenes -- 17, 18, 19 and 25 all had
+tolerances beneath it and none could converge -- but it does so by tracking the
+replacement floor coincidentally, not by measuring what it claims. The sound
+version is available and cheap: the solver already has both residuals at the
+moment it recomputes, so the quantity to report is the **discrepancy between the
+recurrence's `r` and the recomputed one**, which is the perturbation that sets
+the floor. Until that is built, read `toleranceBelowFloor` as an
+order-of-magnitude hint whose formula is wrong by about ninety.
 
 ### The irony, and it is worth keeping
 
@@ -1070,7 +1152,7 @@ Not implemented. Changing the recompute policy alters every scene's iteration
 count and its speed, and which of the three answers is right is a decision about
 the library rather than a defect to be fixed quietly.
 
-## A fourth answer was already in the tree, built and verified and never wired in
+## A fourth answer that looked like it was already in the tree, and is not one
 
 `src/linalg/double_single.js` is a double-single float -- a pair of f32s giving
 about 48 bits of mantissa, on Dekker's and Knuth's error-free transformations --
@@ -1094,19 +1176,23 @@ needed after the documented `x != x` NaN idiom turned out to be a no-op. Run
 today: **five terms of ~550 summing to 1.953e-3, plain f32 error 5.31e-5,
 double-single error exactly 0.**
 
-**Nothing imports it.** No solver, no test. The module, its analysis, its
-quantification and its hardware verification all exist; only the integration is
-missing. So the floor this whole section characterises is not a property of
-WebGPU that has to be accepted -- it is one accumulation, in one operator apply,
-with the wider accumulator for it already written and proven.
+**Nothing imports it** -- no solver, no test, only
+`examples/27-float-guard-probe/`, which verifies the primitives.
 
-That makes the integration the obvious next step on this thread, ahead of any
-choice between recompute intervals: apply the operator with a double-single
-accumulator on the path that recomputes `r = b - Ax`, and the noise floor moves
-far enough down that a 1e-6 tolerance is reachable and the per-scene tolerances
-above become unnecessary rather than merely measured. What it costs -- the
-stencil apply is a handful of dispatches against a V-cycle's 38 -- is the thing
-to measure first.
+> **Withdrawn.** This section argued that integrating it was the obvious next
+> step. It is not, because the accuracy of `b - A@x` was never the constraint:
+> measured per step, computing it in f32 costs 3.57e-8 relative where the floor
+> is 5.84e-6. A wider accumulator for a sum that is already 160x more accurate
+> than it needs to be buys nothing.
+>
+> The module's own introducing commit said as much on 2026-09-15 -- "one of
+> which turned out not to be needed and is kept anyway because it is verified" --
+> and also retracted the per-cell magnitude its header still argues from, which
+> used `|b| = 550` as a cell value when cells are 7 to 45. Re-adopting it here
+> meant trusting a header over the history of the file it heads.
+>
+> It stays in the tree on its own merits: a verified ~48-bit float is worth
+> having for whatever needs one. It is not the answer to this.
 
 ---
 

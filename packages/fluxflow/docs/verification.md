@@ -150,7 +150,7 @@ admitted, and that 17.5 was reported as stability.
 | --- | --- |
 | nothing non-finite | always |
 | the projection left under 1e-2 of the divergence it was asked to remove | always -- it needs no geometry, so free surfaces and vent-only domains are covered by it |
-| the tolerance asked for is above the floor float32 can verify a residual against | reported, never judged -- `settings.reportNoiseFloor`, which `solver_health.mjs` turns on. It is the difference between "the budget was too small" and "no iteration count reaches this" |
+| the tolerance asked for is above the floor the solve can actually reach | reported, never judged -- `settings.reportNoiseFloor`, which `solver_health.mjs` turns on. It is the difference between "the budget was too small" and "no iteration count reaches this". Its formula estimates the wrong quantity and overshoots it by about ninety; it discriminates correctly in practice by tracking the real floor coincidentally, so read it as an order of magnitude. `long-run-stability.md` has the measurement and what the sound version would be |
 | no CG breakdowns after the scene established itself -- the four corruption guards only, not counting stops that left a residual of exactly 0 nor stops on a growing residual, both of which are reported instead | always |
 | weighted flux equal across interior cross-sections, within 5% | the solver offers collider face weights, so solid faces can be excluded (the 2D solver has none, and reports instead of judging) |
 | net flux across the **solved region's** boundary in balance, on a trailing 20-sample average | the scene has an inlet |

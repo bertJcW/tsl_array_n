@@ -270,6 +270,23 @@ const warmLanes = cg( true, MAX_ITERATIONS, `float32, float32 lane reductions, w
 console.log( `
 and with the residual recomputed from scratch every iteration, which is what
 the live solver does and the one thing none of the arms above modelled:` );
+// *** Sweeping the replacement interval ***
+//
+// Computing r = b - Ax in f32 is accurate to 3.57e-8 relative on this system
+// (where_error.mjs measures it directly), which is 160x below the 5.84e-6 floor.
+// So the floor is not the accuracy of the recomputation. What is left is the
+// REPLACEMENT itself: CG's recurrences assume r is the one its own iteration
+// produced, and substituting the true residual for it each step breaks the
+// conjugacy those recurrences rely on. If that is the mechanism, the floor
+// should depend on how often the substitution happens.
+for ( const every of [ 1, 2, 5, 10, 50, 0 ] ) {
+
+	const label = every === 0 ? 'never (incremental only)' : `every ${ every }`;
+	const arm = cg( true, MAX_ITERATIONS, `float32, warm start, recompute ${ label }`, dotF32Lanes, pressureBefore, every );
+	void arm;
+
+}
+
 const recompDouble = cg( false, MAX_ITERATIONS, 'double, warm start, r = b - Ax every iteration', dot, pressureBefore, 1 );
 const recompF32 = cg( true, MAX_ITERATIONS, 'float32 + float32 lane reductions, warm start, r = b - Ax every iteration -- the live solver exactly', dotF32Lanes, pressureBefore, 1 );
 
