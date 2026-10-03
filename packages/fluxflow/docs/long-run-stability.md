@@ -1453,6 +1453,71 @@ not be filed as their idea.
 
 ---
 
+# The whole suite, 2026-10-04: 18 scenes, 216,018 solver steps
+
+The first full-suite sweep since everything this document describes -- the
+determinism fixes, the per-scene tolerances, the derived iteration cap. 12,000
+steps each, run sequentially so the fps column means something. `node long_run.mjs`.
+
+| scene | verdict | fps |
+| --- | --- | --- |
+| 14 stable fluids | HEALTHY (narrow) | 43 |
+| 15 flow past cylinder | HEALTHY | 41 |
+| 16 Kármán vortex street | HEALTHY | 39 |
+| 17 smoke and fire | HEALTHY (narrow) | 45 |
+| 18 explosion | HEALTHY (narrow) | 43 |
+| 19 fuel fire | HEALTHY (narrow) | 45 |
+| 20 FLIP dam break | HEALTHY (narrow) | 35 |
+| 21 irregular container | HEALTHY (narrow) | 39 |
+| 22 multiple colliders | HEALTHY (narrow) | 34 |
+| 23 moving collider | HEALTHY (narrow) | 40 |
+| **24 two-phase bubble rise** | **BROKEN** | **8** |
+| 25 dye injection | HEALTHY (narrow) | 40 |
+| 26 dye in free surface | HEALTHY (narrow) | 41 |
+| 28 drop into pool | HEALTHY (narrow) | 37 |
+| 29 static droplet | HEALTHY (narrow) | 30 |
+| 33 FLIP dam break 3D | HEALTHY (narrow) | 59 |
+| 34 smoke plume 3D | HEALTHY (narrow) | 59 |
+| 35 Kármán vortex street 3D | HEALTHY | 58 |
+
+**17 of 18 healthy, 14 of those narrow passes**, in 106 minutes of wall clock.
+"Narrow" is the scope of the pass, not a hedge: a scene with no inlet has the
+flux and mass-balance criteria out of scope, so what applied was finiteness, the
+projection residual and the CG guards. Only 15, 16 and 35 -- the three with an
+inlet -- were judged on every criterion.
+
+The fps column is worth reading beside the verdicts. Everything healthy runs at
+30 to 59 fps; **the broken scene runs at 8**, because a scene that cannot
+converge spends its whole iteration budget on every frame. Slowness and
+brokenness have the same cause here, which is a useful thing to know about this
+failure mode: it is visible from the frame rate before anyone measures a
+residual.
+
+## 24-two-phase-bubble-rise, and what it says about the verdict
+
+BROKEN from frame 25, with **9,581 of 12,001 solves reverted by the pressure
+circuit breaker**, 366 `pAp-growth` guard trips, and 375 frames converged.
+
+This scene was measured HEALTHY three times earlier in this document's own
+history, at 1,000 frames. Those logs say `2 converged, 0 rejected, 0 CG
+breakdowns` -- **two frames of 1,001** -- and the verdict passed it, because it
+has no inlet, nothing was non-finite, no guard had fired yet and the sampled
+residuals were inside the bar.
+
+That is the probe working as specified and the specification being insufficient.
+This document's own rule says the convergence counter is "evidence to explain,
+printed beside the verdict". Two of 1,001 was printed and not explained. The
+floor diagnostic that would now flag it on sight did not exist at the time; it
+does now, and on this scene it fires on 1,603 of 2,001 frames.
+
+So the honest reading of the earlier HEALTHY is not that the scene regressed. It
+is that **a scene which never converged was passed by a verdict that does not
+judge convergence**, and the larger iteration budget from the derived cap later
+turned a quiet failure into a loud one. That is the second time this week a
+coverage gap turned out to be hiding something rather than merely being open.
+
+---
+
 # The 2026-09-15 run (superseded, kept for the record)
 
 Every drivable example run for **12,000 solver steps** on real WebGPU
