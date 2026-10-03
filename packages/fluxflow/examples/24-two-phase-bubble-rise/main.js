@@ -162,7 +162,38 @@ try {
 		// the safe value scales with the density ratio. If you raise the
 		// ratio slider a long way past its default, this may need to come
 		// down further still.
-		pressure: { maxPlausiblePressure: 100 }
+		// *** tolerance, measured -- this scene never converged on the default ***
+		//
+		// It stated no tolerance, so it inherited the library's 1e-6, and 1e-6 is
+		// far beneath anything this scene's pressure problem can reach. The result
+		// was not a slow solve but a destroyed one: measured over 2,000 frames at
+		// the default, 230 frames converged, the pressure circuit breaker reverted
+		// 321 of them, and `pAp-growth` tripped 260 times -- the guard that exists
+		// for `p` compounding geometrically, which is what a budget spent below the
+		// reachable residual does. Over 12,000 frames: 375 converged, 9,581
+		// reverted, 366 trips, and the scene ran at 8 fps against 30-59 for every
+		// other scene in the suite, because every frame spent its whole iteration
+		// budget.
+		//
+		// Worth stating plainly: this was not a regression. The scene had been
+		// measured HEALTHY three times at 1,000 frames earlier, on logs that say
+		// "2 converged" -- two frames of 1,001 -- which the verdict passed because
+		// it has no inlet and nothing was non-finite. A scene that never converged
+		// was passed by a verdict that does not judge convergence, and the derived
+		// iteration cap later made the same failure loud. See
+		// docs/long-run-stability.md.
+		//
+		// Candidates over 12,000 frames:
+		//
+		//   1e-6   375 / 12,001 converged, 9,581 reverted, 366 trips  -- BROKEN
+		//   1e-4   11,991 / 12,001, 0 reverted, 1 trip (frame 5)      -- residual 2.6x the floor
+		//   1e-3   12,001 / 12,001, 0 reverted, 0 trips               -- residual 24.7x the floor
+		//
+		// 1e-4 is the choice: 1e-3 converges on every frame but stops twenty-five
+		// times above what the arithmetic allows, which is accuracy discarded for
+		// nothing, while 1e-4 sits at 2.6x and leaves a worst residual of 4.26e-4
+		// -- twenty-four times inside the health probe's own 1e-2 bar.
+		pressure: { maxPlausiblePressure: 100, tolerance: 1e-4 }
 	} );
 
 	function seedScene() {

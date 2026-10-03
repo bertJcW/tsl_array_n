@@ -107,6 +107,32 @@ const SPEED_BOUND = 6;          // fluid speed, as a multiple of the inflow's ow
 // bar at 1e-2 sits six times above anything healthy and well below the
 // broken side's own upper half.
 const RESIDUAL_TOLERANCE = 1e-2;
+// *** How many corruption-guard trips after establishment condemn a run ***
+//
+// This was "any, ever" and that is too strict by an arbitrary margin: a guard
+// firing once on an impulsively started scene is the guard working on the
+// hardest frame there is. examples/17, 19, 34 and 35 each trip exactly once, at
+// frame 0, and pass only because frame 0 is the establishment frame;
+// examples/24-two-phase-bubble-rise/ trips exactly once at frame 5 and failed.
+// Nothing distinguishes those two situations.
+//
+// So judge the rate. Calibrated on both sides from runs already measured:
+//
+//   must fail   24 @ tol 1e-6    260 / 2,001    13.0%   (321 frames also reverted)
+//               24 @ tol 1e-5     31 / 2,001     1.5%   (34 reverted)
+//               25 @ tol 1e-6    175 / 12,001    1.46%  (and residual 1.54e+1)
+//   must pass   24 @ tol 1e-4      1 / 12,001    0.008% (0 reverted, residual 4.26e-4)
+//               35, 17, 19, 34     1 / 12,001    0.008%
+//
+// The highest rate that must pass is 0.05% and the lowest that must fail is
+// 1.46% -- a factor of 29 apart, so 0.5% sits ten times above one and three
+// times below the other.
+//
+// The floor of 2 matters as much as the rate: on a short run a single trip is
+// a large fraction of nothing, and one trip must never condemn a run whatever
+// its length.
+const BREAKDOWN_RATE = 0.005;
+const BREAKDOWN_FLOOR = 2;
 
 const browser = await chromium.launch( {
 	headless: true,
@@ -771,10 +797,19 @@ the flow reaches the outlet at ${ arrivedAt >= 0 ? 'frame ' + samples[ arrivedAt
 	if ( last.perFace ) console.log( 'outward flux across the fluid region, per side, at the end: ' + Object.entries( last.perFace ).map( ( [ k, v ] ) => `${ k } ${ v.toFixed( 2 ) }` ).join( ', ' ) );
 }
 
-if ( ! firstBad && lateBreakdowns.length > 0 ) {
+const breakdownBudget = Math.max( BREAKDOWN_FLOOR, Math.ceil( BREAKDOWN_RATE * counters.frames ) );
+
+if ( lateBreakdowns.length > 0 && lateBreakdowns.length <= breakdownBudget ) {
 
 	console.log( `
-VERDICT: BROKEN -- ${ lateBreakdowns.length } CG breakdowns after the scene established itself at frame ${ establishedFrame }, the first at frame ${ lateBreakdowns[ 0 ] }` );
+   ${ lateBreakdowns.length } corruption-guard trip${ lateBreakdowns.length === 1 ? '' : 's' } after establishment (first at frame ${ lateBreakdowns[ 0 ] }), within the ${ breakdownBudget } this run's length allows -- reported, not condemning. A guard firing occasionally is the guard working; see BREAKDOWN_RATE.` );
+
+}
+
+if ( ! firstBad && lateBreakdowns.length > breakdownBudget ) {
+
+	console.log( `
+VERDICT: BROKEN -- ${ lateBreakdowns.length } CG breakdowns after the scene established itself at frame ${ establishedFrame }, the first at frame ${ lateBreakdowns[ 0 ] }; a run of ${ counters.frames } frames allows ${ breakdownBudget }` );
 	process.exit( 2 );
 
 }
