@@ -1516,6 +1516,53 @@ judge convergence**, and the larger iteration budget from the derived cap later
 turned a quiet failure into a loud one. That is the second time this week a
 coverage gap turned out to be hiding something rather than merely being open.
 
+### Root cause, and a criterion that was too strict by an arbitrary margin
+
+**The scene stated no tolerance**, so it inherited 1e-6, far beneath anything its
+pressure problem reaches. A budget spent below the reachable residual is a budget
+spent grinding in rounding noise: `pAp-growth` trips on `p` compounding
+geometrically, and the circuit breaker reverts the corrupted pressure.
+
+Candidates, 12,000 frames each:
+
+| tolerance | converged | reverted | guard trips | residual / floor |
+| --- | --- | --- | --- | --- |
+| 1e-6 | 375 / 12,001 | 9,581 | 366 | BROKEN on the residual, 2.72e+4 |
+| **1e-4** | **11,991 / 12,001** | **0** | **1, at frame 5** | **2.6** |
+| 1e-3 | 12,001 / 12,001 | 0 | 0 | 24.7 |
+
+1e-4 is the choice: 1e-3 converges everywhere but stops twenty-five times above
+what the arithmetic allows, and 1e-4 sits at 2.6x with a worst residual of
+4.26e-4 -- twenty-four times inside the health probe's own 1e-2 bar.
+
+**And at 1e-4 the verdict still read BROKEN, on one guard trip at frame 5.** That
+was the criterion rather than the scene: examples 17, 19, 34 and 35 each trip
+exactly once too, at frame 0, and pass only because frame 0 is the establishment
+frame. Nothing distinguishes a trip at frame 0 from one at frame 5 on an
+impulsively started scene.
+
+So the criterion judges the rate now, calibrated on both sides from runs already
+in hand:
+
+| | breakdown rate | other evidence |
+| --- | --- | --- |
+| must fail: 24 @ 1e-6 | 13.0% | 321 frames reverted |
+| must fail: 24 @ 1e-5 | 1.5% | 34 reverted |
+| must fail: 25 @ 1e-6 | 1.46% | residual 1.54e+1 |
+| must pass: 24 @ 1e-4 | 0.008% | 0 reverted, residual 4.26e-4 |
+| must pass: 35, 17, 19, 34 | 0.008% | — |
+
+The highest rate that must pass is 0.05%, the lowest that must fail 1.46% --
+twenty-nine times apart -- so the threshold is 0.5%, ten times above one and three
+times below the other, with a floor of two trips because one trip must never
+condemn a run whatever its length.
+
+Verified both ways, which is the only evidence that justifies relaxing a
+criterion: example 24 with its measured 1e-4 is **HEALTHY over 12,001 frames**
+(11,991 converged, zero reverted, the frame-5 trip reported and not condemning),
+and the same scene forced back to 1e-6 is **still BROKEN** -- failing on the
+residual criterion at 2.72e+4, never reaching the breakdown one.
+
 ---
 
 # The 2026-09-15 run (superseded, kept for the record)
