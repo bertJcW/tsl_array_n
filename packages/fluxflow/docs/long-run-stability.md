@@ -1453,7 +1453,7 @@ not be filed as their idea.
 
 ---
 
-# The whole suite, 2026-10-04: 18 scenes, 216,018 solver steps
+# The whole suite, 2026-10-04: 18 scenes, 216,018 solver steps, all healthy
 
 The first full-suite sweep since everything this document describes -- the
 determinism fixes, the per-scene tolerances, the derived iteration cap. 12,000
@@ -1471,7 +1471,7 @@ steps each, run sequentially so the fps column means something. `node long_run.m
 | 21 irregular container | HEALTHY (narrow) | 39 |
 | 22 multiple colliders | HEALTHY (narrow) | 34 |
 | 23 moving collider | HEALTHY (narrow) | 40 |
-| **24 two-phase bubble rise** | **BROKEN** | **8** |
+| 24 two-phase bubble rise | HEALTHY (narrow) | 33 |
 | 25 dye injection | HEALTHY (narrow) | 40 |
 | 26 dye in free surface | HEALTHY (narrow) | 41 |
 | 28 drop into pool | HEALTHY (narrow) | 37 |
@@ -1480,18 +1480,24 @@ steps each, run sequentially so the fps column means something. `node long_run.m
 | 34 smoke plume 3D | HEALTHY (narrow) | 59 |
 | 35 Kármán vortex street 3D | HEALTHY | 58 |
 
-**17 of 18 healthy, 14 of those narrow passes**, in 106 minutes of wall clock.
+**18 of 18 healthy, 15 of those narrow passes**, in 86 minutes of wall clock.
+
+The table above is the sweep re-run after example 24 was fixed. The first sweep,
+before the fix, had 24 BROKEN at 8 fps and took 106 minutes; the twenty minutes
+of difference were that one scene burning its whole iteration budget on every
+frame. What that sweep found, and what it cost to find, is the section below.
 "Narrow" is the scope of the pass, not a hedge: a scene with no inlet has the
 flux and mass-balance criteria out of scope, so what applied was finiteness, the
 projection residual and the CG guards. Only 15, 16 and 35 -- the three with an
 inlet -- were judged on every criterion.
 
-The fps column is worth reading beside the verdicts. Everything healthy runs at
-30 to 59 fps; **the broken scene runs at 8**, because a scene that cannot
-converge spends its whole iteration budget on every frame. Slowness and
-brokenness have the same cause here, which is a useful thing to know about this
-failure mode: it is visible from the frame rate before anyone measures a
-residual.
+The fps column is worth reading beside the verdicts. Before the fix the broken
+scene ran at **8 fps** against 30-59 for everything else, and after it runs at
+**33** -- a four-fold speedup that came from fixing correctness, not from
+optimising anything. A scene that cannot converge spends its whole iteration
+budget every frame, so slowness and brokenness have one cause here, and the frame
+rate shows it before anyone measures a residual. That is worth remembering as a
+first-pass diagnostic: in this suite, the slowest scene was the broken one.
 
 ## 24-two-phase-bubble-rise, and what it says about the verdict
 
