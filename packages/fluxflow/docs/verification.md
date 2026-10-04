@@ -13,6 +13,10 @@ finding it. This file is the method that replaced the one that missed it.
 Five layers, each answering a different question, and three rules the layers
 are worth nothing without.
 
+`lessons.md` is the companion to this file: where this one says how a solver is
+verified, that one collects what the verifying taught -- the cost model, the
+platform limits, and the mistakes as shapes rather than as incidents.
+
 ---
 
 ## The three rules

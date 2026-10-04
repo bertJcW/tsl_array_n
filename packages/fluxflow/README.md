@@ -9,7 +9,12 @@ Browser-side GPU fluid simulation, built on [tsl_array_n](../tsl_array_n), porte
 The status paragraph above is a running summary; the reasoning behind it
 lives in `docs/`.
 
-- **[`docs/project-history.md`](docs/project-history.md)** -- start here.
+- **[`docs/lessons.md`](docs/lessons.md)** -- the cross-cutting index: the cost
+  model every optimisation argument reduces to, what made it faster, what was
+  rejected by measurement, the WebGPU and WGSL limits that cost real time, the
+  mistakes as transferable shapes rather than incidents, and the mechanisms that
+  came out of them. The shortest path to "what should I already know".
+- **[`docs/project-history.md`](docs/project-history.md)** -- the narrative.
   The research, debugging, performance and testing arc in one narrative:
   what was tried, what was measured, what turned out to be wrong, and the
   methodology lessons that came out of the wrong turns.
